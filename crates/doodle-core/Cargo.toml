@@ -11,6 +11,8 @@ publish = false
 workspace = true
 
 [dependencies]
+unicode-ident = "1"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 insta = "1"

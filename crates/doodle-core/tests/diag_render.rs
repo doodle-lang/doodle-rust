@@ -267,3 +267,34 @@ fn crlf_line_ending_is_stripped_from_the_snippet() {
     );
     insta::assert_snapshot!(render_diagnostic(&d, &view("crlf.doodle", source)));
 }
+
+#[test]
+fn nfc_normalized_source_positions_a_caret_correctly() {
+    // A decomposed é (`e` + U+0301) NFC-normalizes to `café`; rendering over the
+    // normalized source produces a code-point-derived caret byte-identical to
+    // rendering the already-composed source — NFC-on-load (L§3.1) and S-1
+    // code-point columns line up.
+    let decomposed = "cafe\u{301} = draw(a < b < c)\n";
+    let nfc = doodle_core::source::normalize(decomposed);
+    let d = Diagnostic::error(
+        DiagnosticCode::ChainedComparison,
+        M,
+        span_of(nfc.as_ref(), "a < b < c"),
+        "comparison operators don't chain",
+    );
+    let rendered = render_diagnostic(&d, &view("café.doodle", nfc.as_ref()));
+
+    let composed = "café = draw(a < b < c)\n";
+    let d2 = Diagnostic::error(
+        DiagnosticCode::ChainedComparison,
+        M,
+        span_of(composed, "a < b < c"),
+        "comparison operators don't chain",
+    );
+    assert_eq!(
+        rendered,
+        render_diagnostic(&d2, &view("café.doodle", composed))
+    );
+
+    insta::assert_snapshot!(rendered);
+}
