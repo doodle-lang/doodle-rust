@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: "render_diagnostic(&d, &view(\"f.doodle\", source))"
+---
+error[unterminated-string]: this block string is never closed
+  --> f.doodle:2:7
+2 |   x = """
+  |       ^^^

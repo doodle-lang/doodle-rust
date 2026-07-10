@@ -1,0 +1,35 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: d
+---
+Diagnostic {
+    severity: Error,
+    code: ChainedComparison,
+    message: "comparison operators don't chain",
+    module: Some(
+        ModuleId(
+            0,
+        ),
+    ),
+    span: Some(
+        Span {
+            start: 13,
+            end: 22,
+        },
+    ),
+    notes: [],
+    suggestion: Some(
+        Suggestion {
+            message: "write `a < b and b < c` instead",
+            replacement: Some(
+                Replacement {
+                    span: Span {
+                        start: 13,
+                        end: 22,
+                    },
+                    text: "a < b and b < c",
+                },
+            ),
+        },
+    ),
+}

@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: "render_diagnostic(&d, &view(\"unicode.doodle\", source))"
+---
+error[chained-comparison]: comparison operators don't chain
+  --> unicode.doodle:1:9
+1 | café = (a < b < c)
+  |         ^^^^^^^^^

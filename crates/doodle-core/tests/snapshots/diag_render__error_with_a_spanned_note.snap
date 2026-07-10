@@ -1,0 +1,12 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: "render_diagnostic(&d, &view(\"consts.doodle\", source))"
+---
+error[const-reassignment]: can't reassign `pi` — it's a constant
+  --> consts.doodle:2:3
+2 |   pi = 4
+  |   ^^^^^^
+note: `pi` is declared const here
+  --> consts.doodle:1:1
+1 | const pi = 3
+  | ------------

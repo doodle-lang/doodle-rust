@@ -1,0 +1,32 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: d
+---
+Diagnostic {
+    severity: Error,
+    code: ConstReassignment,
+    message: "can't reassign `pi` — it's a constant",
+    module: Some(
+        ModuleId(
+            0,
+        ),
+    ),
+    span: Some(
+        Span {
+            start: 15,
+            end: 21,
+        },
+    ),
+    notes: [
+        Note {
+            message: "`pi` is declared const here",
+            span: Some(
+                Span {
+                    start: 0,
+                    end: 12,
+                },
+            ),
+        },
+    ],
+    suggestion: None,
+}

@@ -1,0 +1,5 @@
+---
+source: crates/doodle-core/tests/diag_render.rs
+expression: "render_diagnostic(&d, &view(\"nowhere.doodle\", \"\"))"
+---
+error[unterminated-string]: a diagnostic with no source location
