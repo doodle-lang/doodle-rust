@@ -69,3 +69,17 @@ jobs:
             echo "expected the gate to fail with a 1-byte budget"
             exit 1
           fi
+
+  capi:
+    name: capi (header + C smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: Install cbindgen (pinned; must match scripts/capi-header.sh)
+        run: cargo install cbindgen --locked --version 0.29.4
+      - name: Check doodle.h is current
+        run: ./scripts/capi-header.sh
+      - name: C smoke test
+        run: ./scripts/capi-smoke.sh

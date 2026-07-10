@@ -1,0 +1,19 @@
+[package]
+name = "doodle-capi"
+description = "The Doodle engine's C ABI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# A cdylib is what the C smoke test links against. A staticlib (for static
+# embedding) will be added with its own smoke test when a consumer needs it.
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+doodle-core = { path = "../doodle-core" }
