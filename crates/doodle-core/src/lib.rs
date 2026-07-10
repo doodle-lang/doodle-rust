@@ -6,7 +6,17 @@
 //! implementation plan (`discussions/plan/implementation.md`) for the
 //! architecture (AD1–AD8) and milestone schedule.
 //!
-//! Currently a placeholder: milestone M0 (scaffolding) is in progress.
+//! The crate currently holds the milestone-M0 **pipeline skeleton**: the
+//! module shells the front end and machine will fill in ([`span`], [`diag`],
+//! [`ast`], [`machine`], [`drive`]), plus a [`drive::run`] that executes a
+//! hand-built one-statement program to completion. The parser and the machine
+//! core (heap, frames, GC — machine-design §4+) arrive at M1 and M2a.
+
+pub mod ast;
+pub mod diag;
+pub mod drive;
+pub mod machine;
+pub mod span;
 
 /// Returns the version of the doodle-core crate.
 pub fn version() -> &'static str {
