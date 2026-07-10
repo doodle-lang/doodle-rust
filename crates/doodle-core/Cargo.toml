@@ -3,6 +3,7 @@ name = "doodle-core"
 description = "The Doodle engine: front end, resumable machine, heap/GC, and embedding API."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 repository.workspace = true
 publish = false
 

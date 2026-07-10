@@ -27,3 +27,7 @@ directory, so adding a check is just dropping a script in). Run locally with:
 ```
 
 A run is green only if the final line reads `=== N hygiene check(s) passed ===`.
+
+## License
+
+[MIT](LICENSE)

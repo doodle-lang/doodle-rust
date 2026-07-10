@@ -12,11 +12,8 @@ yanked = "deny"
 
 [licenses]
 version = 2
-# Workspace crates are publish = false and carry no license yet: the license
-# of doodle-rust itself is open decision D-3 in the implementation plan and
-# deliberately not yet declared. Drop this once D-3 is resolved.
-private = { ignore = true }
-# Conservative allowlist for dependencies.
+# Conservative allowlist. Workspace crates are MIT (LICENSE at the repo
+# root); dependencies must fit the list below.
 allow = [
     "MIT",
     "Apache-2.0",

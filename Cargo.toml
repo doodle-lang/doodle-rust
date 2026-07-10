@@ -5,8 +5,8 @@ members = ["crates/doodle-core"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
+license = "MIT"
 repository = "https://github.com/doodle-lang/doodle-rust"
-# license: deliberately unset — open decision D-3 in the implementation plan.
 
 [workspace.lints.rust]
 missing_docs = "warn"
