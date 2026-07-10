@@ -51,3 +51,21 @@ jobs:
         run: rustup toolchain install
       - name: conformance runner
         run: cargo run --quiet --package conformance-runner
+
+  wasm-size:
+    name: wasm size gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: Install binaryen and brotli
+        run: sudo apt-get update && sudo apt-get install -y binaryen brotli
+      - name: wasm size gate
+        run: ./scripts/wasm-size.sh
+      - name: wasm size gate rejects an over-budget artifact
+        run: |
+          if WASM_BUDGET_BYTES=1 ./scripts/wasm-size.sh; then
+            echo "expected the gate to fail with a 1-byte budget"
+            exit 1
+          fi

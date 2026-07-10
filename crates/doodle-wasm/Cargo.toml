@@ -1,0 +1,18 @@
+[package]
+name = "doodle-wasm"
+description = "The Doodle engine compiled to WebAssembly via wasm-bindgen."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+doodle-core = { path = "../doodle-core" }
+wasm-bindgen = "0.2"
