@@ -1,0 +1,55 @@
+name: Code hygiene
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Every check in scripts/hygiene/ runs as its own job, so each gets its own
+# pass/fail in the UI.  The job list is enumerated from the directory, so adding
+# a check is just dropping a script into scripts/hygiene/ -- no edit here.
+# (lib.sh is a sourced helper, not a check; it is excluded like run.sh.)
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.enumerate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: enumerate
+        run: |
+          checks=$(ls scripts/hygiene/*.sh \
+            | grep -v '/run\.sh$' \
+            | grep -v '/lib\.sh$' \
+            | xargs -n1 basename \
+            | sed 's/\.sh$//' \
+            | jq -R . | jq -sc .)
+          echo "matrix={\"check\":$checks}" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: list
+    runs-on: ubuntu-latest
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.list.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # The cargo-* checks need the pinned toolchain (rustup on the runner
+      # auto-installs the toolchain, components, and targets declared in
+      # rust-toolchain.toml on first cargo invocation).  cargo-deny
+      # additionally needs the cargo-deny binary.  The other checks are pure
+      # shell and need nothing.
+      - name: Warm toolchain
+        if: startsWith(matrix.check, 'cargo-')
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install cargo-deny
+        if: matrix.check == 'cargo-deny'
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: ${{ matrix.check }}
+        run: ./scripts/hygiene/${{ matrix.check }}.sh

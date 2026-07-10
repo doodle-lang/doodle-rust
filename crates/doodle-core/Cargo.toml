@@ -1,0 +1,12 @@
+[package]
+name = "doodle-core"
+description = "The Doodle engine: front end, resumable machine, heap/GC, and embedding API."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

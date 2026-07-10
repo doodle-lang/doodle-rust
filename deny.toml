@@ -1,0 +1,37 @@
+# cargo-deny configuration (checked by scripts/hygiene/cargo-deny.sh).
+#
+# Dependency discipline per implementation-plan AD8: advisories, license
+# allowlist, source restrictions, and duplicate-version warnings.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Workspace crates are publish = false and carry no license yet: the license
+# of doodle-rust itself is open decision D-3 in the implementation plan and
+# deliberately not yet declared. Drop this once D-3 is resolved.
+private = { ignore = true }
+# Conservative allowlist for dependencies.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

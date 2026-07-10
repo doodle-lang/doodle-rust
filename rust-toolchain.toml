@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned per implementation-plan AD1 (stable, pinned via rust-toolchain.toml).
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
