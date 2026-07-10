@@ -41,3 +41,13 @@ jobs:
         run: rustup toolchain install
       - name: cargo check (wasm32)
         run: cargo check --workspace --target wasm32-unknown-unknown
+
+  conformance:
+    name: conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: conformance runner
+        run: cargo run --quiet --package conformance-runner

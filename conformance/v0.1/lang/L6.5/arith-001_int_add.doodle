@@ -1,0 +1,4 @@
+#! clause: L6.5
+#! mode: run
+#! expect-out: 3
+print(1 + 2)

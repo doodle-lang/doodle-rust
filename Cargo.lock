@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "conformance-runner"
+version = "0.0.1"
+dependencies = [
+ "doodle-core",
+]
+
+[[package]]
 name = "doodle-core"
 version = "0.0.1"

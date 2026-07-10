@@ -1,0 +1,14 @@
+[package]
+name = "conformance-runner"
+description = "Runs the Doodle language conformance suite against doodle-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+doodle-core = { path = "../../crates/doodle-core" }

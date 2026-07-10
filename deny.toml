@@ -27,7 +27,11 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
+# Ban unpinned (`*`) versions on external crates, but allow workspace-internal
+# path dependencies to omit a version, as they normally do (e.g. the
+# conformance-runner tool depending on doodle-core by path).
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

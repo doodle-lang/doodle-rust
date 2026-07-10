@@ -8,15 +8,18 @@
 //!
 //! The crate currently holds the milestone-M0 **pipeline skeleton**: the
 //! module shells the front end and machine will fill in ([`span`], [`diag`],
-//! [`ast`], [`machine`], [`drive`]), plus a [`drive::run`] that executes a
-//! hand-built one-statement program to completion. The parser and the machine
-//! core (heap, frames, GC — machine-design §4+) arrive at M1 and M2a.
+//! [`ast`], [`machine`], [`drive`]), a [`stage`] entry point reporting which
+//! pipeline stages are implemented (none yet), plus a [`drive::run`] that
+//! executes a hand-built one-statement program to completion. The parser and
+//! the machine core (heap, frames, GC — machine-design §4+) arrive at M1 and
+//! M2a.
 
 pub mod ast;
 pub mod diag;
 pub mod drive;
 pub mod machine;
 pub mod span;
+pub mod stage;
 
 /// Returns the version of the doodle-core crate.
 pub fn version() -> &'static str {

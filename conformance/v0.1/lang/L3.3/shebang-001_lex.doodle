@@ -1,0 +1,5 @@
+#!/usr/bin/env doodle
+#! clause: L3.3
+#! mode: static
+#! stage: lex
+print("hello, world")
