@@ -21,9 +21,16 @@ pub struct Position {
     pub column: u32,
 }
 
-/// NFC-normalizes raw source text on load (L§3.1). Borrows if already NFC.
+/// Canonicalizes raw source on load (L§3.1): a CRLF (CR immediately before LF,
+/// §3.2) becomes a single LF, then NFC. Borrows when `raw` needs no change. A
+/// lone CR (not before LF) is not a line ending (§3.2) and is left as is.
 pub fn normalize(raw: &str) -> Cow<'_, str> {
-    unicode::nfc(raw)
+    if raw.contains("\r\n") {
+        // CRLF -> LF, then NFC; owned either way.
+        Cow::Owned(unicode::nfc(&raw.replace("\r\n", "\n")).into_owned())
+    } else {
+        unicode::nfc(raw)
+    }
 }
 
 /// The column width of a source slice, in code points (S-1). This is the single
@@ -184,13 +191,17 @@ mod tests {
     }
 
     #[test]
-    fn crlf_column_counts_the_carriage_return() {
-        // With no load-time CRLF->LF (deferred spec-delta), the CR is a code
-        // point on its line: in "a\r\nb", the CR is line 1 column 2 and `b` is
-        // line 2 column 1.
-        let s = "a\r\nb";
-        let ix = LineIndex::new(s);
-        assert_eq!(ix.position_at(s, 1), Position { line: 1, column: 2 }); // CR
-        assert_eq!(ix.position_at(s, 3), Position { line: 2, column: 1 }); // 'b'
+    fn crlf_is_normalized_to_lf_on_load() {
+        // Load canonicalizes CRLF -> LF (L§3.1), so the source model and lexer
+        // see LF-only text and positions are clean.
+        let normalized = normalize("a\r\nb\r\nc");
+        assert_eq!(normalized.as_ref(), "a\nb\nc");
+        let ix = LineIndex::new(normalized.as_ref());
+        assert_eq!(
+            ix.position_at(normalized.as_ref(), 2),
+            Position { line: 2, column: 1 }
+        ); // 'b'
+        // A lone CR (not before LF) is not a line ending and is left as is.
+        assert_eq!(normalize("a\rb").as_ref(), "a\rb");
     }
 }

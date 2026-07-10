@@ -4,13 +4,10 @@
 //! UCD-version pins live in a single place.
 //!
 //! Identifier classification uses UAX#31 **`XID_Start`/`XID_Continue`** (via
-//! `unicode-ident`) — the NFC-closed variants, the right choice for a language
-//! that NFC-normalizes source and compares identifiers by NFC equality
-//! (L§3.1/§3.4): an `XID` identifier stays valid after normalization, whereas
-//! the plain `ID_*` sets are not closed under NFC. L§3.4 currently writes the
-//! non-closed `ID_Start`/`ID_Continue`; that divergence is filed as a spec-delta
-//! (recommend L§3.4 → `XID`). The two differ only at a few code points (e.g.
-//! U+037A).
+//! `unicode-ident`), matching L§3.4: the NFC-closed variants, so an identifier
+//! stays valid after the NFC normalization L applies (L§3.1). The plain `ID_*`
+//! sets are not NFC-closed and differ from `XID` only at a few code points
+//! (e.g. U+037A).
 
 use std::borrow::Cow;
 use unicode_normalization::UnicodeNormalization;
@@ -110,5 +107,12 @@ mod tests {
         assert!(!is_module_name("mod-name"));
         assert!(!is_module_name("café")); // non-ASCII not allowed in module names
         assert!(!is_module_name(""));
+    }
+
+    #[test]
+    fn uses_xid_not_id() {
+        // U+037A (GREEK YPOGEGRAMMENI) is ID_Continue but NOT XID_Continue;
+        // using XID (L§3.4) means it is not an identifier-continue character.
+        assert!(!is_ident_continue('\u{037A}'));
     }
 }
