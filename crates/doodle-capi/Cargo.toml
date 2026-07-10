@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# A cdylib is what the C smoke test links against. A staticlib (for static
-# embedding) will be added with its own smoke test when a consumer needs it.
+# A staticlib is the embedding-friendly form: the C host links the archive
+# directly into its own binary (one artifact, nothing to locate at runtime, far
+# less cross-platform loader variance than a dynamic library). The C smoke test
+# links it statically. A cdylib would be added only if a dynamic-loading /
+# plugin consumer needs one.
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["staticlib"]
 
 [lints]
 workspace = true
