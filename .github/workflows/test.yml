@@ -1,0 +1,43 @@
+name: Build & test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# `cargo test --workspace` on the three host platforms, plus a wasm32 build
+# check.  The pinned toolchain -- channel, rustfmt/clippy components, and the
+# wasm32-unknown-unknown target -- all come from rust-toolchain.toml: the warm
+# step's argument-free `rustup toolchain install` reads that file and installs
+# exactly what it declares, so nothing is pinned here.  Keeping the warm step a
+# single argument-free command makes it behave identically under the default
+# shells (bash on Linux/macOS, PowerShell on Windows).
+#
+# Deferred per implementation-plan AD8: Node-executed wasm tests land with the
+# JS facade at M3, and a Miri job at M2a once doodle-core has nontrivial code.
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: cargo test
+        run: cargo test --workspace
+
+  wasm-check:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: cargo check (wasm32)
+        run: cargo check --workspace --target wasm32-unknown-unknown
