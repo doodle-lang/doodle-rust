@@ -26,6 +26,14 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Fuzz seam (placeholder): consumes arbitrary bytes without panicking,
+/// establishing the `fuzz/` plumbing. The real lexer/parser entry points
+/// replace it at M1. Not part of the stable API.
+#[doc(hidden)]
+pub fn fuzz_smoke(input: &[u8]) {
+    let _ = std::str::from_utf8(input);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

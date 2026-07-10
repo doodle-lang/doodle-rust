@@ -1,0 +1,23 @@
+[package]
+name = "doodle-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+doodle-core = { path = "../crates/doodle-core" }
+
+[[bin]]
+name = "fuzz_smoke"
+path = "fuzz_targets/fuzz_smoke.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace so the fuzz crate (built on nightly with cargo-fuzz) is not
+# pulled into the pinned-stable parent workspace's build/clippy/test.
+[workspace]

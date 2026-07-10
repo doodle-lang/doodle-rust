@@ -1,0 +1,42 @@
+---
+source: crates/doodle-core/tests/ast_snapshot.rs
+expression: ast
+---
+Ast {
+    nodes: [
+        IntLit(
+            42,
+        ),
+        ExprStmt(
+            NodeId(
+                0,
+            ),
+        ),
+        Module(
+            [
+                NodeId(
+                    1,
+                ),
+            ],
+        ),
+    ],
+    spans: [
+        Span {
+            start: 0,
+            end: 2,
+        },
+        Span {
+            start: 0,
+            end: 2,
+        },
+        Span {
+            start: 0,
+            end: 2,
+        },
+    ],
+    root: Some(
+        NodeId(
+            2,
+        ),
+    ),
+}
