@@ -38,6 +38,11 @@ pub enum Node {
     BoolLit(bool),
     /// The `nil` literal (L§3.6.6).
     NilLit,
+    /// A string literal (L§3.6.3/§3.6.4): decoded text runs interleaved with
+    /// interpolated expressions (§6.7).
+    StrLit(Vec<StrPart>),
+    /// A bytes literal `b"…"` (L§3.6.5): the decoded byte sequence.
+    BytesLit(Vec<u8>),
     /// An identifier reference (L§3.4); the resolver binds it later.
     Ident(Box<str>),
     /// A prefix unary operation (L§6.5).
@@ -62,6 +67,16 @@ pub enum Node {
     Module(Vec<NodeId>),
     /// A placeholder for a syntax error, so parsing can recover and continue.
     Error,
+}
+
+/// One piece of a string literal (L§3.6.3): a decoded text run or an
+/// interpolated expression.
+#[derive(Clone, Debug)]
+pub enum StrPart {
+    /// A run of decoded literal text (escapes applied, `{{`/`}}` collapsed).
+    Text(Box<str>),
+    /// An interpolated expression `{ … }` (§6.7).
+    Interp(NodeId),
 }
 
 /// A prefix unary operator (L§6.5).

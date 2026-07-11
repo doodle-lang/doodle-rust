@@ -2,13 +2,17 @@
 //! producing the [`Ast`] arena. Numeric value lowering (digits → `i64`/bignum/
 //! `f64`) happens here — the lexer validated only shape (M1.3).
 //!
-//! M1.6a covers the operator-precedence tower (L§6.5): literal and identifier
+//! M1.6a–b cover the operator-precedence tower (L§6.5) — literal/identifier
 //! primaries, prefix `-`/`+`/`not`, the nine binary levels with right-associative
 //! `**` and non-associative comparisons (`a < b < c` is a static error), and
-//! parenthesized grouping. Strings, calls/postfix, list/dict literals, and the
-//! `if`/`try`/anonymous-`fn` forms arrive in later M1.6 pieces.
+//! parenthesized grouping — plus string and bytes literals, with escape decoding
+//! and `{ … }` interpolation assembled from the lexer's structured stream (the
+//! `decode` submodule). Calls/postfix, list/dict literals, and the `if`/`try`/
+//! anonymous-`fn` forms arrive in later M1.6 pieces.
 
-use crate::ast::{Ast, BinaryOp, Node, NodeId, UnaryOp};
+mod decode;
+
+use crate::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::diag::Diagnostic;
 use crate::diag::code::DiagnosticCode;
 use crate::lex::{Keyword, Lexed, TokenKind, lex};
@@ -180,9 +184,17 @@ impl Parser<'_> {
                 let name = self.source[span.start as usize..span.end as usize].into();
                 self.push(Node::Ident(name), span)
             }
+            TokenKind::StrStart => self.string_lit(span),
+            TokenKind::Bytes => {
+                self.advance();
+                let node = self.decode_bytes_literal(span);
+                self.push(node, span)
+            }
             TokenKind::LParen => self.grouping(),
-            // Eof is not consumed, so the caller's loops terminate.
-            TokenKind::Eof => {
+            // These never start an expression and are not consumed, so the
+            // caller's loops (and string_lit's interpolation handling) can act
+            // on them without a double error.
+            TokenKind::Eof | TokenKind::InterpEnd | TokenKind::StrEnd => {
                 self.error(span, "expected an expression");
                 self.push(Node::Error, span)
             }
@@ -210,6 +222,80 @@ impl Parser<'_> {
             self.error(span, "expected a `)` to close this group");
         }
         inner
+    }
+
+    /// Assembles a string literal from the structured stream `StrStart (StrText
+    /// | interpolation)* StrEnd`, decoding escapes and parsing each `{ … }`.
+    /// Adjacent decoded text (including triple-quoted `\n`-join chunks) merges
+    /// into one `Text` part.
+    fn string_lit(&mut self, start_span: Span) -> NodeId {
+        let source = self.source;
+        self.advance(); // StrStart
+        let mut parts = Vec::new();
+        let mut acc = String::new();
+        let mut end = start_span.end;
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::StrText) => {
+                    let sp = self.peek_span();
+                    self.advance();
+                    let (text, dangling) =
+                        decode::decode_text(&source[sp.start as usize..sp.end as usize]);
+                    if let Some(off) = dangling {
+                        let at = sp.start + off as u32;
+                        self.error(
+                            Span::new(at, at + 1),
+                            "a backslash here isn't a valid escape",
+                        );
+                    }
+                    acc.push_str(&text);
+                }
+                Some(TokenKind::InterpStart) => {
+                    flush_text(&mut parts, &mut acc);
+                    self.advance();
+                    // An empty interpolation was already diagnosed by the lexer;
+                    // skip it rather than pile on an "expected expression".
+                    if matches!(self.peek_kind(), Some(TokenKind::InterpEnd)) {
+                        self.advance();
+                    } else {
+                        let expr = self.expr(0);
+                        if matches!(self.peek_kind(), Some(TokenKind::InterpEnd)) {
+                            self.advance();
+                        } else {
+                            let sp = self.peek_span();
+                            self.error(sp, "expected `}` to close this interpolation");
+                        }
+                        parts.push(StrPart::Interp(expr));
+                    }
+                }
+                Some(TokenKind::StrEnd) => {
+                    end = self.peek_span().end;
+                    self.advance();
+                    break;
+                }
+                // The lexer always balances StrStart/StrEnd (a synthetic StrEnd
+                // even for an unterminated string), so this stops rather than
+                // loops on an otherwise-impossible malformed stream.
+                _ => break,
+            }
+        }
+        flush_text(&mut parts, &mut acc);
+        self.push(Node::StrLit(parts), Span::new(start_span.start, end))
+    }
+
+    /// Decodes a bytes literal `b"…"` to its byte sequence.
+    fn decode_bytes_literal(&mut self, span: Span) -> Node {
+        let text = &self.source[span.start as usize..span.end as usize];
+        let inner = text.strip_prefix("b\"").unwrap_or(text);
+        let (bytes, dangling) = decode::decode_bytes(inner);
+        if let Some(off) = dangling {
+            let at = span.start + 2 + off as u32; // past the `b"` prefix
+            self.error(
+                Span::new(at, at + 1),
+                "a backslash here isn't a valid escape",
+            );
+        }
+        Node::BytesLit(bytes)
     }
 
     fn peek_kind(&self) -> Option<TokenKind> {
@@ -249,6 +335,13 @@ impl Parser<'_> {
         }
         self.diagnostics
             .push(Diagnostic::error(code, self.module, span, message));
+    }
+}
+
+/// Flushes accumulated decoded text into a `Text` part, if any.
+fn flush_text(parts: &mut Vec<StrPart>, acc: &mut String) {
+    if !acc.is_empty() {
+        parts.push(StrPart::Text(std::mem::take(acc).into()));
     }
 }
 
