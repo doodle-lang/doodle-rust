@@ -26,6 +26,11 @@ pub enum DiagnosticCode {
     ConstReassignment,
     /// A string literal that reaches end of input unclosed (L§3).
     UnterminatedString,
+    /// A malformed numeric literal — bad underscore, base prefix, or exponent
+    /// (L§3.6.1/§3.6.2).
+    MalformedNumber,
+    /// A character that cannot begin a token here (L§3).
+    UnexpectedCharacter,
     /// A binding that hides an outer one of the same name (L§5.1; a warning).
     Shadowing,
 }
@@ -37,6 +42,8 @@ impl DiagnosticCode {
             DiagnosticCode::ChainedComparison => "chained-comparison",
             DiagnosticCode::ConstReassignment => "const-reassignment",
             DiagnosticCode::UnterminatedString => "unterminated-string",
+            DiagnosticCode::MalformedNumber => "malformed-number",
+            DiagnosticCode::UnexpectedCharacter => "unexpected-character",
             DiagnosticCode::Shadowing => "shadowing",
         }
     }

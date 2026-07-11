@@ -1,0 +1,12 @@
+---
+source: crates/doodle-core/tests/lex.rs
+expression: dump(source)
+---
+Ident                "f" @ 1:1
+LParen               "(" @ 1:2
+Ident                "a" @ 2:3
+Comma                "," @ 2:4
+Ident                "b" @ 3:3
+RParen               ")" @ 4:1
+Newline              "\n" @ 4:2
+Eof                  "" @ 5:1

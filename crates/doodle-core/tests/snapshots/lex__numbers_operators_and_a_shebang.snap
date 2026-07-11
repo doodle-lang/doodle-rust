@@ -1,0 +1,16 @@
+---
+source: crates/doodle-core/tests/lex.rs
+expression: dump(source)
+---
+Keyword(Let)         "let" @ 2:1
+Ident                "x" @ 2:5
+Eq                   "=" @ 2:7
+Int                  "0xFF" @ 2:9
+Plus                 "+" @ 2:14
+Float                "3.14" @ 2:16
+SlashSlash           "//" @ 2:21
+Int                  "2" @ 2:24
+StarStar             "**" @ 2:26
+Ident                "n" @ 2:29
+Newline              "\n" @ 2:30
+Eof                  "" @ 3:1

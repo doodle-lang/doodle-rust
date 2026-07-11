@@ -17,11 +17,14 @@
 pub mod ast;
 pub mod diag;
 pub mod drive;
+pub mod lex;
 pub mod machine;
 pub mod source;
 pub mod span;
 pub mod stage;
 pub mod unicode;
+
+pub use lex::lex_to_diagnostics;
 
 /// Returns the version of the doodle-core crate.
 pub fn version() -> &'static str {

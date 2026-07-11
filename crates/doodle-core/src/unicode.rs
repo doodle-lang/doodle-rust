@@ -22,6 +22,12 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
     }
 }
 
+/// Whether `s` is already in NFC. For preconditions/asserts on load-normalized
+/// text (L§3.1).
+pub fn is_nfc(s: &str) -> bool {
+    unicode_normalization::is_nfc(s)
+}
+
 /// Whether `c` may start an identifier (L§3.4): `_`, or a UAX#31 `XID_Start`
 /// character. `unicode-ident` excludes `_`, so it is added explicitly.
 pub fn is_ident_start(c: char) -> bool {
