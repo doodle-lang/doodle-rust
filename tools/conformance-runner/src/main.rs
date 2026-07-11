@@ -1,18 +1,20 @@
 //! Runs the Doodle conformance suite against doodle-core.
 //!
 //! Discovers `<root>/**/*.doodle` (default root `conformance`), parses each
-//! file's `#!` directive block, and — per the M0 pass policy — SKIPs any test
-//! whose required pipeline stage doodle-core does not implement yet
-//! (`doodle_core::stage::implemented_through`). Reports per-test results, a
-//! clause-coverage summary, and the overall `=== N passed, N failed, N
-//! skipped ===` line, exiting non-zero only on an unexpected result (a FAIL).
+//! file's `#!` directive block, and applies the staged pass policy: a test
+//! whose required pipeline stage doodle-core implements
+//! (`doodle_core::stage::implemented_through`) is executed and its `expect-…`
+//! directives matched against real output; a test above the implemented stage
+//! is SKIPped, not failed. Reports per-test results, a clause-coverage summary,
+//! and the overall `=== N passed, N failed, N skipped ===` line, exiting
+//! non-zero only on a FAIL (a mismatch, or a malformed test file).
 //!
-//! At M0 doodle-core implements no stages, so every test SKIPs and the suite
-//! is green. Execution and expectation matching land with the first stage
-//! (M1); until then, a test that doodle-core reports as executable is a
-//! runner/coordination bug and fails the run loudly.
+//! As of M1.3 the lexer is implemented, so `stage: lex` tests run (matching
+//! `expect-static-error` / `expect-warning`); parse/full/run tests still SKIP
+//! until their stages land.
 
 mod directive;
+mod matcher;
 mod model;
 
 use doodle_core::stage::implemented_through;
@@ -40,8 +42,7 @@ fn main() -> ExitCode {
 fn run(root: &Path) -> Result<usize, String> {
     let files = discover(root)?;
 
-    // No PASS path until execution lands (M1); `passed` stays 0 for now.
-    let passed = 0usize;
+    let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut clause_tests: BTreeMap<String, usize> = BTreeMap::new();
@@ -73,22 +74,36 @@ fn run(root: &Path) -> Result<usize, String> {
                 for clause in &test.clauses {
                     *clause_tests.entry(clause.clone()).or_default() += 1;
                 }
-                if implemented_through().is_some_and(|impl_stage| impl_stage >= test.required) {
-                    return Err(format!(
-                        "doodle-core reports stage {:?} but the runner cannot execute tests \
-                         yet ({}); add execution + expectation matching at M1",
-                        test.required, test.id
-                    ));
-                }
-                println!(
-                    "SKIP  {}  [{}]  mode={:?} stage={:?}  ({} expectation(s), matched from M1)",
+                let executable =
+                    implemented_through().is_some_and(|impl_stage| impl_stage >= test.required);
+                let header = format!(
+                    "{}  [{}]  mode={:?} stage={:?}",
                     test.id,
                     test.clauses.join(","),
                     test.mode,
-                    test.required,
-                    test.expectation_count
+                    test.required
                 );
-                skipped += 1;
+                if !executable {
+                    println!(
+                        "SKIP  {header}  ({} expectation(s), matched once its stage lands)",
+                        test.expectations.len()
+                    );
+                    skipped += 1;
+                } else {
+                    match matcher::execute(&test, &source) {
+                        Ok(()) => {
+                            println!("PASS  {header}");
+                            passed += 1;
+                        }
+                        Err(reasons) => {
+                            println!("FAIL  {header}");
+                            for reason in &reasons {
+                                println!("        {reason}");
+                            }
+                            failed += 1;
+                        }
+                    }
+                }
             }
         }
     }

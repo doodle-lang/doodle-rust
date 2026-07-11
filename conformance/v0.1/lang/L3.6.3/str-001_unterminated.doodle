@@ -1,0 +1,5 @@
+#! clause: L3.6.3
+#! mode: static
+#! stage: lex
+#! expect-static-error: never closed @ 5:9
+let s = "oops

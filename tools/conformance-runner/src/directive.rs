@@ -5,7 +5,8 @@
 //! directive (conformance/README.md). At M0 the block is parsed and
 //! syntax-validated; expectation *matching* begins at M1.
 
-use crate::model::{Mode, Test};
+use crate::model::{Expectation, Mode, Test};
+use doodle_core::source::Position;
 use doodle_core::stage::Stage;
 use std::path::Path;
 
@@ -22,7 +23,7 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
     let mut clauses: Vec<String> = Vec::new();
     let mut mode = Mode::Run;
     let mut stage_directive: Option<Stage> = None;
-    let mut expectation_count = 0usize;
+    let mut expectations: Vec<Expectation> = Vec::new();
 
     for raw in source.lines() {
         let line = raw.trim_start();
@@ -37,11 +38,21 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
                 }
                 "mode" => mode = parse_mode(value)?,
                 "stage" => stage_directive = Some(parse_stage(value)?),
-                "expect-static-error" | "expect-warning" | "expect-raise" => {
-                    parse_positioned(value)?;
-                    expectation_count += 1;
+                "expect-static-error" => {
+                    let (substring, pos) = parse_positioned(value)?;
+                    expectations.push(Expectation::StaticError { substring, pos });
                 }
-                "expect-out" => expectation_count += 1,
+                "expect-warning" => {
+                    let (substring, pos) = parse_positioned(value)?;
+                    expectations.push(Expectation::Warning { substring, pos });
+                }
+                "expect-raise" => {
+                    let (substring, pos) = parse_positioned(value)?;
+                    expectations.push(Expectation::Raise { substring, pos });
+                }
+                "expect-out" => expectations.push(Expectation::Out {
+                    text: value.to_string(),
+                }),
                 other => return Err(format!("unknown directive `#! {other}:`")),
             }
         } else if is_comment_or_blank(line) {
@@ -62,7 +73,7 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
         clauses,
         mode,
         required,
-        expectation_count,
+        expectations,
     })
 }
 
@@ -119,10 +130,10 @@ fn resolve_stage(mode: Mode, stage_directive: Option<Stage>) -> Result<Stage, St
     }
 }
 
-/// Validates a `<substring> @ <line>:<col>` position (the value itself is not
-/// retained at M0 — only its well-formedness is checked).
-fn parse_positioned(value: &str) -> Result<(), String> {
-    let (_substring, pos) = value
+/// Parses a `<substring> @ <line>:<col>` value into its match substring and
+/// 1-based [`Position`] (in the NFC'd source, S-1).
+fn parse_positioned(value: &str) -> Result<(String, Position), String> {
+    let (substring, pos) = value
         .rsplit_once('@')
         .ok_or_else(|| format!("expected `<substring> @ <line>:<col>` in `{value}`"))?;
     let (line, col) = pos
@@ -137,13 +148,24 @@ fn parse_positioned(value: &str) -> Result<(), String> {
         .trim()
         .parse()
         .map_err(|_| format!("bad column number in `{value}`"))?;
-    // Positions are 1-based in the NFC'd source (S-1).
     if line_no == 0 || col_no == 0 {
         return Err(format!(
             "positions are 1-based; got {line_no}:{col_no} in `{value}`"
         ));
     }
-    Ok(())
+    let substring = substring.trim();
+    if substring.is_empty() {
+        // An empty substring would degrade to a position-only match (`contains`
+        // of "" is always true); the format requires expected text.
+        return Err(format!("empty expectation substring in `{value}`"));
+    }
+    Ok((
+        substring.to_string(),
+        Position {
+            line: line_no,
+            column: col_no,
+        },
+    ))
 }
 
 /// Builds the canonical test id `<primary-clause>-<topic>-<seq>` from the
@@ -168,8 +190,21 @@ mod tests {
         assert_eq!(t.mode, Mode::Run);
         assert_eq!(t.required, Stage::Run);
         assert_eq!(t.clauses, ["L6.5"]);
-        assert_eq!(t.expectation_count, 1);
+        assert_eq!(t.expectations.len(), 1);
+        assert!(matches!(&t.expectations[0], Expectation::Out { text } if text == "3"));
         assert_eq!(t.id, "L6.5-arith-001");
+    }
+
+    #[test]
+    fn retains_substring_and_position() {
+        let src = "#! clause: L3.6.1\n#! mode: static\n#! stage: lex\n\
+                   #! expect-static-error: between digits @ 4:5\n1__0\n";
+        let t = parse_test("f.doodle", src).unwrap();
+        let Expectation::StaticError { substring, pos } = &t.expectations[0] else {
+            panic!("expected a StaticError expectation");
+        };
+        assert_eq!(substring, "between digits");
+        assert_eq!((pos.line, pos.column), (4, 5));
     }
 
     #[test]
@@ -235,6 +270,12 @@ mod tests {
     #[test]
     fn zero_position_is_rejected() {
         let src = "#! clause: L1\n#! mode: static\n#! expect-static-error: x @ 0:3\ny\n";
+        assert!(parse_test("f.doodle", src).is_err());
+    }
+
+    #[test]
+    fn empty_expectation_substring_is_rejected() {
+        let src = "#! clause: L1\n#! mode: static\n#! expect-static-error:  @ 1:1\ny\n";
         assert!(parse_test("f.doodle", src).is_err());
     }
 

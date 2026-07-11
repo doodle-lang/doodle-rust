@@ -1,0 +1,5 @@
+#! clause: L3.4
+#! mode: static
+#! stage: lex
+#! expect-static-error: can't start a token @ 5:12
+let café = 🐢

@@ -6,16 +6,17 @@ file format; it was ratified as the M0.4 mini-spec in the `discussions` repo
 (`plan/plan-m0.md`) and moved here. The runner lives at
 `tools/conformance-runner`.
 
-## What runs today (M0)
+## What runs today (M1.3)
 
 The runner discovers tests, parses and syntax-validates each file's directive
 block, and applies the **staged pass policy**: a test whose required pipeline
-stage doodle-core does not implement yet is **SKIP**, not FAIL. At M0
-doodle-core implements no stages (`doodle_core::stage::implemented_through()`
-is `None`), so every test SKIPs and the suite is green. Execution and
-**expectation matching** (comparing declared `expect-*` against real output)
-land with the first implemented stage at M1; today `expect-*` directives are
-validated for well-formedness but not matched.
+stage doodle-core implements is **executed** and its `expect-*` directives
+matched against real output; a test above the implemented stage is **SKIP**,
+not FAIL. As of M1.3 the lexer is implemented
+(`doodle_core::stage::implemented_through()` is `Some(Stage::Lex)`), so
+`stage: lex` tests run — matching `expect-static-error` / `expect-warning`
+against the lexer's diagnostics. `mode: run` and `stage: parse`/`full` tests
+still SKIP until those stages land.
 
 Run it from the repo root:
 

@@ -1,0 +1,5 @@
+#! clause: L3.6.1
+#! clause: L3.6.2
+#! mode: static
+#! stage: lex
+let total = 0xFF + 1_000 * 3.14
