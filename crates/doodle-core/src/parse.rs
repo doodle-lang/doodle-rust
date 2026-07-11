@@ -233,6 +233,11 @@ impl Parser<'_> {
     /// into one `Text` part.
     fn string_lit(&mut self, start_span: Span) -> NodeId {
         let source = self.source;
+        // A chunk-final `\` is only a real error in a triple-quoted string (a
+        // line-final backslash, S-49 × S-3). In a single-line string it can only
+        // arise from `\` before the terminating newline, which the lexer already
+        // reports as unterminated-string — that diagnostic takes precedence.
+        let is_triple = start_span.end - start_span.start == 3;
         self.advance(); // StrStart
         let mut parts = Vec::new();
         let mut acc = String::new();
@@ -244,11 +249,13 @@ impl Parser<'_> {
                     self.advance();
                     let (text, dangling) =
                         decode::decode_text(&source[sp.start as usize..sp.end as usize]);
-                    if let Some(off) = dangling {
+                    if let Some(off) = dangling.filter(|_| is_triple) {
                         let at = sp.start + off as u32;
                         self.error(
                             Span::new(at, at + 1),
-                            "a backslash here isn't a valid escape",
+                            "a backslash can't end a line — write `\\\\` for a literal \
+                             backslash; Doodle doesn't join lines with `\\` (each line of a \
+                             multi-line string is its own line in the value)",
                         );
                     }
                     acc.push_str(&text);

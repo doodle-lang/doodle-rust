@@ -199,10 +199,16 @@ fn triple_quoted_decode_and_line_final_backslash() {
     let ok = "\"\"\"\n    a\\tb\n    c\n    \"\"\"";
     assert_eq!(ast_of(ok), "(str \"a\\tb\\nc\")");
     assert!(diags_of(ok).is_empty());
-    // A line-final `\` is not a valid escape (the closed set, L§3.6.3; S-3
-    // forbids backslash-newline continuation) — reported at decode.
-    let dangling = "\"\"\"\n    a\\\n    b\n    \"\"\"";
-    assert!(diags_of(dangling).contains(&"syntax-error"));
+    // A line-final `\` in a triple-quoted string is an error (closed set,
+    // L§3.6.3, × S-3's no-line-join) — both mid-block and on the last content
+    // line (a `\` at the very end of the value).
+    let mid = "\"\"\"\n    a\\\n    b\n    \"\"\"";
+    assert!(diags_of(mid).contains(&"syntax-error"));
+    let last = "\"\"\"\n    a\\\n    \"\"\"";
+    assert!(diags_of(last).contains(&"syntax-error"));
+    // In a single-line string, unterminated-string takes precedence — no
+    // separate backslash-at-end error.
+    assert_eq!(diags_of("\"abc\\"), vec!["unterminated-string"]);
 }
 
 #[test]
