@@ -1,5 +1,5 @@
 #! clause: L6.7
 #! mode: static
 #! stage: lex
-#! expect-static-error: comment isn't allowed @ 5:13
+#! expect-static-error: can't appear inside a string @ 5:13
 let s = "{a #c}"

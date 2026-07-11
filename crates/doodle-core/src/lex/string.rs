@@ -236,7 +236,8 @@ impl<'a> super::Lexer<'a> {
         self.error(
             DiagnosticCode::CommentInInterpolation,
             Span::new(hash as u32, (hash + 1) as u32),
-            "a comment isn't allowed inside an interpolation — end it after the `}`",
+            "a comment can't appear inside a string's `{…}` — move it outside, \
+             or bind the value to a name first",
         );
         while !matches!(self.bytes.get(self.pos), None | Some(b'\n') | Some(b'}')) {
             self.pos += 1;
