@@ -1,0 +1,4 @@
+#! clause: L3.6.3
+#! mode: static
+#! stage: lex
+let greeting = "Hello, {name}! You have {count} messages."

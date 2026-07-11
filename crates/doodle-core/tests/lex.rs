@@ -168,15 +168,128 @@ fn malformed_numbers_are_diagnosed() {
 }
 
 #[test]
-fn strings() {
-    use TokenKind::{Eof, Str};
-    assert_eq!(kinds("\"hello\""), vec![Str, Eof]);
+fn plain_strings_lex_as_a_stream() {
+    use TokenKind::{Eof, StrEnd, StrStart, StrText};
+    // A plain string is StrStart, one text run, StrEnd.
+    assert_eq!(kinds("\"hello\""), vec![StrStart, StrText, StrEnd, Eof]);
     assert!(diag_codes("\"hello\"").is_empty());
-    // An escaped quote does not close the string.
-    assert_eq!(kinds("\"a\\\"b\""), vec![Str, Eof]);
-    // Unterminated at newline and at EOF.
+    // Empty string: no text run.
+    assert_eq!(kinds("\"\""), vec![StrStart, StrEnd, Eof]);
+    // An escaped quote does not close the string; the whole body is one run.
+    assert_eq!(kinds("\"a\\\"b\""), vec![StrStart, StrText, StrEnd, Eof]);
+    assert!(diag_codes("\"a\\\"b\"").is_empty());
+    // Unterminated at newline and at EOF, each once.
     assert_eq!(diag_codes("\"oops\nx"), vec!["unterminated-string"]);
     assert_eq!(diag_codes("\"oops"), vec!["unterminated-string"]);
+}
+
+#[test]
+fn string_escapes_validate_shape() {
+    // The whole closed set, valid, produces no diagnostics.
+    assert!(diag_codes("\"\\n\\t\\r\\0\\\\\\\"\\x1b\\u{1F600}\\u{E9}\"").is_empty());
+    // Unknown and malformed escapes are diagnosed, with distinct codes.
+    assert_eq!(diag_codes("\"\\q\""), vec!["unknown-escape"]);
+    assert_eq!(diag_codes("\"\\x1\""), vec!["malformed-escape"]); // one hex digit
+    assert_eq!(diag_codes("\"\\uABCD\""), vec!["malformed-escape"]); // braceless
+    assert_eq!(diag_codes("\"\\u{}\""), vec!["malformed-escape"]); // empty
+    assert_eq!(diag_codes("\"\\u{1234567}\""), vec!["malformed-escape"]); // > 6 digits
+    assert_eq!(diag_codes("\"\\u{D800}\""), vec!["malformed-escape"]); // surrogate
+}
+
+#[test]
+fn interpolation_lexes_a_structured_stream() {
+    use TokenKind::{
+        Eof, Ident, InterpEnd, InterpStart, LBrace, RBrace, StrEnd, StrStart, StrText,
+    };
+    // Text, an interpolation, more text.
+    assert_eq!(
+        kinds("\"a{x}b\""),
+        vec![
+            StrStart,
+            StrText,
+            InterpStart,
+            Ident,
+            InterpEnd,
+            StrText,
+            StrEnd,
+            Eof
+        ]
+    );
+    // `{{` and `}}` are literal braces — one text run, no interpolation.
+    assert_eq!(kinds("\"{{}}\""), vec![StrStart, StrText, StrEnd, Eof]);
+    assert!(diag_codes("\"{{}}\"").is_empty());
+    // A nested dict inside an interpolation is not "empty".
+    assert_eq!(
+        kinds("\"{ {} }\""),
+        vec![
+            StrStart,
+            InterpStart,
+            LBrace,
+            RBrace,
+            InterpEnd,
+            StrEnd,
+            Eof
+        ]
+    );
+    assert!(diag_codes("\"{ {} }\"").is_empty());
+    // A nested string inside an interpolation (recursion).
+    assert_eq!(
+        kinds("\"{ \"hi\" }\""),
+        vec![
+            StrStart,
+            InterpStart,
+            StrStart,
+            StrText,
+            StrEnd,
+            InterpEnd,
+            StrEnd,
+            Eof
+        ]
+    );
+}
+
+#[test]
+fn interpolation_errors() {
+    // Empty and whitespace-only interpolations.
+    assert_eq!(diag_codes("\"{}\""), vec!["empty-interpolation"]);
+    assert_eq!(diag_codes("\"{  }\""), vec!["empty-interpolation"]);
+    // A lexically bad character in the body is NOT "empty": it emits its own
+    // error and no spurious empty-interpolation is piled on (regression — the
+    // bad char is consumed by recovery without emitting a token).
+    assert_eq!(diag_codes("\"{ @ }\""), vec!["unexpected-character"]);
+    assert_eq!(diag_codes("\"{@}\""), vec!["unexpected-character"]);
+    // A line terminator can't appear in an interpolation; reported once, and
+    // recovery is bounded to the line (no separate unterminated-string).
+    assert_eq!(diag_codes("\"{x\n"), vec!["unterminated-interpolation"]);
+    // EOF inside an interpolation.
+    assert_eq!(diag_codes("\"{x"), vec!["unterminated-interpolation"]);
+}
+
+#[test]
+fn a_comment_inside_an_interpolation_is_swallowed() {
+    // PROVISIONAL (spec-delta S-50): `#` starts a comment to end of line even
+    // inside an interpolation, so it eats the closing `}` and the string is
+    // reported unterminated. L§6.7 does not yet address comments in
+    // interpolations; this pins the current behavior pending that decision.
+    assert_eq!(
+        diag_codes("\"{ x #c }\""),
+        vec!["unterminated-interpolation"]
+    );
+}
+
+#[test]
+fn bytes_literals() {
+    use TokenKind::{Bytes, Eof, Ident};
+    assert_eq!(kinds("b\"GET\\r\\n\""), vec![Bytes, Eof]);
+    assert!(diag_codes("b\"\\x00\\xff\"").is_empty());
+    // A bare `b` (or a longer word) is an identifier, not a bytes literal.
+    assert_eq!(kinds("b"), vec![Ident, Eof]);
+    assert_eq!(kinds("buffer"), vec![Ident, Eof]);
+    // `\u` is not valid in bytes; source must be ASCII; no interpolation.
+    assert_eq!(diag_codes("b\"\\u{41}\""), vec!["malformed-escape"]);
+    assert_eq!(diag_codes("b\"caf\u{e9}\""), vec!["non-ascii-bytes"]);
+    assert!(diag_codes("b\"a{x}b\"").is_empty()); // braces are literal in bytes
+    assert_eq!(diag_codes("b\"oops"), vec!["unterminated-string"]);
 }
 
 #[test]

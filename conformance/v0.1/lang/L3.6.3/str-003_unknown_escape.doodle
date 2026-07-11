@@ -1,0 +1,5 @@
+#! clause: L3.6.3
+#! mode: static
+#! stage: lex
+#! expect-static-error: valid escape @ 5:11
+let s = "a\qb"

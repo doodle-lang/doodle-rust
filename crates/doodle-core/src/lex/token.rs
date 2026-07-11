@@ -20,8 +20,21 @@ pub enum TokenKind {
     Int,
     /// A float literal (L§3.6.2).
     Float,
-    /// A plain double-quoted string literal (L§3.6.3); boundary only at M1.3.
-    Str,
+    /// The opening `"` of a string literal (L§3.6.3). A string is lexed as a
+    /// stream — `StrStart`, then `StrText`/interpolation parts, then `StrEnd`.
+    StrStart,
+    /// A run of literal string text between interpolations; the span is the raw
+    /// source slice (escapes decoded by the parser, M1.6).
+    StrText,
+    /// The `{` opening an interpolation (L§6.7).
+    InterpStart,
+    /// The `}` closing an interpolation.
+    InterpEnd,
+    /// The closing `"` of a string literal.
+    StrEnd,
+    /// A bytes literal `b"…"` (L§3.6.5); the span carries the whole literal, no
+    /// interpolation. Value decoded by the parser (M1.6).
+    Bytes,
     /// An identifier (L§3.4).
     Ident,
     /// A keyword (L§3.5).

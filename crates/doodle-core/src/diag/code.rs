@@ -31,6 +31,18 @@ pub enum DiagnosticCode {
     MalformedNumber,
     /// A character that cannot begin a token here (L§3).
     UnexpectedCharacter,
+    /// A backslash escape outside the closed set, e.g. `\q` (L§3.6.3).
+    UnknownEscape,
+    /// A known escape in malformed form — `\x` short a digit, braceless/empty/
+    /// over-long `\u`, a surrogate scalar, or `\u` in a bytes literal (L§3.6.3).
+    MalformedEscape,
+    /// An interpolation with no expression, `{}` or `{ }` (L§6.7).
+    EmptyInterpolation,
+    /// An interpolation not closed before end of line or input — a line
+    /// terminator inside `{…}`, or EOF (L§6.7).
+    UnterminatedInterpolation,
+    /// A non-ASCII code point inside a bytes literal `b"…"` (L§3.6.5).
+    NonAsciiBytes,
     /// A binding that hides an outer one of the same name (L§5.1; a warning).
     Shadowing,
 }
@@ -44,6 +56,11 @@ impl DiagnosticCode {
             DiagnosticCode::UnterminatedString => "unterminated-string",
             DiagnosticCode::MalformedNumber => "malformed-number",
             DiagnosticCode::UnexpectedCharacter => "unexpected-character",
+            DiagnosticCode::UnknownEscape => "unknown-escape",
+            DiagnosticCode::MalformedEscape => "malformed-escape",
+            DiagnosticCode::EmptyInterpolation => "empty-interpolation",
+            DiagnosticCode::UnterminatedInterpolation => "unterminated-interpolation",
+            DiagnosticCode::NonAsciiBytes => "non-ascii-bytes",
             DiagnosticCode::Shadowing => "shadowing",
         }
     }

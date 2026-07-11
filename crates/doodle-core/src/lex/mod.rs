@@ -2,6 +2,7 @@
 //! diagnostics. Value lowering (bignum/float parsing) is the parser's job
 //! (M1.6); the lexer validates lexical shape and records spans only.
 
+mod escape;
 mod number;
 mod string;
 pub mod token;
@@ -139,7 +140,11 @@ impl<'a> Lexer<'a> {
     fn scan_token(&mut self, c: u8) {
         let start = self.pos;
         match c {
-            b'"' => self.scan_str(start),
+            b'"' => {
+                self.scan_string(start, 0);
+            }
+            // `b"…"` is a bytes literal; a bare `b` (or `by`, …) is an identifier.
+            b'b' if self.bytes.get(start + 1) == Some(&b'"') => self.scan_bytes(start),
             b'0'..=b'9' => self.scan_num(start),
             b';' => self.emit_len(TokenKind::Semicolon, 1),
             b',' => self.emit_len(TokenKind::Comma, 1),
@@ -175,19 +180,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-    }
-
-    fn scan_str(&mut self, start: usize) {
-        let lit = string::scan_string(self.source, start);
-        let span = Span::new(start as u32, lit.end as u32);
-        if lit.unterminated {
-            self.error(
-                DiagnosticCode::UnterminatedString,
-                span,
-                "this string is never closed",
-            );
-        }
-        self.emit(TokenKind::Str, span);
     }
 
     fn scan_num(&mut self, start: usize) {

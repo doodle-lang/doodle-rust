@@ -1,0 +1,5 @@
+#! clause: L3.6.5
+#! mode: static
+#! stage: lex
+#! expect-static-error: bytes literal @ 5:11
+let b = b"\u{41}"

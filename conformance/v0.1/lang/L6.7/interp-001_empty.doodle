@@ -1,0 +1,5 @@
+#! clause: L6.7
+#! mode: static
+#! stage: lex
+#! expect-static-error: interpolation is empty @ 5:10
+let s = "{}"
