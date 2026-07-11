@@ -11,6 +11,7 @@
 //! anonymous-`fn` forms arrive in later M1.6 pieces.
 
 mod decode;
+mod postfix;
 
 use crate::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::diag::Diagnostic;
@@ -146,7 +147,9 @@ impl Parser<'_> {
             Some(TokenKind::Minus) => self.unary(UnaryOp::Neg, BP_UNARY),
             Some(TokenKind::Plus) => self.unary(UnaryOp::Pos, BP_UNARY),
             Some(TokenKind::Keyword(Keyword::Not)) => self.unary(UnaryOp::Not, BP_NOT),
-            _ => self.primary(),
+            // A primary plus any postfix operators (`.`/`[]`/`()`), which bind
+            // tighter than any prefix or binary operator (postfix.rs).
+            _ => self.postfix_chain(),
         }
     }
 

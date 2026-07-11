@@ -1,7 +1,7 @@
 //! Parser tests: expression trees rendered as S-expressions, so precedence,
 //! associativity, and value lowering are visible in the expected output.
 
-use doodle_core::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
+use doodle_core::ast::{Arg, Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use doodle_core::parse::parse_expression;
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
@@ -40,6 +40,26 @@ fn dump(ast: &Ast, id: NodeId) -> String {
                 dump(ast, *lhs),
                 dump(ast, *rhs)
             )
+        }
+        Node::Field { object, name } => format!("(. {} {name})", dump(ast, *object)),
+        Node::Index { object, index } => {
+            format!("([] {} {})", dump(ast, *object), dump(ast, *index))
+        }
+        Node::Call { callee, args } => {
+            let mut s = format!("(call {}", dump(ast, *callee));
+            for arg in args {
+                match arg {
+                    Arg::Positional(e) => {
+                        s.push(' ');
+                        s.push_str(&dump(ast, *e));
+                    }
+                    Arg::Keyword { name, value } => {
+                        s.push_str(&format!(" {name}:{}", dump(ast, *value)));
+                    }
+                }
+            }
+            s.push(')');
+            s
         }
         Node::StrLit(parts) => {
             let mut s = String::from("(str");
@@ -183,6 +203,38 @@ fn triple_quoted_decode_and_line_final_backslash() {
     // forbids backslash-newline continuation) — reported at decode.
     let dangling = "\"\"\"\n    a\\\n    b\n    \"\"\"";
     assert!(diags_of(dangling).contains(&"syntax-error"));
+}
+
+#[test]
+fn postfix_access_call_index() {
+    assert_eq!(ast_of("p.x"), "(. p x)");
+    assert_eq!(ast_of("a[0]"), "([] a 0)");
+    assert_eq!(ast_of("f()"), "(call f)");
+    assert_eq!(ast_of("f(1, 2)"), "(call f 1 2)");
+    // Postfix chains left-to-right and binds tighter than prefix/binary.
+    assert_eq!(ast_of("a.b.c"), "(. (. a b) c)");
+    assert_eq!(ast_of("f(x)(y)"), "(call (call f x) y)");
+    assert_eq!(ast_of("a[i][j]"), "([] ([] a i) j)");
+    assert_eq!(ast_of("obj.method(arg)"), "(call (. obj method) arg)");
+    assert_eq!(ast_of("-a.b"), "(- (. a b))");
+    assert_eq!(ast_of("a.b + c"), "(+ (. a b) c)");
+    assert_eq!(ast_of("a ** b.c"), "(** a (. b c))");
+}
+
+#[test]
+fn call_keyword_arguments() {
+    assert_eq!(ast_of("Point(x: 3, y: 4)"), "(call Point x:3 y:4)");
+    assert_eq!(ast_of("f(1, key: 2)"), "(call f 1 key:2)");
+    // A trailing comma is allowed.
+    assert_eq!(ast_of("f(a, b,)"), "(call f a b)");
+    // Positional after keyword is a static error (L§6.4).
+    assert_eq!(diags_of("f(k: 1, 2)"), vec!["syntax-error"]);
+    assert!(diags_of("f(1, k: 2)").is_empty());
+    // A missing `)` and a `.` with no field recover without panic. A number
+    // after `.` reports once (the offending token is consumed, not cascaded).
+    assert_eq!(diags_of("f(1"), vec!["syntax-error"]);
+    assert_eq!(diags_of("a."), vec!["syntax-error"]);
+    assert_eq!(diags_of("a.1"), vec!["syntax-error"]);
 }
 
 #[test]

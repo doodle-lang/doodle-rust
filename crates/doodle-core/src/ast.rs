@@ -61,12 +61,47 @@ pub enum Node {
         /// The right operand.
         rhs: NodeId,
     },
+    /// Member access `object.name` (L§6.5 postfix `.`).
+    Field {
+        /// The object expression.
+        object: NodeId,
+        /// The field name.
+        name: Box<str>,
+    },
+    /// Indexing `object[index]` (L§6.3).
+    Index {
+        /// The indexed expression.
+        object: NodeId,
+        /// The index/key expression.
+        index: NodeId,
+    },
+    /// A call `callee(args)` (L§6.4). Parens are always required.
+    Call {
+        /// The callee expression.
+        callee: NodeId,
+        /// The arguments, positional before keyword.
+        args: Vec<Arg>,
+    },
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A module body: its top-level statements in source order (L§7).
     Module(Vec<NodeId>),
     /// A placeholder for a syntax error, so parsing can recover and continue.
     Error,
+}
+
+/// A call argument (L§6.4): positional, or a keyword `name: value`.
+#[derive(Clone, Debug)]
+pub enum Arg {
+    /// A positional argument.
+    Positional(NodeId),
+    /// A keyword argument `name: value`.
+    Keyword {
+        /// The parameter name.
+        name: Box<str>,
+        /// The argument value.
+        value: NodeId,
+    },
 }
 
 /// One piece of a string literal (L§3.6.3): a decoded text run or an
