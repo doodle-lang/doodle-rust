@@ -169,11 +169,10 @@ impl<'a> super::Lexer<'a> {
         let saved_brackets = self.bracket_depth;
         let mut brace_depth = 0u32;
         let outcome = loop {
-            // PROVISIONAL (spec-delta S-50): `skip_inline` treats `#` as a
-            // comment to end of line even here, so a `#` inside an interpolation
-            // eats the closing `}` and the interpolation reads as unterminated.
-            // L§6.7 does not yet address comments in interpolations.
-            self.skip_inline();
+            // Whitespace only, not comments: inside an interpolation a `#` is a
+            // diagnostic (S-50), not a comment — otherwise it would run to end
+            // of line and swallow the closing `}`.
+            self.skip_spaces();
             match self.bytes.get(self.pos).copied() {
                 None => {
                     break self.unterminated_interp(brace, "this interpolation is never closed");
@@ -213,6 +212,10 @@ impl<'a> super::Lexer<'a> {
                             .unterminated_interp(brace, "this interpolation is never closed");
                     }
                 }
+                Some(b'#') => {
+                    saw_content = true;
+                    self.comment_in_interp();
+                }
                 Some(c) => {
                     saw_content = true;
                     self.scan_token(c);
@@ -221,6 +224,23 @@ impl<'a> super::Lexer<'a> {
         };
         self.bracket_depth = saved_brackets;
         outcome
+    }
+
+    /// Reports a `#` inside an interpolation (S-50) and recovers by skipping the
+    /// would-be comment up to — but not consuming — the closing `}`, a newline,
+    /// or EOF, so the interpolation can still close on this line. The error
+    /// points at the `#`; the skipped run is ASCII-terminated (`}`/`\n`), so
+    /// `self.pos` lands on a code-point boundary.
+    fn comment_in_interp(&mut self) {
+        let hash = self.pos;
+        self.error(
+            DiagnosticCode::CommentInInterpolation,
+            Span::new(hash as u32, (hash + 1) as u32),
+            "a comment isn't allowed inside an interpolation — end it after the `}`",
+        );
+        while !matches!(self.bytes.get(self.pos), None | Some(b'\n') | Some(b'}')) {
+            self.pos += 1;
+        }
     }
 
     /// Reports an interpolation cut short by EOF or a newline, closes it with a

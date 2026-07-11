@@ -266,14 +266,15 @@ fn interpolation_errors() {
 }
 
 #[test]
-fn a_comment_inside_an_interpolation_is_swallowed() {
-    // PROVISIONAL (spec-delta S-50): `#` starts a comment to end of line even
-    // inside an interpolation, so it eats the closing `}` and the string is
-    // reported unterminated. L§6.7 does not yet address comments in
-    // interpolations; this pins the current behavior pending that decision.
+fn a_comment_inside_an_interpolation_is_an_error() {
+    use TokenKind::{Eof, Ident, InterpEnd, InterpStart, StrEnd, StrStart};
+    // S-50 (b): `#` inside an interpolation is a distinct error, not a comment
+    // that would swallow the closing `}`; recovery still closes the interp so
+    // there is no cascading unterminated error.
+    assert_eq!(diag_codes("\"{ x #c }\""), vec!["comment-in-interpolation"]);
     assert_eq!(
-        diag_codes("\"{ x #c }\""),
-        vec!["unterminated-interpolation"]
+        kinds("\"{ x #c }\""),
+        vec![StrStart, InterpStart, Ident, InterpEnd, StrEnd, Eof]
     );
 }
 

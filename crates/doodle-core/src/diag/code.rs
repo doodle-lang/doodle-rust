@@ -38,6 +38,9 @@ pub enum DiagnosticCode {
     MalformedEscape,
     /// An interpolation with no expression, `{}` or `{ }` (L§6.7).
     EmptyInterpolation,
+    /// A `#` comment inside an interpolation `{…}` (L§6.7): not allowed, since a
+    /// comment would run to end of line and swallow the closing `}`.
+    CommentInInterpolation,
     /// An interpolation not closed before end of line or input — a line
     /// terminator inside `{…}`, or EOF (L§6.7).
     UnterminatedInterpolation,
@@ -59,6 +62,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnknownEscape => "unknown-escape",
             DiagnosticCode::MalformedEscape => "malformed-escape",
             DiagnosticCode::EmptyInterpolation => "empty-interpolation",
+            DiagnosticCode::CommentInInterpolation => "comment-in-interpolation",
             DiagnosticCode::UnterminatedInterpolation => "unterminated-interpolation",
             DiagnosticCode::NonAsciiBytes => "non-ascii-bytes",
             DiagnosticCode::Shadowing => "shadowing",

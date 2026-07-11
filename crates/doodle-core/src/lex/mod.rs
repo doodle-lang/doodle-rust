@@ -112,6 +112,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Skips inline whitespace only — **not** comments. Used inside an
+    /// interpolation, where `#` is a diagnostic (S-50), not a comment.
+    fn skip_spaces(&mut self) {
+        while matches!(self.bytes.get(self.pos), Some(b' ' | b'\t' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
     /// Handles a physical `\n`: emit a statement separator unless it is
     /// suppressed inside brackets or after a continuation trigger (S-2), and
     /// collapse leading/consecutive separators.
