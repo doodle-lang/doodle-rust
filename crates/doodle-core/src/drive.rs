@@ -131,7 +131,10 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
 fn eval_stmt(program: &Ast, id: NodeId) -> Option<Value> {
     match program.node(id) {
         Node::ExprStmt(expr) => Some(eval_expr(program, *expr)),
-        Node::IntLit(_) | Node::Module(_) => None,
+        // The M0 driver only builds expression statements; anything else in
+        // statement position is Void here (real statement semantics arrive with
+        // the machine core, M2a).
+        _ => None,
     }
 }
 

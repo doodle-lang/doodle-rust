@@ -16,16 +16,100 @@ pub struct NodeId(pub u32);
 
 /// A node in the AST arena.
 ///
-/// Shell: only the kinds exercised by the M0 hand-built program are present.
-/// The front end grows this into the full grammar (language spec L§3+).
+/// The front end grows this into the full grammar (language spec L§3+). The
+/// expression kinds (M1.6) carry fully lowered literal values; the resolver
+/// (M1.9+) annotates names, slots, and tail positions separately
+/// (machine-design §2).
 #[derive(Clone, Debug)]
 pub enum Node {
-    /// An integer-literal expression (L§4.2), e.g. `42`.
+    /// An integer literal that fits `i64` (L§3.6.1).
     IntLit(i64),
+    /// An integer literal beyond `i64`: the sign-free digits in `radix`
+    /// (underscores stripped), materialized to a heap bignum at run time.
+    BigIntLit {
+        /// The literal's radix: 2, 8, 10, or 16.
+        radix: u8,
+        /// The digits, underscores removed, in that radix.
+        digits: Box<str>,
+    },
+    /// A float literal (L§3.6.2).
+    FloatLit(f64),
+    /// A boolean literal `true` / `false` (L§3.6.6).
+    BoolLit(bool),
+    /// The `nil` literal (L§3.6.6).
+    NilLit,
+    /// An identifier reference (L§3.4); the resolver binds it later.
+    Ident(Box<str>),
+    /// A prefix unary operation (L§6.5).
+    Unary {
+        /// The operator.
+        op: UnaryOp,
+        /// The operand expression.
+        operand: NodeId,
+    },
+    /// An infix binary operation (L§6.5).
+    Binary {
+        /// The operator.
+        op: BinaryOp,
+        /// The left operand.
+        lhs: NodeId,
+        /// The right operand.
+        rhs: NodeId,
+    },
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A module body: its top-level statements in source order (L§7).
     Module(Vec<NodeId>),
+    /// A placeholder for a syntax error, so parsing can recover and continue.
+    Error,
+}
+
+/// A prefix unary operator (L§6.5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnaryOp {
+    /// Unary `-` (negation).
+    Neg,
+    /// Unary `+` (identity).
+    Pos,
+    /// `not` (boolean negation).
+    Not,
+}
+
+/// An infix binary operator (L§6.5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BinaryOp {
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `//`
+    FloorDiv,
+    /// `%`
+    Rem,
+    /// `**`
+    Pow,
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `>`
+    Gt,
+    /// `<=`
+    Le,
+    /// `>=`
+    Ge,
+    /// `is`
+    Is,
+    /// `and`
+    And,
+    /// `or`
+    Or,
 }
 
 /// A flat AST arena: node `i` has span `spans[i]`, addressed by [`NodeId`].

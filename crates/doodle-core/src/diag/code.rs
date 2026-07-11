@@ -22,6 +22,8 @@
 pub enum DiagnosticCode {
     /// `a < b < c`: comparison operators don't chain (L§6.5).
     ChainedComparison,
+    /// A general syntax error — an unexpected or missing token (L§6, M1.6).
+    SyntaxError,
     /// Reassigning a `const` binding (L§5.2).
     ConstReassignment,
     /// A string literal that reaches end of input unclosed (L§3).
@@ -61,6 +63,7 @@ impl DiagnosticCode {
     pub fn slug(self) -> &'static str {
         match self {
             DiagnosticCode::ChainedComparison => "chained-comparison",
+            DiagnosticCode::SyntaxError => "syntax-error",
             DiagnosticCode::ConstReassignment => "const-reassignment",
             DiagnosticCode::UnterminatedString => "unterminated-string",
             DiagnosticCode::MalformedNumber => "malformed-number",

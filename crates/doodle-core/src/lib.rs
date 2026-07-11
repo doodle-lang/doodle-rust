@@ -19,6 +19,7 @@ pub mod diag;
 pub mod drive;
 pub mod lex;
 pub mod machine;
+pub mod parse;
 pub mod source;
 pub mod span;
 pub mod stage;
