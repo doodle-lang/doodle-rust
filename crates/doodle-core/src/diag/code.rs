@@ -46,6 +46,12 @@ pub enum DiagnosticCode {
     UnterminatedInterpolation,
     /// A non-ASCII code point inside a bytes literal `b"…"` (L§3.6.5).
     NonAsciiBytes,
+    /// A content line of a triple-quoted string does not match the closing
+    /// `"""` margin (L§3.6.4).
+    MarginMismatch,
+    /// A triple-quoted string's opening `"""` is not alone on its line —
+    /// something other than whitespace follows it (L§3.6.4).
+    MalformedTripleQuote,
     /// A binding that hides an outer one of the same name (L§5.1; a warning).
     Shadowing,
 }
@@ -65,6 +71,8 @@ impl DiagnosticCode {
             DiagnosticCode::CommentInInterpolation => "comment-in-interpolation",
             DiagnosticCode::UnterminatedInterpolation => "unterminated-interpolation",
             DiagnosticCode::NonAsciiBytes => "non-ascii-bytes",
+            DiagnosticCode::MarginMismatch => "margin-mismatch",
+            DiagnosticCode::MalformedTripleQuote => "malformed-triple-quote",
             DiagnosticCode::Shadowing => "shadowing",
         }
     }

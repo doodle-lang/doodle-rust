@@ -59,7 +59,7 @@ impl<'a> super::Lexer<'a> {
         }
         loop {
             let text_start = self.pos;
-            let boundary = self.scan_text_run(interp, false);
+            let boundary = self.scan_text_run(interp, false, false);
             if self.pos > text_start {
                 self.emit(
                     TokenKind::StrText,
@@ -93,7 +93,7 @@ impl<'a> super::Lexer<'a> {
     /// Scans a bytes literal `b"…"`; `start` is the `b`. Emits one `Bytes` token.
     pub(super) fn scan_bytes(&mut self, start: usize) {
         self.pos = start + 2; // past `b"`
-        let boundary = self.scan_text_run(false, true);
+        let boundary = self.scan_text_run(false, true, false);
         let end = match boundary {
             Boundary::Close => self.pos + 1, // include the closing `"`
             _ => {
@@ -108,14 +108,168 @@ impl<'a> super::Lexer<'a> {
         self.emit(TokenKind::Bytes, Span::new(start as u32, end as u32));
     }
 
+    /// Scans a triple-quoted string at `start` (the first of three `"`),
+    /// emitting the same structured stream as a plain string with S-3 margin
+    /// stripping per physical line and inter-line `\n` joins as `StrText` chunks
+    /// (§3.6.4). Value decoding stays with the parser (M1.6).
+    pub(super) fn scan_triple_string(&mut self, start: usize) {
+        self.emit_len(TokenKind::StrStart, 3); // opening `"""`; pos = start + 3
+
+        // The opening `"""` must be the last token on its line — only whitespace
+        // may follow; the contents begin on the next line.
+        let mut p = self.pos;
+        while matches!(self.bytes.get(p), Some(b' ' | b'\t' | b'\r')) {
+            p += 1;
+        }
+        if !matches!(self.bytes.get(p), Some(b'\n') | None) {
+            // `p` is a code-point boundary (only ASCII whitespace was skipped);
+            // span the whole offending character.
+            let end = p + self.char_at(p).len_utf8();
+            self.error(
+                DiagnosticCode::MalformedTripleQuote,
+                Span::new(p as u32, end as u32),
+                "nothing may follow the opening `\"\"\"` — the contents start on the next line",
+            );
+            while !matches!(self.bytes.get(p), None | Some(b'\n')) {
+                p += 1;
+            }
+        }
+        if self.bytes.get(p).is_none() {
+            return self.unterminated_triple(start);
+        }
+        let content_start = p + 1; // past the newline that ends the opening line
+
+        let Some((margin_start, closing_pos)) = self.find_triple_close(content_start) else {
+            return self.unterminated_triple(start);
+        };
+        // The newline immediately before the closing line is not part of the value.
+        let content_end = margin_start.saturating_sub(1);
+        self.emit_triple_content(content_start, content_end, margin_start, closing_pos);
+
+        self.pos = closing_pos;
+        self.emit_len(TokenKind::StrEnd, 3); // closing `"""`
+    }
+
+    /// Reports an unclosed triple-quoted string and closes the stream.
+    fn unterminated_triple(&mut self, start: usize) {
+        let end = self.source.len();
+        self.error(
+            DiagnosticCode::UnterminatedString,
+            Span::new(start as u32, end as u32),
+            "this triple-quoted string is never closed",
+        );
+        self.pos = end;
+        self.close_synthetic(TokenKind::StrEnd);
+    }
+
+    /// Scans physical lines from `from` for the closing `"""` — the first line
+    /// whose first non-whitespace content is `"""`. Returns `(line_start,
+    /// close_pos)`, where the margin is `source[line_start..close_pos]`, or
+    /// `None` at EOF (unterminated).
+    fn find_triple_close(&self, from: usize) -> Option<(usize, usize)> {
+        let mut line_start = from;
+        loop {
+            let mut q = line_start;
+            while matches!(self.bytes.get(q), Some(b' ' | b'\t')) {
+                q += 1;
+            }
+            if self.bytes.get(q) == Some(&b'"')
+                && self.bytes.get(q + 1) == Some(&b'"')
+                && self.bytes.get(q + 2) == Some(&b'"')
+            {
+                return Some((line_start, q));
+            }
+            let mut r = line_start;
+            while !matches!(self.bytes.get(r), None | Some(b'\n')) {
+                r += 1;
+            }
+            self.bytes.get(r)?; // EOF before a closing `"""`
+            line_start = r + 1;
+        }
+    }
+
+    /// Emits the content region as `StrText` chunks and interpolations, stripping
+    /// the margin from each nonempty line and joining lines with a `\n` chunk.
+    /// `content_end` is the newline before the closing line (not in the value).
+    fn emit_triple_content(
+        &mut self,
+        content_start: usize,
+        content_end: usize,
+        margin_start: usize,
+        closing_pos: usize,
+    ) {
+        let margin_len = closing_pos - margin_start;
+        self.pos = content_start;
+        while self.pos < content_end {
+            // A truly empty line (an immediate newline) is exempt from the margin.
+            if self.bytes.get(self.pos) != Some(&b'\n') {
+                self.strip_margin(margin_start, margin_len);
+            }
+            loop {
+                let text_start = self.pos;
+                let boundary = self.scan_text_run(true, false, true);
+                if self.pos > text_start {
+                    self.emit(
+                        TokenKind::StrText,
+                        Span::new(text_start as u32, self.pos as u32),
+                    );
+                }
+                match boundary {
+                    Boundary::Interp => {
+                        self.scan_interp(0);
+                    }
+                    _ => break, // Newline or Eof ends the physical line
+                }
+            }
+            if self.pos < content_end {
+                // The newline joining two content lines is part of the value.
+                // `emit` advances `self.pos` to the span end (past the newline).
+                self.emit(
+                    TokenKind::StrText,
+                    Span::new(self.pos as u32, (self.pos + 1) as u32),
+                );
+            }
+        }
+    }
+
+    /// Consumes the margin at the start of a content line, or reports the first
+    /// character that fails the byte-for-byte match and stops (leaving the rest
+    /// as content for recovery).
+    fn strip_margin(&mut self, margin_start: usize, margin_len: usize) {
+        for i in 0..margin_len {
+            let expected = self.bytes.get(margin_start + i).copied();
+            let actual = self.bytes.get(self.pos).copied();
+            if actual == expected && !matches!(actual, None | Some(b'\n')) {
+                self.pos += 1;
+                continue;
+            }
+            let message = match (expected, actual) {
+                (Some(b' '), Some(b'\t')) => "a tab where the closing `\"\"\"` margin has a space",
+                (Some(b'\t'), Some(b' ')) => "a space where the closing `\"\"\"` margin has a tab",
+                _ => "this line doesn't reach the closing `\"\"\"` margin",
+            };
+            // Span the whole offending code point (it may be multibyte); `self.pos`
+            // is a boundary here (margin bytes are ASCII) and within content.
+            let end = self.pos + self.char_at(self.pos).len_utf8();
+            self.error(
+                DiagnosticCode::MarginMismatch,
+                Span::new(self.pos as u32, end as u32),
+                message,
+            );
+            return;
+        }
+    }
+
     /// Scans literal text (escapes included) until a boundary, leaving `self.pos`
     /// on the boundary byte (unconsumed). `interp` enables `{…}`; `ascii_only`
-    /// (bytes) reports non-ASCII source and selects the bytes escape rules.
-    fn scan_text_run(&mut self, interp: bool, ascii_only: bool) -> Boundary {
+    /// (bytes) reports non-ASCII source and selects the bytes escape rules;
+    /// `triple` treats `"` as literal content (a triple-quoted body ends at a
+    /// line-initial `"""`, found separately, not at any `"`).
+    fn scan_text_run(&mut self, interp: bool, ascii_only: bool, triple: bool) -> Boundary {
         loop {
             match self.bytes.get(self.pos).copied() {
                 None => return Boundary::Eof,
-                Some(b'"') => return Boundary::Close,
+                Some(b'"') if !triple => return Boundary::Close,
                 Some(b'\n') => return Boundary::Newline,
                 Some(b'\\') => {
                     let esc = escape::scan_escape(self.source, self.pos, ascii_only);

@@ -1,0 +1,8 @@
+#! clause: L3.6.4
+#! mode: static
+#! stage: lex
+#! expect-static-error: margin @ 7:3
+let recipe = """
+    good
+  bad
+    """

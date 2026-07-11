@@ -1,0 +1,7 @@
+#! clause: L3.6.4
+#! mode: static
+#! stage: lex
+#! expect-static-error: nothing may follow @ 5:17
+let recipe = """oops
+    ok
+    """

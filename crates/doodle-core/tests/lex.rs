@@ -45,6 +45,19 @@ fn diag_codes(source: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Concatenates the raw text of a string's `StrText` chunks — the pre-decode
+/// value (escapes are lowered at M1.6), enough to check triple-quoted margin
+/// stripping and inter-line joins.
+fn str_text(source: &str) -> String {
+    let nfc = normalize(source);
+    lex(nfc.as_ref(), M)
+        .tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::StrText)
+        .map(|t| &nfc[t.span.start as usize..t.span.end as usize])
+        .collect()
+}
+
 // --- Snapshots: S-2 continuation ---
 
 #[test]
@@ -291,6 +304,78 @@ fn bytes_literals() {
     assert_eq!(diag_codes("b\"caf\u{e9}\""), vec!["non-ascii-bytes"]);
     assert!(diag_codes("b\"a{x}b\"").is_empty()); // braces are literal in bytes
     assert_eq!(diag_codes("b\"oops"), vec!["unterminated-string"]);
+}
+
+#[test]
+fn triple_quoted_strips_margin() {
+    use TokenKind::{Eof, StrEnd, StrStart, StrText};
+    // Margin = the closing """ indentation (4 spaces), stripped from each line;
+    // content beyond the margin (the 2 extra spaces on "flour") is preserved.
+    let src = "\"\"\"\n    Ingredients:\n      flour\n    \"\"\"";
+    assert_eq!(str_text(src), "Ingredients:\n  flour");
+    assert!(diag_codes(src).is_empty());
+    // text, a \n-join chunk, text — wrapped in StrStart/StrEnd.
+    assert_eq!(
+        kinds(src),
+        vec![StrStart, StrText, StrText, StrText, StrEnd, Eof]
+    );
+}
+
+#[test]
+fn triple_quoted_empty_and_whitespace_lines() {
+    // A truly empty line contributes "" (no margin required).
+    let empty = "\"\"\"\n    a\n\n    b\n    \"\"\"";
+    assert_eq!(str_text(empty), "a\n\nb");
+    assert!(diag_codes(empty).is_empty());
+    // A whitespace-only *nonempty* line keeps its post-margin spaces (here the
+    // middle line is margin + two spaces).
+    let ws = "\"\"\"\n    a\n      \n    b\n    \"\"\"";
+    assert_eq!(str_text(ws), "a\n  \nb");
+    assert!(diag_codes(ws).is_empty());
+}
+
+#[test]
+fn triple_quoted_interpolation_and_literal_quotes() {
+    use TokenKind::{Eof, Ident, InterpEnd, InterpStart, StrEnd, StrStart, StrText};
+    let interp = "\"\"\"\n    Hello {name}\n    \"\"\"";
+    assert!(diag_codes(interp).is_empty());
+    assert_eq!(
+        kinds(interp),
+        vec![
+            StrStart,
+            StrText,
+            InterpStart,
+            Ident,
+            InterpEnd,
+            StrEnd,
+            Eof
+        ]
+    );
+    // A mid-line """ is literal content, not the closing delimiter.
+    let lit = "\"\"\"\n    a\"\"\"b\n    \"\"\"";
+    assert_eq!(str_text(lit), "a\"\"\"b");
+    assert!(diag_codes(lit).is_empty());
+}
+
+#[test]
+fn triple_quoted_errors() {
+    // An under-indented content line fails the margin match.
+    assert_eq!(
+        diag_codes("\"\"\"\n    a\n  b\n    \"\"\""),
+        vec!["margin-mismatch"]
+    );
+    // A tab where the margin is spaces.
+    assert_eq!(
+        diag_codes("\"\"\"\n    a\n\tb\n    \"\"\""),
+        vec!["margin-mismatch"]
+    );
+    // Nothing may follow the opening """ on its line.
+    assert_eq!(
+        diag_codes("\"\"\"x\n    a\n    \"\"\""),
+        vec!["malformed-triple-quote"]
+    );
+    // No closing """: unterminated.
+    assert_eq!(diag_codes("\"\"\"\n    a\n"), vec!["unterminated-string"]);
 }
 
 #[test]

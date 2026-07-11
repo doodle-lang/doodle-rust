@@ -149,7 +149,13 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         match c {
             b'"' => {
-                self.scan_string(start, 0);
+                if self.bytes.get(start + 1) == Some(&b'"')
+                    && self.bytes.get(start + 2) == Some(&b'"')
+                {
+                    self.scan_triple_string(start);
+                } else {
+                    self.scan_string(start, 0);
+                }
             }
             // `b"…"` is a bytes literal; a bare `b` (or `by`, …) is an identifier.
             b'b' if self.bytes.get(start + 1) == Some(&b'"') => self.scan_bytes(start),
