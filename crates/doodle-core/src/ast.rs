@@ -173,9 +173,43 @@ pub enum Node {
         params: Vec<Param>,
         /// The body (a [`Node::Block`]).
         body: NodeId,
-        /// The docstring (L§8.6), if any — captured in M1.8c; a leading body
-        /// string is not an executed statement.
-        doc: Option<NodeId>,
+        /// The docstring (L§8.6), if any — the raw source span of the leading
+        /// body string; captured in M1.8c. Stored as a span, not a parsed node,
+        /// because a docstring's `{ … }` is raw text, not executed (S-27).
+        doc: Option<Span>,
+    },
+    /// A record type declaration `[ref] record Name with f1, … [doc] end`
+    /// (L§9.1): a named product type. The body, if any, is docstring-only.
+    Record {
+        /// Whether this is a reference-typed record (`ref record`, §4.14).
+        is_ref: bool,
+        /// The type/constructor name.
+        name: Box<str>,
+        /// The field names, in declaration order.
+        fields: Vec<Box<str>>,
+        /// The docstring span (L§8.6), if present.
+        doc: Option<Span>,
+    },
+    /// A protocol declaration `protocol Name [extends P] [doc] members… end`
+    /// (L§10.1): a named set of `to`/`fn` member signatures.
+    Protocol {
+        /// The protocol name.
+        name: Box<str>,
+        /// The `extends` requirement, if any (L§10.1).
+        extends: Option<Box<str>>,
+        /// The member signatures (required, or default with a body).
+        members: Vec<ProtoMember>,
+        /// The docstring span (L§8.6), if present.
+        doc: Option<Span>,
+    },
+    /// A protocol implementation `implement P for T methods… end` (L§10.2).
+    Implement {
+        /// The protocol being implemented.
+        protocol: Box<str>,
+        /// The type implementing it.
+        type_name: Box<str>,
+        /// The member implementations (each a [`Node::Callable`] declaration).
+        methods: Vec<NodeId>,
     },
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
@@ -219,6 +253,21 @@ pub enum Param {
         /// The block parameter's name.
         name: Box<str>,
     },
+}
+
+/// A protocol member (L§10.1): a `to`/`fn` signature. A `body` of `None` is a
+/// **required** member; `Some` is a **default** member (implementations inherit
+/// it but may override).
+#[derive(Clone, Debug)]
+pub struct ProtoMember {
+    /// Whether the member is a procedure (`to`) or a function (`fn`).
+    pub kind: CallableKind,
+    /// The member name.
+    pub name: Box<str>,
+    /// The member's parameters (by convention the first is `self`).
+    pub params: Vec<Param>,
+    /// The default-implementation body ([`Node::Block`]), or `None` if required.
+    pub body: Option<NodeId>,
 }
 
 /// A dict-literal entry `key: value` (L§4.8).

@@ -1,0 +1,8 @@
+#! clause: L10.2
+#! mode: static
+#! stage: parse
+implement Iterable for Range
+    to each(r, do body)
+        body(r.start)
+    end
+end

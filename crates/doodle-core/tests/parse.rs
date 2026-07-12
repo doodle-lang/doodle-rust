@@ -2,11 +2,11 @@
 //! associativity, and value lowering are visible in the expected output.
 
 use doodle_core::ast::{
-    Arg, Ast, BinaryOp, CallableKind, DictKey, Node, NodeId, Param, StrPart, UnaryOp,
+    Arg, Ast, BinaryOp, CallableKind, DictKey, Node, NodeId, Param, ProtoMember, StrPart, UnaryOp,
 };
 use doodle_core::parse::{parse_expression, parse_program};
 use doodle_core::source::normalize;
-use doodle_core::span::ModuleId;
+use doodle_core::span::{ModuleId, Span};
 
 const M: ModuleId = ModuleId(0);
 
@@ -175,8 +175,76 @@ fn dump(ast: &Ast, id: NodeId) -> String {
                 dump(ast, *body)
             )
         }
+        Node::Record {
+            is_ref,
+            name,
+            fields,
+            doc,
+        } => {
+            let kw = if *is_ref { "ref-record" } else { "record" };
+            let fields_s = if fields.is_empty() {
+                "(fields)".to_string()
+            } else {
+                format!("(fields {})", fields.join(" "))
+            };
+            format!("({kw} {name} {fields_s}{})", doc_marker(doc))
+        }
+        Node::Protocol {
+            name,
+            extends,
+            members,
+            doc,
+        } => {
+            let mut s = format!("(protocol {name}");
+            if let Some(p) = extends {
+                s.push_str(&format!(" extends:{p}"));
+            }
+            s.push_str(doc_marker(doc));
+            for m in members {
+                s.push(' ');
+                s.push_str(&proto_member_dump(ast, m));
+            }
+            s.push(')');
+            s
+        }
+        Node::Implement {
+            protocol,
+            type_name,
+            methods,
+        } => {
+            let mut s = format!("(implement {protocol} for {type_name}");
+            for m in methods {
+                s.push(' ');
+                s.push_str(&dump(ast, *m));
+            }
+            s.push(')');
+            s
+        }
         Node::Error => "<error>".to_string(),
         Node::ExprStmt(e) => dump(ast, *e),
+    }
+}
+
+/// A ` doc` marker when a docstring span is present, else "".
+fn doc_marker(doc: &Option<Span>) -> &'static str {
+    if doc.is_some() { " doc" } else { "" }
+}
+
+/// Renders a protocol member: `(req to name (params …))` (required) or
+/// `(def fn name (params …) body)` (default, with a body).
+fn proto_member_dump(ast: &Ast, m: &ProtoMember) -> String {
+    let kw = match m.kind {
+        CallableKind::Proc => "to",
+        CallableKind::Func => "fn",
+    };
+    match m.body {
+        None => format!("(req {kw} {} {})", m.name, params_dump(ast, &m.params)),
+        Some(b) => format!(
+            "(def {kw} {} {} {})",
+            m.name,
+            params_dump(ast, &m.params),
+            dump(ast, b)
+        ),
     }
 }
 
@@ -631,4 +699,109 @@ fn declarations_nest_and_recover() {
     assert!(prog_diags("to f(a end").contains(&"syntax-error"));
     assert!(prog_diags("to () end").contains(&"syntax-error"));
     assert!(prog_diags("fn 1() end").contains(&"syntax-error"));
+}
+
+#[test]
+fn record_declarations() {
+    assert_eq!(
+        program_of("record Point with x, y end"),
+        "(module (record Point (fields x y)))"
+    );
+    assert_eq!(
+        program_of("ref record Turtle with position, heading, pen_down end"),
+        "(module (ref-record Turtle (fields position heading pen_down)))"
+    );
+    // A docstring-only body is captured (rendered as a `doc` marker).
+    assert_eq!(
+        program_of("record P with x\n  \"A point.\"\nend"),
+        "(module (record P (fields x) doc))"
+    );
+    assert!(prog_diags("record Point with x, y end").is_empty());
+    // A record body may contain only a docstring (L§9.1).
+    assert!(prog_diags("record P with x\n  compute()\nend").contains(&"syntax-error"));
+}
+
+#[test]
+fn protocol_declarations() {
+    // A required member (no body) and a default member (with a body).
+    assert_eq!(
+        program_of("protocol Iterable\n  to each(self, do body)\nend"),
+        "(module (protocol Iterable (req to each (params self do:body))))"
+    );
+    assert_eq!(
+        program_of("protocol Sized\n  fn size(self)\n    return 0\n  end\nend"),
+        "(module (protocol Sized (def fn size (params self) (block (return 0)))))"
+    );
+    // `extends` and a leading docstring.
+    assert_eq!(
+        program_of("protocol Child extends Parent\n  \"Doc.\"\n  to m(self)\nend"),
+        "(module (protocol Child extends:Parent doc (req to m (params self))))"
+    );
+    // An empty protocol.
+    assert_eq!(
+        program_of("protocol Empty end"),
+        "(module (protocol Empty))"
+    );
+    assert!(prog_diags("protocol Iterable\n  to each(self, do body)\nend").is_empty());
+}
+
+#[test]
+fn implement_declarations() {
+    assert_eq!(
+        program_of(
+            "implement Iterable for Range\n  to each(r, do body)\n    body(r.start)\n  end\nend"
+        ),
+        "(module (implement Iterable for Range \
+         (to each (params r do:body) (block (call body (. r start))))))"
+    );
+    assert!(prog_diags("implement P for T\n  fn m(self) 1 end\nend").is_empty());
+    // Missing `for` recovers.
+    assert!(prog_diags("implement P T end").contains(&"syntax-error"));
+}
+
+#[test]
+fn protocol_member_trailing_end_is_a_provisional_ambiguity() {
+    // PROVISIONAL (L§10.1 grammar ambiguity — see claude-todo, needs a user
+    // ruling). A required member is a bare signature; a default has a NON-empty
+    // body + `end`. A bodyless signature directly followed by `end` treats that
+    // `end` as the PROTOCOL's close (matching the spec's `Iterable` example), so
+    // an empty-body default is not expressible.
+    assert_eq!(
+        program_of("protocol P\n  to noop(self)\nend"),
+        "(module (protocol P (req to noop (params self))))"
+    );
+    // KNOWN LIMITATION of this provisional choice: writing each member with an
+    // explicit trailing `end` misparses — `a`'s `end` closes the protocol and
+    // `b` leaks out. Pinned so a future spec resolution updates it deliberately.
+    assert!(prog_diags("protocol P to a(self) end to b(self) end end").contains(&"syntax-error"));
+}
+
+#[test]
+fn docstring_span_captures_the_raw_literal() {
+    // The captured docstring span is the raw string literal; a docstring's
+    // interpolation is NOT parsed (S-27), so the span still covers `{x}` as text.
+    let src = "record P with x\n  \"A point.\"\nend";
+    let nfc = normalize(src);
+    let doc = record_doc_span(&parse_program(nfc.as_ref(), M).ast).expect("has a docstring");
+    assert_eq!(&nfc[doc.start as usize..doc.end as usize], "\"A point.\"");
+
+    let src2 = "record Q with x\n  \"Value {x}.\"\nend";
+    let nfc2 = normalize(src2);
+    let doc2 = record_doc_span(&parse_program(nfc2.as_ref(), M).ast).expect("has a docstring");
+    assert_eq!(
+        &nfc2[doc2.start as usize..doc2.end as usize],
+        "\"Value {x}.\""
+    );
+}
+
+/// The docstring span of the first top-level record, if any.
+fn record_doc_span(ast: &Ast) -> Option<Span> {
+    let root = ast.root()?;
+    let Node::Module(stmts) = ast.node(root) else {
+        return None;
+    };
+    stmts.iter().find_map(|&s| match ast.node(s) {
+        Node::Record { doc, .. } => *doc,
+        _ => None,
+    })
 }

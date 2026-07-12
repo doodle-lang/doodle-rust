@@ -59,8 +59,9 @@ impl super::Parser<'_> {
     }
 
     /// Parses `'(' params? ')'`, returning the parameters. On a missing `(` it
-    /// reports and returns no parameters (the body parse then recovers).
-    fn param_list(&mut self) -> Vec<Param> {
+    /// reports and returns no parameters (the body parse then recovers). Shared
+    /// with protocol members (typedecl).
+    pub(super) fn param_list(&mut self) -> Vec<Param> {
         if !matches!(self.peek_kind(), Some(TokenKind::LParen)) {
             let span = self.peek_span();
             self.error(span, "expected `(` to begin the parameter list");

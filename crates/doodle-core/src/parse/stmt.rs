@@ -108,6 +108,11 @@ impl super::Parser<'_> {
             Some(TokenKind::Keyword(K::Fn)) if self.next_is_ident() => {
                 self.callable_decl(CallableKind::Func)
             }
+            // Type/protocol declarations (L§9/§10). `ref` introduces `ref record`.
+            // The module-level-only placement rule (L§7.1) is enforced in M1.8c.
+            Some(TokenKind::Keyword(K::Record | K::Ref)) => self.record_decl(),
+            Some(TokenKind::Keyword(K::Protocol)) => self.protocol_decl(),
+            Some(TokenKind::Keyword(K::Implement)) => self.implement_decl(),
             // `if`/`try`/anonymous-`fn` (also statements) fall through to the
             // expression parser, which handles them as primaries; the rest are
             // expression statements or assignments.
@@ -220,13 +225,48 @@ impl super::Parser<'_> {
         self.push(Node::Error, Span::new(span.start, end))
     }
 
-    fn skip_separators(&mut self) {
+    pub(super) fn skip_separators(&mut self) {
         while matches!(
             self.peek_kind(),
             Some(TokenKind::Newline | TokenKind::Semicolon)
         ) {
             self.advance();
         }
+    }
+
+    /// If the cursor is at a string literal, consumes its whole token stream
+    /// (`StrStart` … `StrEnd`, including any nested interpolation strings)
+    /// *without* parsing the interpolations, and returns the literal's raw
+    /// source span — a docstring's `{ … }` is raw text, not an executed
+    /// expression (S-27, L§8.6). Returns `None` if not at a string.
+    pub(super) fn capture_docstring(&mut self) -> Option<Span> {
+        if !matches!(self.peek_kind(), Some(TokenKind::StrStart)) {
+            return None;
+        }
+        let start = self.peek_span().start;
+        let mut end = start;
+        let mut depth = 0u32;
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::StrStart) => depth += 1,
+                Some(TokenKind::StrEnd) => {
+                    end = self.peek_span().end;
+                    self.advance();
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                // The lexer balances StrStart/StrEnd, so this only fires on a
+                // truncated stream (already diagnosed); stop rather than spin.
+                None | Some(TokenKind::Eof) => break,
+                _ => {}
+            }
+            end = self.peek_span().end;
+            self.advance();
+        }
+        Some(Span::new(start, end))
     }
 
     /// Whether the token after the cursor is an identifier — the lookahead that
@@ -257,6 +297,17 @@ impl super::Parser<'_> {
         } else {
             let span = self.peek_span();
             self.error(span, &format!("expected `=` in this `{what}`"));
+        }
+    }
+
+    /// Consumes a specific keyword, reporting `msg` (without consuming) if the
+    /// cursor is elsewhere.
+    pub(super) fn expect_keyword(&mut self, kw: Keyword, msg: &str) {
+        if self.peek_kind() == Some(TokenKind::Keyword(kw)) {
+            self.advance();
+        } else {
+            let span = self.peek_span();
+            self.error(span, msg);
         }
     }
 

@@ -1,0 +1,15 @@
+#! clause: L10.1
+#! mode: static
+#! stage: parse
+protocol Iterable
+    """
+    Types whose elements can be visited in order.
+    """
+    to each(self, do body)
+end
+
+protocol Sized
+    fn size(self)
+        return 0
+    end
+end

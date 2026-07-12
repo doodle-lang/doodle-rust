@@ -17,6 +17,7 @@ mod decl;
 mod decode;
 mod postfix;
 mod stmt;
+mod typedecl;
 
 use crate::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::diag::Diagnostic;
