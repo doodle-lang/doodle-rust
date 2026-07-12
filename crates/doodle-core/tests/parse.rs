@@ -239,17 +239,18 @@ fn doc_marker(doc: &Option<Span>) -> &'static str {
     if doc.is_some() { " doc" } else { "" }
 }
 
-/// Renders a protocol member: `(req to name (params …))` (required) or
-/// `(def fn name (params …) body)` (default, with a body).
+/// Renders a protocol member: `(req to name[ doc] (params …))` (required) or
+/// `(def fn name[ doc] (params …) body)` (default, with a body).
 fn proto_member_dump(ast: &Ast, m: &ProtoMember) -> String {
     let kw = match m.kind {
         CallableKind::Proc => "to",
         CallableKind::Func => "fn",
     };
+    let d = doc_marker(&m.doc);
     match m.body {
-        None => format!("(req {kw} {} {})", m.name, params_dump(ast, &m.params)),
+        None => format!("(req {kw} {}{d} {})", m.name, params_dump(ast, &m.params)),
         Some(b) => format!(
-            "(def {kw} {} {} {})",
+            "(def {kw} {}{d} {} {})",
             m.name,
             params_dump(ast, &m.params),
             dump(ast, b)
@@ -732,18 +733,18 @@ fn record_declarations() {
 
 #[test]
 fn protocol_declarations() {
-    // A required member (no body) and a default member (with a body).
+    // A required member (empty body + its own `end`) and a default member.
     assert_eq!(
-        program_of("protocol Iterable\n  to each(self, do body)\nend"),
+        program_of("protocol Iterable\n  to each(self, do body) end\nend"),
         "(module (protocol Iterable (req to each (params self do:body))))"
     );
     assert_eq!(
         program_of("protocol Sized\n  fn size(self)\n    return 0\n  end\nend"),
         "(module (protocol Sized (def fn size (params self) (block (return 0)))))"
     );
-    // `extends` and a leading docstring.
+    // `extends` and a leading docstring; a required member with its own `end`.
     assert_eq!(
-        program_of("protocol Child extends Parent\n  \"Doc.\"\n  to m(self)\nend"),
+        program_of("protocol Child extends Parent\n  \"Doc.\"\n  to m(self) end\nend"),
         "(module (protocol Child extends:Parent doc (req to m (params self))))"
     );
     // An empty protocol.
@@ -751,7 +752,7 @@ fn protocol_declarations() {
         program_of("protocol Empty end"),
         "(module (protocol Empty))"
     );
-    assert!(prog_diags("protocol Iterable\n  to each(self, do body)\nend").is_empty());
+    assert!(prog_diags("protocol Iterable\n  to each(self, do body) end\nend").is_empty());
 }
 
 #[test]
@@ -847,20 +848,28 @@ fn parenthesized_lvalue_is_allowed() {
 }
 
 #[test]
-fn protocol_member_trailing_end_is_a_provisional_ambiguity() {
-    // PROVISIONAL (L§10.1 grammar ambiguity — see claude-todo, needs a user
-    // ruling). A required member is a bare signature; a default has a NON-empty
-    // body + `end`. A bodyless signature directly followed by `end` treats that
-    // `end` as the PROTOCOL's close (matching the spec's `Iterable` example), so
-    // an empty-body default is not expressible.
+fn protocol_members_each_carry_their_own_end_s52() {
+    // Every member is terminated by its own `end` (S-52): an empty body is a
+    // required member, a non-empty body a default. Two members, each with `end`.
     assert_eq!(
-        program_of("protocol P\n  to noop(self)\nend"),
-        "(module (protocol P (req to noop (params self))))"
+        program_of("protocol P\n  to a(self) end\n  fn b(self) return 1 end\nend"),
+        "(module (protocol P (req to a (params self)) \
+         (def fn b (params self) (block (return 1)))))"
     );
-    // KNOWN LIMITATION of this provisional choice: writing each member with an
-    // explicit trailing `end` misparses — `a`'s `end` closes the protocol and
-    // `b` leaks out. Pinned so a future spec resolution updates it deliberately.
-    assert!(prog_diags("protocol P to a(self) end to b(self) end end").contains(&"syntax-error"));
+    // A required member may carry a docstring (still an empty body).
+    assert_eq!(
+        program_of("protocol P\n  to m(self)\n    \"Does m.\"\n  end\nend"),
+        "(module (protocol P (req to m doc (params self))))"
+    );
+    // A bare signature (no member `end`) eats the protocol's `end` and closes it
+    // early → a targeted error naming the member-`end` requirement.
+    let nfc = normalize("protocol P\n  to a(self)\nend");
+    let p = parse_program(nfc.as_ref(), M);
+    assert!(
+        p.diagnostics
+            .iter()
+            .any(|d| d.message.contains("needs its own `end`"))
+    );
 }
 
 #[test]

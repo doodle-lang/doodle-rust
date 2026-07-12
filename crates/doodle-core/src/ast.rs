@@ -261,9 +261,10 @@ pub enum Param {
     },
 }
 
-/// A protocol member (L§10.1): a `to`/`fn` signature. A `body` of `None` is a
-/// **required** member; `Some` is a **default** member (implementations inherit
-/// it but may override).
+/// A protocol member (L§10.1): a `to`/`fn` signature terminated by its own
+/// `end`. An **empty** body (docstring aside) is a **required** member (`body`
+/// = `None`); a **non-empty** body is a **default** (`body` = `Some`) that
+/// implementations inherit but may override.
 #[derive(Clone, Debug)]
 pub struct ProtoMember {
     /// Whether the member is a procedure (`to`) or a function (`fn`).
@@ -274,6 +275,9 @@ pub struct ProtoMember {
     pub params: Vec<Param>,
     /// The default-implementation body ([`Node::Block`]), or `None` if required.
     pub body: Option<NodeId>,
+    /// The member's docstring span (L§8.6), if present. A required member may
+    /// carry one.
+    pub doc: Option<Span>,
 }
 
 /// A dict-literal entry `key: value` (L§4.8).

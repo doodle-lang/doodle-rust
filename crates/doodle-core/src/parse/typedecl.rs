@@ -96,7 +96,7 @@ impl super::Parser<'_> {
             };
             members.push(self.proto_member(kind));
         }
-        let end = self.expect_end_span("protocol");
+        let end = self.close_protocol();
         self.push(
             Node::Protocol {
                 name,
@@ -108,39 +108,53 @@ impl super::Parser<'_> {
         )
     }
 
-    /// A protocol member (L§10.1): a `to`/`fn` signature, required (no body) or
-    /// default (a NON-empty body closed by `end`).
-    ///
-    /// PROVISIONAL disambiguation of a genuine L§10.1 grammar ambiguity (the
-    /// grammar's `(body)? 'end'?` leaves both optional; see claude-todo, needs a
-    /// user ruling): after the signature, a following member (`to`/`fn`), `end`,
-    /// or EOF means "required, no body" and any `end` belongs to the enclosing
-    /// protocol — matching the spec's `Iterable` example. Consequences: an
-    /// empty-body default (`sig end`) is not expressible, and a member written
-    /// with an explicit trailing `end` before another member is misparsed (that
-    /// `end` closes the protocol early). Resolve in L§10.1 before this ships.
+    /// Consumes the protocol's closing `end`, returning its end offset. On a
+    /// missing `end` the message names the member-`end` requirement, since a
+    /// bare member signature (missing its own `end`, S-52) silently eats this
+    /// `end` and closes the protocol early.
+    fn close_protocol(&mut self) -> u32 {
+        let span = self.peek_span();
+        if matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::End))) {
+            self.advance();
+            span.end
+        } else {
+            self.error(
+                span,
+                "expected `end` to close this `protocol` — each `to`/`fn` member \
+                 needs its own `end` too (an empty body is a required member)",
+            );
+            span.start
+        }
+    }
+
+    /// A protocol member (L§10.1): a `to`/`fn` signature terminated by its own
+    /// `end` (S-52). An empty body (a docstring aside) is a **required** member;
+    /// a non-empty body is a **default**. A member's leading string is always its
+    /// docstring (a signature has no result), so it is captured raw regardless of
+    /// `to`/`fn`.
     fn proto_member(&mut self, kind: CallableKind) -> ProtoMember {
         self.advance(); // `to` / `fn`
         let (name, _) = self.expect_name("expected a member name");
         let params = self.param_list();
-        self.skip_separators();
-        let body = if matches!(
-            self.peek_kind(),
-            Some(TokenKind::Keyword(Keyword::To | Keyword::Fn | Keyword::End) | TokenKind::Eof)
-                | None
-        ) {
+        let (block, doc) = self.body_with_doc(is_end_terminator, false);
+        self.expect_end_span("protocol member");
+        let body = if self.block_is_empty(block) {
             None
         } else {
-            let b = self.block(is_end_terminator);
-            self.expect_end_span("protocol member");
-            Some(b)
+            Some(block)
         };
         ProtoMember {
             kind,
             name,
             params,
             body,
+            doc,
         }
+    }
+
+    /// Whether `id` is an empty [`Node::Block`].
+    fn block_is_empty(&self, id: NodeId) -> bool {
+        matches!(self.ast.node(id), Node::Block(stmts) if stmts.is_empty())
     }
 
     /// An `implement P for T methods… end` block (L§10.2): the methods are

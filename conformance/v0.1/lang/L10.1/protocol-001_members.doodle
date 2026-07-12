@@ -6,6 +6,8 @@ protocol Iterable
     Types whose elements can be visited in order.
     """
     to each(self, do body)
+        "Visits each element in order."
+    end
 end
 
 protocol Sized
