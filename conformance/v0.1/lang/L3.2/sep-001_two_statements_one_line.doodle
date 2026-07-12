@@ -1,4 +1,5 @@
 #! clause: L3.2
 #! mode: static
-#! expect-static-error: expected a statement separator @ 4:10
+#! stage: parse
+#! expect-static-error: expected a statement separator @ 5:10
 print(1) print(2)

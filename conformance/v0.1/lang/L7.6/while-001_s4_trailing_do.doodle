@@ -1,0 +1,6 @@
+#! clause: L7.6
+#! mode: static
+#! stage: parse
+#! expect-static-error: block can't start a statement @ 6:1
+while f() do g() end
+do h() end

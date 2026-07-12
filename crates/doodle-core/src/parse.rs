@@ -1,18 +1,21 @@
-//! The parser (L§6): a Pratt expression parser over the lexer's token stream,
-//! producing the [`Ast`] arena. Numeric value lowering (digits → `i64`/bignum/
-//! `f64`) happens here — the lexer validated only shape (M1.3).
+//! The parser (L§6–§7): a Pratt expression parser and a recursive-descent
+//! statement parser over the lexer's token stream, producing the [`Ast`] arena.
+//! Numeric value lowering (digits → `i64`/bignum/`f64`) happens here — the lexer
+//! validated only shape (M1.3).
 //!
-//! M1.6a–b cover the operator-precedence tower (L§6.5) — literal/identifier
-//! primaries, prefix `-`/`+`/`not`, the nine binary levels with right-associative
-//! `**` and non-associative comparisons (`a < b < c` is a static error), and
-//! parenthesized grouping — plus string and bytes literals, with escape decoding
-//! and `{ … }` interpolation assembled from the lexer's structured stream (the
-//! `decode` submodule). Calls/postfix, list/dict literals, and the `if`/`try`/
-//! anonymous-`fn` forms arrive in later M1.6 pieces.
+//! Expressions (M1.6, `stmt`/`control`/`collection`/`decode`/`postfix`): the
+//! operator-precedence tower (L§6.5), string/bytes literals with escape decoding
+//! and `{ … }` interpolation, postfix `.`/`[]`/`()`, list/dict literals, and the
+//! `if`/`try` forms (which double as statements). Statements (M1.7, `stmt`):
+//! `let`/`const`/assignment, `while`/`loop`/`with`, `try`, and the non-local
+//! exits, separated into bodies (L§7.1). Named declarations and anonymous `fn`
+//! (which share the `params` grammar) arrive in M1.8.
 
 mod collection;
+mod control;
 mod decode;
 mod postfix;
+mod stmt;
 
 use crate::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::diag::Diagnostic;
@@ -39,16 +42,7 @@ pub fn parse_expression(source: &str, module: ModuleId) -> Parsed {
         tokens,
         diagnostics,
     } = lex(source, module);
-    let mut p = Parser {
-        source,
-        tokens: &tokens,
-        pos: 0,
-        ast: Ast::new(),
-        diagnostics,
-        module,
-        depth: 0,
-        bailed: false,
-    };
+    let mut p = Parser::new(source, &tokens, diagnostics, module);
     p.skip_newlines();
     let root = p.expr(0);
     p.skip_newlines();
@@ -61,6 +55,32 @@ pub fn parse_expression(source: &str, module: ModuleId) -> Parsed {
         root,
         diagnostics: p.diagnostics,
     }
+}
+
+/// Lexes and parses `source` (load-normalized, see [`crate::source::normalize`])
+/// as a whole program — a module body of statements (L§7.1, Appendix A). The
+/// returned [`Parsed::root`] is the [`Node::Module`], also set as the AST root.
+#[must_use]
+pub fn parse_program(source: &str, module: ModuleId) -> Parsed {
+    let Lexed {
+        tokens,
+        diagnostics,
+    } = lex(source, module);
+    let mut p = Parser::new(source, &tokens, diagnostics, module);
+    let root = p.program();
+    Parsed {
+        ast: p.ast,
+        root,
+        diagnostics: p.diagnostics,
+    }
+}
+
+/// Parses `source` as a program and returns only its diagnostics (lexical and
+/// syntactic) — the conformance runner's parse-stage entry, mirroring
+/// [`crate::lex_to_diagnostics`]. `source` must be load-normalized.
+#[must_use]
+pub fn parse_to_diagnostics(source: &str) -> Vec<Diagnostic> {
+    parse_program(source, ModuleId(0)).diagnostics
 }
 
 // Binding powers, higher = binds tighter, matching the L§6.5 precedence table.
@@ -92,24 +112,54 @@ struct Parser<'a> {
     bailed: bool,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
+    fn new(
+        source: &'a str,
+        tokens: &'a [crate::lex::Token],
+        diagnostics: Vec<Diagnostic>,
+        module: ModuleId,
+    ) -> Self {
+        Parser {
+            source,
+            tokens,
+            pos: 0,
+            ast: Ast::new(),
+            diagnostics,
+            module,
+            depth: 0,
+            bailed: false,
+        }
+    }
+
     /// Parses an expression whose operators all bind at least as tightly as
     /// `min_bp` (precedence climbing), under the recursion-depth guard.
     fn expr(&mut self, min_bp: u8) -> NodeId {
+        if let Some(err) = self.guard_depth("expression") {
+            return err;
+        }
+        let result = self.expr_climb(min_bp);
+        self.depth -= 1;
+        result
+    }
+
+    /// Enters a nesting level under [`MAX_DEPTH`]. Returns `Some(error_node)` to
+    /// short-circuit with when the limit is hit (or a prior bail is still
+    /// unwinding); on `None` the level was entered and the caller must
+    /// `self.depth -= 1` when it finishes. Shared by [`Parser::expr`] and
+    /// [`Parser::statement`] so bodies and expressions share one depth budget.
+    fn guard_depth(&mut self, what: &str) -> Option<NodeId> {
         if self.bailed {
-            return self.push(Node::Error, self.peek_span());
+            return Some(self.push(Node::Error, self.peek_span()));
         }
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             self.depth -= 1;
             let span = self.peek_span();
-            self.error(span, "this expression is nested too deeply");
+            self.error(span, &format!("this {what} is nested too deeply"));
             self.bailed = true; // suppress the unwinding cascade
-            return self.push(Node::Error, span);
+            return Some(self.push(Node::Error, span));
         }
-        let result = self.expr_climb(min_bp);
-        self.depth -= 1;
-        result
+        None
     }
 
     fn expr_climb(&mut self, min_bp: u8) -> NodeId {
@@ -197,6 +247,12 @@ impl Parser<'_> {
             TokenKind::LParen => self.grouping(),
             TokenKind::LBracket => self.list_lit(),
             TokenKind::LBrace => self.dict_lit(),
+            // `if`/`try` are expressions (L§6.8/§6.9) as well as statements
+            // (L§7.5/§7.9); the parse is identical, so the same node serves both
+            // positions. Whether a value-producing `else`/branch is required is
+            // semantic, deferred to M1.10.
+            TokenKind::Keyword(Keyword::If) => self.if_expr(),
+            TokenKind::Keyword(Keyword::Try) => self.try_expr(),
             // None of these can start an expression, and none is consumed: an
             // enclosing construct owns its closer (`)`/`]`/`}`), the string
             // assembler owns `InterpEnd`/`StrEnd`, and `Eof` ends the loop — so

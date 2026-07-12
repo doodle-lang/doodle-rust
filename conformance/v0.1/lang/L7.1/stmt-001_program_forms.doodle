@@ -1,0 +1,13 @@
+#! clause: L7.1
+#! mode: static
+#! stage: parse
+let x = 1
+const y = 2
+if x < y then
+    x = y
+else
+    x = 0
+end
+while x > 0 do
+    x = x - 1
+end

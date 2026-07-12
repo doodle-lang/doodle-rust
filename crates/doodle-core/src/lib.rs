@@ -26,6 +26,7 @@ pub mod stage;
 pub mod unicode;
 
 pub use lex::lex_to_diagnostics;
+pub use parse::parse_to_diagnostics;
 
 /// Returns the version of the doodle-core crate.
 pub fn version() -> &'static str {

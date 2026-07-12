@@ -1,9 +1,11 @@
 //! The abstract syntax tree: a flat arena of [`Node`]s indexed by [`NodeId`].
 //!
-//! Shell for M0: the arena plus the handful of node kinds needed to hand-build
-//! a one-statement program. The full per-module `ResolvedModule` the front end
-//! will produce (slot tables, capture plans, exit annotations, …) is described
-//! in machine-design §2; there is no parser yet.
+//! The parser (M1.6/M1.7) grows this: expression nodes carry fully lowered
+//! literal values, statement nodes carry the L§7 forms, and a [`Node::Block`]
+//! is a body (a statement sequence, §7.1). The full per-module `ResolvedModule`
+//! the resolver produces (slot tables, capture plans, exit annotations, …) is
+//! described in machine-design §2; the resolver (M1.9+) annotates names, slots,
+//! and tail positions on top of this tree.
 
 use crate::span::Span;
 
@@ -86,12 +88,95 @@ pub enum Node {
         /// The arguments, positional before keyword.
         args: Vec<Arg>,
     },
+    /// A `let` binding `let name = value` (L§5.2): a new mutable binding.
+    Let {
+        /// The bound name.
+        name: Box<str>,
+        /// The initializer expression.
+        value: NodeId,
+    },
+    /// A `const` binding `const name = value` (L§5.2): a non-reassignable binding.
+    Const {
+        /// The bound name.
+        name: Box<str>,
+        /// The initializer expression.
+        value: NodeId,
+    },
+    /// An assignment `target = value` (L§5.3). `target` is an lvalue: an
+    /// [`Node::Ident`], [`Node::Field`], or [`Node::Index`].
+    Assign {
+        /// The assignment target (an lvalue).
+        target: NodeId,
+        /// The assigned value.
+        value: NodeId,
+    },
+    /// A body: a sequence of statements (L§7.1), its own scope (L§5.4).
+    Block(Vec<NodeId>),
+    /// An `if` (L§6.8/§7.5): condition/body arms (`else if` flattened into the
+    /// list) and an optional final `else` body. The statement-vs-expression
+    /// distinction (whether a final `else` is required) is semantic (M1.10).
+    If {
+        /// The `if` / `else if` arms, in order.
+        arms: Vec<IfArm>,
+        /// The final `else` body, if present.
+        else_body: Option<NodeId>,
+    },
+    /// A `while` loop `while cond do body end` (L§7.6).
+    While {
+        /// The loop condition (a `Bool`).
+        cond: NodeId,
+        /// The loop body.
+        body: NodeId,
+    },
+    /// A `loop` `loop do body end` (L§7.7): repeats until a `break`/`return`/raise.
+    Loop {
+        /// The loop body.
+        body: NodeId,
+    },
+    /// A `with` `with name = value do body end` (L§5.5): dynamic-parameter binding.
+    With {
+        /// The dynamic-parameter name.
+        name: Box<str>,
+        /// The value bound for the body's dynamic extent.
+        value: NodeId,
+        /// The body run under the binding.
+        body: NodeId,
+    },
+    /// A `try` `try body rescue e handler end` (L§6.9/§12.2).
+    Try {
+        /// The protected body.
+        body: NodeId,
+        /// The name the caught value is bound to in the handler.
+        rescue_name: Box<str>,
+        /// The rescue handler body.
+        rescue_body: NodeId,
+    },
+    /// A `return` (L§7.10): exits the enclosing procedure/function, optionally
+    /// with a value.
+    Return(Option<NodeId>),
+    /// A `break` (L§7.10): exits the nearest block-consuming call, optionally
+    /// with a value.
+    Break(Option<NodeId>),
+    /// A `continue` (L§7.10): ends the current block invocation, optionally
+    /// yielding a value.
+    Continue(Option<NodeId>),
+    /// A `raise` (L§12.1): raises an exception; a bare `raise` re-raises.
+    Raise(Option<NodeId>),
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A module body: its top-level statements in source order (L§7).
     Module(Vec<NodeId>),
     /// A placeholder for a syntax error, so parsing can recover and continue.
     Error,
+}
+
+/// One arm of an `if` (L§6.8/§7.5): a condition and the body run when it holds.
+#[derive(Clone, Debug)]
+pub struct IfArm {
+    /// The arm's condition (a `Bool`).
+    pub cond: NodeId,
+    /// The body run when the condition is `true`.
+    pub body: NodeId,
 }
 
 /// A dict-literal entry `key: value` (L§4.8).

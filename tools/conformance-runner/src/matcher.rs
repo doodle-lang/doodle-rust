@@ -1,26 +1,27 @@
 //! Executing a conformance test against doodle-core and matching its declared
 //! expectations against real output.
 //!
-//! At M1.3 only `stage: lex` is executable: the lexer runs and its diagnostics
-//! are matched against `expect-static-error` / `expect-warning`. Higher stages
-//! (parse/full/run) are still SKIPped by the caller, so their expectation kinds
-//! (`expect-out` / `expect-raise`) never reach here yet — a lex test carrying
-//! one is a mis-authored test and fails loudly.
+//! At M1.7 the `stage: lex` and `stage: parse` static stages are executable:
+//! the lexer or parser runs and its diagnostics are matched against
+//! `expect-static-error` / `expect-warning`. Higher stages (full/run) are still
+//! SKIPped by the caller, so their expectation kinds (`expect-out` /
+//! `expect-raise`) never reach here yet — a static test carrying one is
+//! mis-authored and fails loudly.
 
 use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
-use doodle_core::lex_to_diagnostics;
 use doodle_core::source::{LineIndex, Position, normalize};
 use doodle_core::stage::Stage;
+use doodle_core::{lex_to_diagnostics, parse_to_diagnostics};
 
 /// Executes `test` (whose required stage doodle-core implements) against
 /// `source`, returning `Ok(())` on a full match or `Err(reasons)` listing every
 /// mismatch found.
 pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
     match test.required {
-        Stage::Lex => run_lex(test, source),
+        Stage::Lex | Stage::Parse => run_static(test, source, test.required),
         // The caller dispatches here only when implemented_through() >= required,
-        // and Stage::Lex is the highest implemented stage, so no higher stage
+        // and Stage::Parse is the highest implemented stage, so no higher stage
         // reaches this arm. It exists so a future bump that forgets its executor
         // fails loudly instead of silently passing.
         other => Err(vec![format!(
@@ -29,21 +30,35 @@ pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
     }
 }
 
-/// Runs the lexer over `source` and matches its diagnostics against the test's
-/// static-error / warning expectations (conformance/README.md § `mode: static`).
-fn run_lex(test: &Test, source: &str) -> Result<(), Vec<String>> {
-    let mut reasons = Vec::new();
+/// The `stage:` directive spelling of a static stage, for diagnostic text.
+fn stage_label(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Lex => "lex",
+        Stage::Parse => "parse",
+        Stage::Full => "full",
+        Stage::Run => "run",
+    }
+}
 
-    // A lex test declares only load-time expectations; run-mode kinds are
-    // meaningless at this stage and indicate a mis-authored test. Echo the
-    // offending directive so the author sees exactly what to remove.
+/// Runs `source` to the given static `stage` (lexing, or lexing+parsing) and
+/// matches the resulting diagnostics against the test's static-error / warning
+/// expectations (conformance/README.md § `mode: static`).
+fn run_static(test: &Test, source: &str, stage: Stage) -> Result<(), Vec<String>> {
+    let mut reasons = Vec::new();
+    let label = stage_label(stage);
+
+    // A static test declares only load-time expectations; run-mode kinds are
+    // meaningless here and indicate a mis-authored test. Echo the offending
+    // directive so the author sees exactly what to remove.
     for exp in &test.expectations {
         match exp {
             Expectation::Out { text } => {
-                reasons.push(format!("`expect-out: {text}` is not valid at `stage: lex`"));
+                reasons.push(format!(
+                    "`expect-out: {text}` is not valid at `stage: {label}`"
+                ));
             }
             Expectation::Raise { substring, pos } => reasons.push(format!(
-                "`expect-raise: {substring} @ {}:{}` is not valid at `stage: lex`",
+                "`expect-raise: {substring} @ {}:{}` is not valid at `stage: {label}`",
                 pos.line, pos.column
             )),
             Expectation::StaticError { .. } | Expectation::Warning { .. } => {}
@@ -52,7 +67,10 @@ fn run_lex(test: &Test, source: &str) -> Result<(), Vec<String>> {
 
     let nfc = normalize(source);
     let index = LineIndex::new(nfc.as_ref());
-    let diagnostics = lex_to_diagnostics(nfc.as_ref());
+    let diagnostics = match stage {
+        Stage::Parse => parse_to_diagnostics(nfc.as_ref()),
+        _ => lex_to_diagnostics(nfc.as_ref()),
+    };
     // Each diagnostic paired with its source position (None if it has no span,
     // which cannot match a positioned expectation).
     let located: Vec<(&Diagnostic, Option<Position>)> = diagnostics
@@ -217,6 +235,41 @@ mod tests {
             reasons_of(&t, "42\n")
                 .iter()
                 .any(|r| r.contains("no warning matching"))
+        );
+    }
+
+    fn parse_test(expectations: Vec<Expectation>) -> Test {
+        Test {
+            id: "L5.3-assign-001".to_string(),
+            clauses: vec!["L5.3".to_string()],
+            mode: Mode::Static,
+            required: Stage::Parse,
+            expectations,
+        }
+    }
+
+    #[test]
+    fn parse_stage_matches_a_syntax_error() {
+        // `1 = 2` is a parse-stage static error (a non-lvalue assignment target)
+        // the lexer alone would never surface — so this exercises the parser arm.
+        let t = parse_test(vec![expect_error("the left side of", 1, 1)]);
+        assert!(execute(&t, "1 = 2\n").is_ok());
+    }
+
+    #[test]
+    fn parse_stage_clean_source_passes() {
+        assert!(execute(&parse_test(vec![]), "let x = 1\nx = x + 1\n").is_ok());
+    }
+
+    #[test]
+    fn a_run_mode_expectation_is_rejected_at_parse_stage() {
+        let t = parse_test(vec![Expectation::Out {
+            text: "3".to_string(),
+        }]);
+        assert!(
+            reasons_of(&t, "1 + 2\n")
+                .iter()
+                .any(|r| r.contains("not valid at `stage: parse`"))
         );
     }
 }

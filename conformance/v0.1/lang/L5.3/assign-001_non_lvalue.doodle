@@ -1,0 +1,5 @@
+#! clause: L5.3
+#! mode: static
+#! stage: parse
+#! expect-static-error: the left side of @ 5:1
+1 = 2

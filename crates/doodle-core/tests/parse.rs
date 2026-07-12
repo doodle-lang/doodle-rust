@@ -2,7 +2,7 @@
 //! associativity, and value lowering are visible in the expected output.
 
 use doodle_core::ast::{Arg, Ast, BinaryOp, DictKey, Node, NodeId, StrPart, UnaryOp};
-use doodle_core::parse::parse_expression;
+use doodle_core::parse::{parse_expression, parse_program};
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
 
@@ -18,6 +18,22 @@ fn ast_of(src: &str) -> String {
 fn diags_of(src: &str) -> Vec<&'static str> {
     let nfc = normalize(src);
     parse_expression(nfc.as_ref(), M)
+        .diagnostics
+        .iter()
+        .map(|d| d.code.slug())
+        .collect()
+}
+
+/// Parses `src` as a whole program and renders the module AST.
+fn program_of(src: &str) -> String {
+    let nfc = normalize(src);
+    let p = parse_program(nfc.as_ref(), M);
+    dump(&p.ast, p.root)
+}
+
+fn prog_diags(src: &str) -> Vec<&'static str> {
+    let nfc = normalize(src);
+    parse_program(nfc.as_ref(), M)
         .diagnostics
         .iter()
         .map(|d| d.code.slug())
@@ -96,9 +112,65 @@ fn dump(ast: &Ast, id: NodeId) -> String {
             let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
             format!("(bytes {})", hex.join(" "))
         }
+        Node::Let { name, value } => format!("(let {name} {})", dump(ast, *value)),
+        Node::Const { name, value } => format!("(const {name} {})", dump(ast, *value)),
+        Node::Assign { target, value } => {
+            format!("(assign {} {})", dump(ast, *target), dump(ast, *value))
+        }
+        Node::Block(stmts) => seq(ast, "block", stmts),
+        Node::Module(stmts) => seq(ast, "module", stmts),
+        Node::If { arms, else_body } => {
+            let mut s = String::from("(if");
+            for arm in arms {
+                s.push_str(&format!(
+                    " ({} {})",
+                    dump(ast, arm.cond),
+                    dump(ast, arm.body)
+                ));
+            }
+            if let Some(e) = else_body {
+                s.push_str(&format!(" else {}", dump(ast, *e)));
+            }
+            s.push(')');
+            s
+        }
+        Node::While { cond, body } => format!("(while {} {})", dump(ast, *cond), dump(ast, *body)),
+        Node::Loop { body } => format!("(loop {})", dump(ast, *body)),
+        Node::With { name, value, body } => {
+            format!("(with {name} {} {})", dump(ast, *value), dump(ast, *body))
+        }
+        Node::Try {
+            body,
+            rescue_name,
+            rescue_body,
+        } => format!(
+            "(try {} rescue {rescue_name} {})",
+            dump(ast, *body),
+            dump(ast, *rescue_body)
+        ),
+        Node::Return(o) => format!("(return{})", opt(ast, o)),
+        Node::Break(o) => format!("(break{})", opt(ast, o)),
+        Node::Continue(o) => format!("(continue{})", opt(ast, o)),
+        Node::Raise(o) => format!("(raise{})", opt(ast, o)),
         Node::Error => "<error>".to_string(),
         Node::ExprStmt(e) => dump(ast, *e),
-        Node::Module(_) => "<module>".to_string(),
+    }
+}
+
+/// Renders a keyword-tagged statement sequence: `(kw s1 s2 …)`, `(kw)` if empty.
+fn seq(ast: &Ast, kw: &str, stmts: &[NodeId]) -> String {
+    if stmts.is_empty() {
+        return format!("({kw})");
+    }
+    let items: Vec<String> = stmts.iter().map(|s| dump(ast, *s)).collect();
+    format!("({kw} {})", items.join(" "))
+}
+
+/// Renders an optional exit operand as a leading-space suffix, or "".
+fn opt(ast: &Ast, operand: &Option<NodeId>) -> String {
+    match operand {
+        Some(v) => format!(" {}", dump(ast, *v)),
+        None => String::new(),
     }
 }
 
@@ -336,4 +408,128 @@ fn syntax_errors_recover() {
     assert_eq!(diags_of("(1 + 2"), vec!["syntax-error"]);
     assert_eq!(diags_of(""), vec!["syntax-error"]);
     assert!(diags_of("1 + 2").is_empty());
+}
+
+#[test]
+fn statements_and_separators() {
+    // A module is a sequence of statements; a newline or `;` separates them.
+    assert_eq!(
+        program_of("let x = 1\nx = x + 1"),
+        "(module (let x 1) (assign x (+ x 1)))"
+    );
+    assert_eq!(program_of("f()\ng()"), "(module (call f) (call g))");
+    assert_eq!(program_of("a; b"), "(module a b)");
+    // Blank lines and leading/trailing separators are fine; the empty program
+    // is an empty module (no error).
+    assert_eq!(program_of("\n\nx\n\n"), "(module x)");
+    assert_eq!(program_of(""), "(module)");
+    assert!(prog_diags("let x = 1").is_empty());
+    // Two statements on one line without a separator is an error (both still
+    // parse, for recovery).
+    assert_eq!(prog_diags("f() g()"), vec!["syntax-error"]);
+    assert_eq!(program_of("f() g()"), "(module (call f) (call g))");
+}
+
+#[test]
+fn binding_and_assignment_forms() {
+    assert_eq!(program_of("let x = 1"), "(module (let x 1))");
+    assert_eq!(program_of("const y = 2 + 3"), "(module (const y (+ 2 3)))");
+    assert_eq!(program_of("a.b = c"), "(module (assign (. a b) c))");
+    assert_eq!(program_of("a[i] = v"), "(module (assign ([] a i) v))");
+    // Assignment is a statement, not an expression, so `==` still compares.
+    assert_eq!(program_of("a == b"), "(module (== a b))");
+    // Assigning to a non-lvalue is a static error (recovers to an assign shape).
+    assert_eq!(prog_diags("1 = 2"), vec!["syntax-error"]);
+    assert_eq!(prog_diags("f() = 2"), vec!["syntax-error"]);
+    // A `let` missing its name or `=` recovers.
+    assert!(prog_diags("let = 1").contains(&"syntax-error"));
+    assert!(prog_diags("let x 1").contains(&"syntax-error"));
+}
+
+#[test]
+fn if_forms() {
+    // A body is a block (its own scope, L§5.4), so a single statement still
+    // renders `(block …)`.
+    assert_eq!(program_of("if a then b end"), "(module (if (a (block b))))");
+    // `else if` flattens into arms; a trailing `else` is the else body.
+    assert_eq!(
+        program_of("if a then b else if c then d else e end"),
+        "(module (if (a (block b)) (c (block d)) else (block e)))"
+    );
+    // The same `if` node serves expression position (here, a `let` initializer).
+    assert_eq!(
+        program_of("let x = if a then 1 else 2 end"),
+        "(module (let x (if (a (block 1)) else (block 2))))"
+    );
+    // A multi-statement arm body.
+    assert_eq!(
+        program_of("if a then\n  f()\n  g()\nend"),
+        "(module (if (a (block (call f) (call g)))))"
+    );
+    // `else` binds to the nearest open `if`: with two `end`s, the `else y` is
+    // the inner `if`'s, and the outer `if` has no else.
+    assert_eq!(
+        program_of("if a then if b then x else y end end"),
+        "(module (if (a (block (if (b (block x)) else (block y))))))"
+    );
+    // With only one `end`, the `else` still binds inward, leaving the outer `if`
+    // unterminated — an error, not a dangling-else ambiguity.
+    assert!(prog_diags("if a then if b then x else y end").contains(&"syntax-error"));
+}
+
+#[test]
+fn loop_while_with_try() {
+    assert_eq!(
+        program_of("while a do b end"),
+        "(module (while a (block b)))"
+    );
+    assert_eq!(
+        program_of("loop do f() end"),
+        "(module (loop (block (call f))))"
+    );
+    assert_eq!(
+        program_of("with pen = red do draw() end"),
+        "(module (with pen red (block (call draw))))"
+    );
+    assert_eq!(
+        program_of("try risky() rescue e handle(e) end"),
+        "(module (try (block (call risky)) rescue e (block (call handle e))))"
+    );
+}
+
+#[test]
+fn nonlocal_exits() {
+    assert_eq!(program_of("return"), "(module (return))");
+    assert_eq!(program_of("return n * 2"), "(module (return (* n 2)))");
+    assert_eq!(program_of("break"), "(module (break))");
+    assert_eq!(program_of("continue x"), "(module (continue x))");
+    assert_eq!(program_of("raise err"), "(module (raise err))");
+    // A bare exit before a separator takes no operand.
+    assert_eq!(program_of("return\nx"), "(module (return) x)");
+}
+
+#[test]
+fn s4_header_parses_in_no_trailing_block_mode() {
+    // The `do … end` after the condition opens the `while` body, not a block
+    // argument to the call `f()` (S-4) — so this is a clean while with body
+    // `g()`, no diagnostics.
+    assert_eq!(
+        program_of("while f() do g() end"),
+        "(module (while (call f) (block (call g))))"
+    );
+    assert!(prog_diags("while f() do g() end").is_empty());
+    // A second, dangling `do … end` has nothing to attach to → the S-4 error.
+    assert!(prog_diags("while f() do g() end\ndo h() end").contains(&"syntax-error"));
+}
+
+#[test]
+fn statements_recover_and_bound_depth() {
+    // A missing `end` is reported, not looped or panicked on.
+    assert!(prog_diags("if a then b").contains(&"syntax-error"));
+    assert!(prog_diags("while a do b").contains(&"syntax-error"));
+    assert!(prog_diags("try a rescue e b").contains(&"syntax-error"));
+    // Deeply nested bodies bail with a diagnostic, never a stack overflow
+    // (bodies and expressions share the one depth budget).
+    let deep = format!("{}x{}", "if a then ".repeat(5000), " end".repeat(5000));
+    assert!(prog_diags(&deep).contains(&"syntax-error"));
 }
