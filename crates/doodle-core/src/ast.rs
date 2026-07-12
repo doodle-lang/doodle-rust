@@ -230,6 +230,10 @@ pub enum Node {
     },
     /// An `exports name, …` declaration (L§11.1): the module's public surface.
     Exports(Vec<Box<str>>),
+    /// An `import target, …` declaration (L§11.2). Each target carries the dotted
+    /// path only; whether a dotted path names a qualified module or a module
+    /// member is resolved at load, not parse (S-7).
+    Import(Vec<ImportTarget>),
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A file/root module body: its top-level statements in source order (L§7),
@@ -278,6 +282,19 @@ pub enum Param {
         /// The block parameter's name.
         name: Box<str>,
     },
+}
+
+/// One target of an `import` (L§11.2): a dotted `path`, optionally a wildcard
+/// (`.*`, all exported members) or renamed (`as alias`). The module-vs-member
+/// meaning of the path is resolved at load (S-7), not here.
+#[derive(Clone, Debug)]
+pub struct ImportTarget {
+    /// The dotted path segments (e.g. `["shapes", "circle"]`).
+    pub path: Vec<Box<str>>,
+    /// Whether the target is `path.*` (all exported members; not renamable).
+    pub wildcard: bool,
+    /// The `as alias` rename, if any.
+    pub alias: Option<Box<str>>,
 }
 
 /// A protocol member (L§10.1): a `to`/`fn` signature terminated by its own

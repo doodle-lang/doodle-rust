@@ -69,6 +69,9 @@ pub enum TokenKind {
     Eq,
     /// `.`
     Dot,
+    /// `.*` — the import wildcard (L§11.2). Lexed as one token (and, unlike a
+    /// bare `*`, not a continuation trigger) so `import m.*` ends its line.
+    DotStar,
     /// `,`
     Comma,
     /// `:`

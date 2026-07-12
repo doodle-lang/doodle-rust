@@ -1,0 +1,5 @@
+#! clause: L11.2
+#! mode: static
+#! stage: parse
+#! expect-static-error: can't be renamed with `as` @ 5:17
+import shapes.* as s

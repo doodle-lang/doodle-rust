@@ -198,6 +198,7 @@ impl super::Parser<'_> {
             Some(TokenKind::Keyword(K::Module)) => self.module_decl(),
             Some(TokenKind::Keyword(K::Parameter)) => self.parameter_decl(),
             Some(TokenKind::Keyword(K::Exports)) => self.exports_stmt(),
+            Some(TokenKind::Keyword(K::Import)) => self.import_stmt(),
             // `if`/`try`/anonymous-`fn` (also statements) fall through to the
             // expression parser, which handles them as primaries; the rest are
             // expression statements or assignments.

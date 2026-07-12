@@ -1,0 +1,9 @@
+#! clause: L11.2
+#! mode: static
+#! stage: parse
+import shapes
+import shapes as s
+import shapes.circle
+import shapes.circle as c
+import shapes.*
+import shapes.circle, shapes.square as sq, colors

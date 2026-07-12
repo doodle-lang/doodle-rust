@@ -236,6 +236,21 @@ fn dump(ast: &Ast, id: NodeId) -> String {
             format!("(parameter {name} {})", dump(ast, *default))
         }
         Node::Exports(names) => format!("(exports {})", names.join(" ")),
+        Node::Import(targets) => {
+            let mut s = String::from("(import");
+            for t in targets {
+                s.push(' ');
+                s.push_str(&t.path.join("."));
+                if t.wildcard {
+                    s.push_str(".*");
+                }
+                if let Some(a) = &t.alias {
+                    s.push_str(&format!(":{a}"));
+                }
+            }
+            s.push(')');
+            s
+        }
         Node::Error => "<error>".to_string(),
         Node::ExprStmt(e) => dump(ast, *e),
     }
@@ -797,11 +812,44 @@ fn module_parameter_exports_declarations() {
 }
 
 #[test]
+fn import_forms_l112() {
+    // The five target forms (L§11.2). The parser records the dotted path only;
+    // module-vs-member is a load-time question (S-7).
+    assert_eq!(program_of("import shapes"), "(module (import shapes))");
+    assert_eq!(
+        program_of("import shapes as s"),
+        "(module (import shapes:s))"
+    );
+    assert_eq!(
+        program_of("import shapes.circle"),
+        "(module (import shapes.circle))"
+    );
+    assert_eq!(
+        program_of("import shapes.circle as c"),
+        "(module (import shapes.circle:c))"
+    );
+    assert_eq!(program_of("import shapes.*"), "(module (import shapes.*))");
+    // Comma-separated targets, and a multi-segment path.
+    assert_eq!(
+        program_of("import shapes.circle, shapes.square as sq, colors"),
+        "(module (import shapes.circle shapes.square:sq colors))"
+    );
+    assert_eq!(program_of("import a.b.c"), "(module (import a.b.c))");
+    assert!(prog_diags("import shapes.circle, colors").is_empty());
+    // `.*` may not be renamed with `as`.
+    assert!(prog_diags("import shapes.* as s").contains(&"syntax-error"));
+    // Missing name after `.` recovers.
+    assert!(prog_diags("import shapes.").contains(&"syntax-error"));
+}
+
+#[test]
 fn module_level_only_placement_rules_l71() {
-    // record/protocol/implement/module/parameter/exports may appear only at
-    // module level (L§7.1); nested in a body it is a static error (still parsed).
+    // record/protocol/implement/module/parameter/exports/import may appear only
+    // at module level (L§7.1); nested in a body it is a static error (still
+    // parsed).
     for src in [
         "to f()\n  record R with x end\nend",
+        "to f()\n  import shapes\nend",
         "if c then\n  parameter p = 0\nend",
         "while c do\n  exports a\nend",
         "to f()\n  module M end\nend",

@@ -163,6 +163,11 @@ impl<'a> Lexer<'a> {
             b'0'..=b'9' => self.scan_num(start),
             b';' => self.emit_len(TokenKind::Semicolon, 1),
             b',' => self.emit_len(TokenKind::Comma, 1),
+            // `.*` (the import wildcard) is one token; a bare `.` is field access
+            // (`.` is never validly followed by `*` outside `.*`).
+            b'.' if self.bytes.get(start + 1) == Some(&b'*') => {
+                self.emit_len(TokenKind::DotStar, 2)
+            }
             b'.' => self.emit_len(TokenKind::Dot, 1),
             b':' => self.emit_len(TokenKind::Colon, 1),
             b'+' => self.emit_len(TokenKind::Plus, 1),

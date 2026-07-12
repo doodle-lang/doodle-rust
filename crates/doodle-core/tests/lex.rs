@@ -153,6 +153,20 @@ fn semicolons_and_closers_are_tokens() {
 }
 
 #[test]
+fn dot_star_is_one_token_not_a_continuation_trigger() {
+    use TokenKind::{DotStar, Eof, Ident, Newline};
+    let import = TokenKind::Keyword(Keyword::Import);
+    // `.*` (the import wildcard) is a single token, not `.` then `*`.
+    assert_eq!(kinds("m.*"), vec![Ident, DotStar, Eof]);
+    // Unlike a bare `*`, `.*` does not trigger S-2 continuation, so `import m.*`
+    // ends its line — a NEWLINE separates it from the next statement.
+    assert_eq!(
+        kinds("import a.*\nimport b"),
+        vec![import, Ident, DotStar, Newline, import, Ident, Eof]
+    );
+}
+
+#[test]
 fn number_shapes() {
     use TokenKind::{Dot, Eof, Float, Ident, Int};
     assert_eq!(kinds("42"), vec![Int, Eof]);
