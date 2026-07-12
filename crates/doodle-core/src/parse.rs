@@ -10,6 +10,7 @@
 //! `decode` submodule). Calls/postfix, list/dict literals, and the `if`/`try`/
 //! anonymous-`fn` forms arrive in later M1.6 pieces.
 
+mod collection;
 mod decode;
 mod postfix;
 
@@ -194,10 +195,18 @@ impl Parser<'_> {
                 self.push(node, span)
             }
             TokenKind::LParen => self.grouping(),
-            // These never start an expression and are not consumed, so the
-            // caller's loops (and string_lit's interpolation handling) can act
-            // on them without a double error.
-            TokenKind::Eof | TokenKind::InterpEnd | TokenKind::StrEnd => {
+            TokenKind::LBracket => self.list_lit(),
+            TokenKind::LBrace => self.dict_lit(),
+            // None of these can start an expression, and none is consumed: an
+            // enclosing construct owns its closer (`)`/`]`/`}`), the string
+            // assembler owns `InterpEnd`/`StrEnd`, and `Eof` ends the loop — so
+            // leaving them lets the caller recover without a swallowed token.
+            TokenKind::Eof
+            | TokenKind::InterpEnd
+            | TokenKind::StrEnd
+            | TokenKind::RParen
+            | TokenKind::RBracket
+            | TokenKind::RBrace => {
                 self.error(span, "expected an expression");
                 self.push(Node::Error, span)
             }

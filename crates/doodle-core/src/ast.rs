@@ -38,6 +38,10 @@ pub enum Node {
     BoolLit(bool),
     /// The `nil` literal (L§3.6.6).
     NilLit,
+    /// A list literal `[ … ]` (L§4.7).
+    List(Vec<NodeId>),
+    /// A dict literal `{ k: v, … }` (L§4.8).
+    Dict(Vec<DictEntry>),
     /// A string literal (L§3.6.3/§3.6.4): decoded text runs interleaved with
     /// interpolated expressions (§6.7).
     StrLit(Vec<StrPart>),
@@ -88,6 +92,25 @@ pub enum Node {
     Module(Vec<NodeId>),
     /// A placeholder for a syntax error, so parsing can recover and continue.
     Error,
+}
+
+/// A dict-literal entry `key: value` (L§4.8).
+#[derive(Clone, Debug)]
+pub struct DictEntry {
+    /// The key.
+    pub key: DictKey,
+    /// The value expression.
+    pub value: NodeId,
+}
+
+/// A dict-literal key (L§4.8): a bare word (a string key) or a computed
+/// expression.
+#[derive(Clone, Debug)]
+pub enum DictKey {
+    /// A bare-word key `name:` — the string key `"name"`.
+    Bare(Box<str>),
+    /// A computed key `expr:`.
+    Expr(NodeId),
 }
 
 /// A call argument (L§6.4): positional, or a keyword `name: value`.

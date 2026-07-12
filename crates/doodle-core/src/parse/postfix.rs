@@ -44,7 +44,7 @@ impl super::Parser<'_> {
             if matches!(self.peek_kind(), Some(TokenKind::RParen) | None) {
                 break;
             }
-            if self.at_keyword_arg() {
+            if self.at_ident_colon() {
                 let name = self.ident_text_at();
                 self.advance(); // name
                 self.advance(); // `:`
@@ -73,14 +73,15 @@ impl super::Parser<'_> {
         self.push(Node::Call { callee, args }, span)
     }
 
-    /// Whether the cursor is at `name :` — a keyword argument.
-    fn at_keyword_arg(&self) -> bool {
+    /// Whether the cursor is at `IDENT :` — a keyword argument (or a bare-word
+    /// dict key, L§4.8). Unambiguous since `:` is not an expression operator.
+    pub(super) fn at_ident_colon(&self) -> bool {
         self.peek_kind() == Some(TokenKind::Ident)
             && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Colon)
     }
 
     /// The identifier text of the token at the cursor (does not advance).
-    fn ident_text_at(&self) -> Box<str> {
+    pub(super) fn ident_text_at(&self) -> Box<str> {
         let span = self.tokens[self.pos].span;
         self.source[span.start as usize..span.end as usize].into()
     }
@@ -105,7 +106,7 @@ impl super::Parser<'_> {
 
     /// Consumes a `kind` token, returning its end offset; or reports `message`
     /// and returns the current start offset.
-    fn expect_close(&mut self, kind: TokenKind, message: &str) -> u32 {
+    pub(super) fn expect_close(&mut self, kind: TokenKind, message: &str) -> u32 {
         let span = self.peek_span();
         if self.peek_kind() == Some(kind) {
             self.advance();

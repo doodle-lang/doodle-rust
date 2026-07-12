@@ -1,7 +1,7 @@
 //! Parser tests: expression trees rendered as S-expressions, so precedence,
 //! associativity, and value lowering are visible in the expected output.
 
-use doodle_core::ast::{Arg, Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
+use doodle_core::ast::{Arg, Ast, BinaryOp, DictKey, Node, NodeId, StrPart, UnaryOp};
 use doodle_core::parse::parse_expression;
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
@@ -55,6 +55,25 @@ fn dump(ast: &Ast, id: NodeId) -> String {
                     }
                     Arg::Keyword { name, value } => {
                         s.push_str(&format!(" {name}:{}", dump(ast, *value)));
+                    }
+                }
+            }
+            s.push(')');
+            s
+        }
+        Node::List(elems) if elems.is_empty() => "(list)".to_string(),
+        Node::List(elems) => {
+            let items: Vec<String> = elems.iter().map(|e| dump(ast, *e)).collect();
+            format!("(list {})", items.join(" "))
+        }
+        Node::Dict(entries) if entries.is_empty() => "(dict)".to_string(),
+        Node::Dict(entries) => {
+            let mut s = String::from("(dict");
+            for e in entries {
+                match &e.key {
+                    DictKey::Bare(name) => s.push_str(&format!(" {name}:{}", dump(ast, e.value))),
+                    DictKey::Expr(k) => {
+                        s.push_str(&format!(" [{}]:{}", dump(ast, *k), dump(ast, e.value)));
                     }
                 }
             }
@@ -209,6 +228,34 @@ fn triple_quoted_decode_and_line_final_backslash() {
     // In a single-line string, unterminated-string takes precedence — no
     // separate backslash-at-end error.
     assert_eq!(diags_of("\"abc\\"), vec!["unterminated-string"]);
+}
+
+#[test]
+fn list_and_dict_literals() {
+    // Lists (trailing comma allowed; `[]` empty).
+    assert_eq!(ast_of("[]"), "(list)");
+    assert_eq!(ast_of("[1, 2, 3]"), "(list 1 2 3)");
+    assert_eq!(ast_of("[1, 2,]"), "(list 1 2)");
+    assert_eq!(ast_of("[1 + 2, f(x)]"), "(list (+ 1 2) (call f x))");
+    assert_eq!(ast_of("[[1], [2]]"), "(list (list 1) (list 2))");
+    // Dicts: a bare-word key is a string key (L§4.8); `{}` is the empty dict.
+    assert_eq!(ast_of("{}"), "(dict)");
+    assert_eq!(ast_of("{name: \"Alice\"}"), "(dict name:(str \"Alice\"))");
+    assert_eq!(ast_of("{a: 1, b: 2,}"), "(dict a:1 b:2)");
+    // Computed keys are expressions followed by `:`.
+    assert_eq!(ast_of("{\"k\": 1}"), "(dict [(str \"k\")]:1)");
+    assert_eq!(ast_of("{1 + 1: v}"), "(dict [(+ 1 1)]:v)");
+    // A literal composes with postfix (indexing).
+    assert_eq!(ast_of("[1, 2][0]"), "([] (list 1 2) 0)");
+    // Recovery.
+    assert_eq!(diags_of("[1, 2"), vec!["syntax-error"]);
+    assert_eq!(diags_of("{a: 1"), vec!["syntax-error"]);
+    assert!(diags_of("{a}").contains(&"syntax-error")); // missing `: value`
+    assert!(diags_of("[1, 2, 3]").is_empty());
+    assert!(diags_of("{a: 1, b: 2}").is_empty());
+    // A stray closer isn't swallowed by the inner expression, so an enclosing
+    // list recovers to the right shape (a broken dict, then `2`).
+    assert_eq!(ast_of("[{a}, 2]"), "(list (dict [a]:<error>) 2)");
 }
 
 #[test]
