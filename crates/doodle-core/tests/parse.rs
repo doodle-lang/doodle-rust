@@ -1,7 +1,9 @@
 //! Parser tests: expression trees rendered as S-expressions, so precedence,
 //! associativity, and value lowering are visible in the expected output.
 
-use doodle_core::ast::{Arg, Ast, BinaryOp, DictKey, Node, NodeId, StrPart, UnaryOp};
+use doodle_core::ast::{
+    Arg, Ast, BinaryOp, CallableKind, DictKey, Node, NodeId, Param, StrPart, UnaryOp,
+};
 use doodle_core::parse::{parse_expression, parse_program};
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
@@ -152,9 +154,52 @@ fn dump(ast: &Ast, id: NodeId) -> String {
         Node::Break(o) => format!("(break{})", opt(ast, o)),
         Node::Continue(o) => format!("(continue{})", opt(ast, o)),
         Node::Raise(o) => format!("(raise{})", opt(ast, o)),
+        Node::Callable {
+            kind,
+            name,
+            params,
+            body,
+            ..
+        } => {
+            let kw = match kind {
+                CallableKind::Proc => "to",
+                CallableKind::Func => "fn",
+            };
+            let name_s = match name {
+                Some(n) => format!(" {n}"),
+                None => String::new(),
+            };
+            format!(
+                "({kw}{name_s} {} {})",
+                params_dump(ast, params),
+                dump(ast, *body)
+            )
+        }
         Node::Error => "<error>".to_string(),
         Node::ExprStmt(e) => dump(ast, *e),
     }
+}
+
+/// Renders a parameter list: `(params a b=<default> do:blk)`, `(params)` empty.
+fn params_dump(ast: &Ast, params: &[Param]) -> String {
+    if params.is_empty() {
+        return "(params)".to_string();
+    }
+    let items: Vec<String> = params
+        .iter()
+        .map(|p| match p {
+            Param::Ordinary {
+                name,
+                default: None,
+            } => name.to_string(),
+            Param::Ordinary {
+                name,
+                default: Some(d),
+            } => format!("{name}={}", dump(ast, *d)),
+            Param::Block { name } => format!("do:{name}"),
+        })
+        .collect();
+    format!("(params {})", items.join(" "))
 }
 
 /// Renders a keyword-tagged statement sequence: `(kw s1 s2 …)`, `(kw)` if empty.
@@ -532,4 +577,58 @@ fn statements_recover_and_bound_depth() {
     // (bodies and expressions share the one depth budget).
     let deep = format!("{}x{}", "if a then ".repeat(5000), " end".repeat(5000));
     assert!(prog_diags(&deep).contains(&"syntax-error"));
+}
+
+#[test]
+fn callable_declarations() {
+    assert_eq!(
+        program_of("to greet(name)\n  show(name)\nend"),
+        "(module (to greet (params name) (block (call show name))))"
+    );
+    assert_eq!(
+        program_of("fn double(n)\n  n * 2\nend"),
+        "(module (fn double (params n) (block (* n 2))))"
+    );
+    // Zero parameters (parens still required).
+    assert_eq!(
+        program_of("to home() end"),
+        "(module (to home (params) (block)))"
+    );
+    // Defaults, and a trailing block parameter (L§8.2).
+    assert_eq!(
+        program_of("fn f(a, b = 2, do body) end"),
+        "(module (fn f (params a b=2 do:body) (block)))"
+    );
+}
+
+#[test]
+fn anonymous_functions() {
+    // Anonymous `fn` is an expression (here a `let` initializer); it has no name.
+    assert_eq!(
+        program_of("let double = fn(x) x * 2 end"),
+        "(module (let double (fn (params x) (block (* x 2)))))"
+    );
+    // `fn(…)` in statement position is the anonymous form (no name lookahead);
+    // `fn name(…)` is a declaration.
+    assert_eq!(program_of("fn() 1 end"), "(module (fn (params) (block 1)))");
+    assert_eq!(
+        program_of("fn g() 1 end"),
+        "(module (fn g (params) (block 1)))"
+    );
+}
+
+#[test]
+fn declarations_nest_and_recover() {
+    // `to`/`fn` may nest in any body (L§7.1).
+    assert_eq!(
+        program_of("to outer()\n  fn inner() 1 end\nend"),
+        "(module (to outer (params) (block (fn inner (params) (block 1)))))"
+    );
+    assert!(prog_diags("to f(a, b) g(a) end").is_empty());
+    // A block parameter must be the last parameter (L§8.2).
+    assert!(prog_diags("fn f(do b, x) end").contains(&"syntax-error"));
+    // Missing `)` / `(` / name recover without panic.
+    assert!(prog_diags("to f(a end").contains(&"syntax-error"));
+    assert!(prog_diags("to () end").contains(&"syntax-error"));
+    assert!(prog_diags("fn 1() end").contains(&"syntax-error"));
 }

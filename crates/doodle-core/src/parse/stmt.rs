@@ -4,7 +4,7 @@
 //! assignment forms, and the non-local exits — and dispatches the rest
 //! (`if`/`try` and the loop/`with` constructs) to their parsers.
 
-use crate::ast::{Node, NodeId};
+use crate::ast::{CallableKind, Node, NodeId};
 use crate::lex::{Keyword, TokenKind};
 use crate::span::Span;
 
@@ -102,9 +102,15 @@ impl super::Parser<'_> {
             Some(TokenKind::Keyword(K::Continue)) => self.exit_stmt(ExitKind::Continue),
             Some(TokenKind::Keyword(K::Raise)) => self.exit_stmt(ExitKind::Raise),
             Some(TokenKind::Keyword(K::Do)) => self.stray_do(),
-            // `if`/`try` (also statements) fall through to the expression parser,
-            // which handles them as primaries; the rest are expression statements
-            // or assignments.
+            Some(TokenKind::Keyword(K::To)) => self.callable_decl(CallableKind::Proc),
+            // `fn name(…)` is a declaration; `fn(…)` is an anonymous function
+            // (an expression), which falls through to the expression parser.
+            Some(TokenKind::Keyword(K::Fn)) if self.next_is_ident() => {
+                self.callable_decl(CallableKind::Func)
+            }
+            // `if`/`try`/anonymous-`fn` (also statements) fall through to the
+            // expression parser, which handles them as primaries; the rest are
+            // expression statements or assignments.
             _ => self.expr_or_assign(),
         }
     }
@@ -221,6 +227,12 @@ impl super::Parser<'_> {
         ) {
             self.advance();
         }
+    }
+
+    /// Whether the token after the cursor is an identifier — the lookahead that
+    /// tells a named `fn name(…)` declaration from an anonymous `fn(…)`.
+    fn next_is_ident(&self) -> bool {
+        self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Ident)
     }
 
     /// Consumes an identifier, returning its text and span; on a non-identifier

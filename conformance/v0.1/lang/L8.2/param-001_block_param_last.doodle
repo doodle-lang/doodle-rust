@@ -1,0 +1,5 @@
+#! clause: L8.2
+#! mode: static
+#! stage: parse
+#! expect-static-error: must be the last parameter @ 5:12
+fn f(do b, x) end

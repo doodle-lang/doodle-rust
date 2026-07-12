@@ -1,0 +1,12 @@
+#! clause: L8.1
+#! mode: static
+#! stage: parse
+to greet(name)
+    show(name)
+end
+
+fn double(n)
+    return n * 2
+end
+
+let square = fn(x) x * x end

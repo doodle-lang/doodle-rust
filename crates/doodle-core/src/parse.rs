@@ -13,6 +13,7 @@
 
 mod collection;
 mod control;
+mod decl;
 mod decode;
 mod postfix;
 mod stmt;
@@ -253,6 +254,10 @@ impl<'a> Parser<'a> {
             // semantic, deferred to M1.10.
             TokenKind::Keyword(Keyword::If) => self.if_expr(),
             TokenKind::Keyword(Keyword::Try) => self.try_expr(),
+            // An anonymous function `fn(params) body end` (L§6.10). A *named*
+            // `fn name(…)` is a declaration, dispatched as a statement, never
+            // reached here.
+            TokenKind::Keyword(Keyword::Fn) => self.anon_fn(),
             // None of these can start an expression, and none is consumed: an
             // enclosing construct owns its closer (`)`/`]`/`}`), the string
             // assembler owns `InterpEnd`/`StrEnd`, and `Eof` ends the loop — so

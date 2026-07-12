@@ -162,6 +162,21 @@ pub enum Node {
     Continue(Option<NodeId>),
     /// A `raise` (L§12.1): raises an exception; a bare `raise` re-raises.
     Raise(Option<NodeId>),
+    /// A procedure/function — a named `to`/`fn` declaration (L§8.1) or an
+    /// anonymous `fn` expression (L§6.10, `name` = `None`).
+    Callable {
+        /// Whether this is a procedure (`to`) or a function (`fn`).
+        kind: CallableKind,
+        /// The declared name, or `None` for an anonymous function.
+        name: Option<Box<str>>,
+        /// The parameter list (L§8.2).
+        params: Vec<Param>,
+        /// The body (a [`Node::Block`]).
+        body: NodeId,
+        /// The docstring (L§8.6), if any — captured in M1.8c; a leading body
+        /// string is not an executed statement.
+        doc: Option<NodeId>,
+    },
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A module body: its top-level statements in source order (L§7).
@@ -177,6 +192,33 @@ pub struct IfArm {
     pub cond: NodeId,
     /// The body run when the condition is `true`.
     pub body: NodeId,
+}
+
+/// Whether a [`Node::Callable`] is a procedure (`to`, yields no value) or a
+/// function (`fn`, yields a value) — the load-bearing L§8 distinction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallableKind {
+    /// A procedure, declared with `to`.
+    Proc,
+    /// A function, declared with `fn`.
+    Func,
+}
+
+/// A parameter in a callable's parameter list (L§8.2).
+#[derive(Clone, Debug)]
+pub enum Param {
+    /// An ordinary parameter `name` or `name = default`.
+    Ordinary {
+        /// The parameter name.
+        name: Box<str>,
+        /// The default-value expression (`name = expr`), if any.
+        default: Option<NodeId>,
+    },
+    /// A block parameter `do name` — at most one, and last (L§8.2/§8.5).
+    Block {
+        /// The block parameter's name.
+        name: Box<str>,
+    },
 }
 
 /// A dict-literal entry `key: value` (L§4.8).
