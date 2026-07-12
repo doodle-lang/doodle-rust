@@ -37,12 +37,42 @@ impl super::Parser<'_> {
     /// Parses a `body` (L§7.1): statements up to a terminator keyword (per
     /// `is_term`) or end-of-input, as a [`Node::Block`]. The terminator itself
     /// is left for the enclosing construct to consume. This is a plain body (a
-    /// loop/`with`/`if`/`try` arm), which carries no docstring.
+    /// loop/`with`/`if`/`try` arm), which carries no docstring. Its statements
+    /// are nested (module-level-only declarations report inside it, L§7.1).
     pub(super) fn block(&mut self, is_term: fn(TokenKind) -> bool) -> NodeId {
+        let prev = self.nested;
+        self.nested = true;
+        let start = self.peek_span().start;
+        let stmts = self.statements(is_term);
+        self.nested = prev;
+        let end = self.body_span_end(start, &stmts);
+        self.push(Node::Block(stmts), Span::new(start, end))
+    }
+
+    /// Parses a module body (L§11.1) — statements up to `is_term`/end-of-input at
+    /// **module level** (`nested` stays false) — with an optional leading
+    /// docstring (L§8.6, always the docstring since a module yields no value).
+    /// Returns the body [`Node::Block`] and the docstring span.
+    pub(super) fn module_body(&mut self, is_term: fn(TokenKind) -> bool) -> (NodeId, Option<Span>) {
+        self.skip_separators();
+        let doc = self.capture_docstring();
         let start = self.peek_span().start;
         let stmts = self.statements(is_term);
         let end = self.body_span_end(start, &stmts);
-        self.push(Node::Block(stmts), Span::new(start, end))
+        let body = self.push(Node::Block(stmts), Span::new(start, end));
+        (body, doc)
+    }
+
+    /// Reports if a module-level-only declaration (L§7.1) is being parsed while
+    /// nested inside a body. Parsing then continues for recovery.
+    pub(super) fn require_module_level(&mut self, what: &str) {
+        if self.nested {
+            let span = self.peek_span();
+            self.error(
+                span,
+                &format!("`{what}` may only appear at module level, not nested in a body"),
+            );
+        }
     }
 
     /// Parses a procedure/function body (L§8.4) as a [`Node::Block`], returning
@@ -59,6 +89,8 @@ impl super::Parser<'_> {
         is_term: fn(TokenKind) -> bool,
         value_producing: bool,
     ) -> (NodeId, Option<Span>) {
+        let prev = self.nested;
+        self.nested = true; // a callable body is nested (L§7.1)
         let before = self.pos;
         self.skip_separators();
         let mut doc = self.capture_docstring();
@@ -73,6 +105,7 @@ impl super::Parser<'_> {
         }
         let start = self.peek_span().start;
         let stmts = self.statements(is_term);
+        self.nested = prev;
         let end = self.body_span_end(start, &stmts);
         let body = self.push(Node::Block(stmts), Span::new(start, end));
         (body, doc)
@@ -157,11 +190,14 @@ impl super::Parser<'_> {
             Some(TokenKind::Keyword(K::Fn)) if self.next_is_ident() => {
                 self.callable_decl(CallableKind::Func)
             }
-            // Type/protocol declarations (L§9/§10). `ref` introduces `ref record`.
-            // The module-level-only placement rule (L§7.1) is enforced in M1.8c.
+            // Module-level-only declarations (L§7.1); each reports if nested.
+            // `ref` introduces `ref record`. (`import` is M1.9.)
             Some(TokenKind::Keyword(K::Record | K::Ref)) => self.record_decl(),
             Some(TokenKind::Keyword(K::Protocol)) => self.protocol_decl(),
             Some(TokenKind::Keyword(K::Implement)) => self.implement_decl(),
+            Some(TokenKind::Keyword(K::Module)) => self.module_decl(),
+            Some(TokenKind::Keyword(K::Parameter)) => self.parameter_decl(),
+            Some(TokenKind::Keyword(K::Exports)) => self.exports_stmt(),
             // `if`/`try`/anonymous-`fn` (also statements) fall through to the
             // expression parser, which handles them as primaries; the rest are
             // expression statements or assignments.

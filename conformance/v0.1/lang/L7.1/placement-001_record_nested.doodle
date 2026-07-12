@@ -1,0 +1,7 @@
+#! clause: L7.1
+#! mode: static
+#! stage: parse
+#! expect-static-error: only appear at module level @ 6:5
+to f()
+    record R with x end
+end

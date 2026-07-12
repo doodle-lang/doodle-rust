@@ -229,6 +229,13 @@ fn dump(ast: &Ast, id: NodeId) -> String {
             s.push(')');
             s
         }
+        Node::ModuleDecl { name, body, doc } => {
+            format!("(moddecl {name}{} {})", doc_marker(doc), dump(ast, *body))
+        }
+        Node::Parameter { name, default } => {
+            format!("(parameter {name} {})", dump(ast, *default))
+        }
+        Node::Exports(names) => format!("(exports {})", names.join(" ")),
         Node::Error => "<error>".to_string(),
         Node::ExprStmt(e) => dump(ast, *e),
     }
@@ -767,6 +774,48 @@ fn implement_declarations() {
     assert!(prog_diags("implement P for T\n  fn m(self) 1 end\nend").is_empty());
     // Missing `for` recovers.
     assert!(prog_diags("implement P T end").contains(&"syntax-error"));
+}
+
+#[test]
+fn module_parameter_exports_declarations() {
+    assert_eq!(
+        program_of("parameter pen_color = \"black\""),
+        "(module (parameter pen_color (str \"black\")))"
+    );
+    assert_eq!(program_of("exports a, b, c"), "(module (exports a b c))");
+    assert_eq!(
+        program_of("module Geometry\n  record Point with x, y end\nend"),
+        "(module (moddecl Geometry (block (record Point (fields x y)))))"
+    );
+    // A `module` may carry a docstring; its contents are module-level.
+    assert_eq!(
+        program_of("module M\n  \"A module.\"\n  let x = 1\nend"),
+        "(module (moddecl M doc (block (let x 1))))"
+    );
+    assert!(prog_diags("parameter p = 0").is_empty());
+    assert!(prog_diags("exports a, b").is_empty());
+}
+
+#[test]
+fn module_level_only_placement_rules_l71() {
+    // record/protocol/implement/module/parameter/exports may appear only at
+    // module level (L§7.1); nested in a body it is a static error (still parsed).
+    for src in [
+        "to f()\n  record R with x end\nend",
+        "if c then\n  parameter p = 0\nend",
+        "while c do\n  exports a\nend",
+        "to f()\n  module M end\nend",
+        "loop do\n  protocol P end\nend",
+    ] {
+        assert!(
+            prog_diags(src).contains(&"syntax-error"),
+            "a nested module-level declaration should error: {src:?}"
+        );
+    }
+    // `let`/`const`/`to`/`fn` nest fine, and a `module`'s contents are
+    // module-level, so a record inside a `module` is allowed.
+    assert!(prog_diags("to f()\n  let x = 1\n  fn g() 1 end\nend").is_empty());
+    assert!(prog_diags("module M\n  record R with x end\nend").is_empty());
 }
 
 #[test]

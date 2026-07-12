@@ -1,0 +1,4 @@
+#! clause: L5.5
+#! mode: static
+#! stage: parse
+parameter pen_color = "black"

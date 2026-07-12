@@ -15,6 +15,7 @@ mod collection;
 mod control;
 mod decl;
 mod decode;
+mod moddecl;
 mod postfix;
 mod stmt;
 mod typedecl;
@@ -112,6 +113,10 @@ struct Parser<'a> {
     /// Set once the depth limit is hit; suppresses the cascade of follow-on
     /// diagnostics while the over-deep call stack unwinds.
     bailed: bool,
+    /// Whether the current statement position is nested inside a construct or
+    /// callable body (true) rather than at module level (false). Module-level-
+    /// only declarations (L§7.1) report when parsed while this is set.
+    nested: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -130,6 +135,7 @@ impl<'a> Parser<'a> {
             module,
             depth: 0,
             bailed: false,
+            nested: false,
         }
     }
 

@@ -211,6 +211,25 @@ pub enum Node {
         /// The member implementations (each a [`Node::Callable`] declaration).
         methods: Vec<NodeId>,
     },
+    /// An explicit named module `module Name body end` (L§11.1): a nested or
+    /// file-wrapping module. The body is module-level.
+    ModuleDecl {
+        /// The module name.
+        name: Box<str>,
+        /// The module body (a [`Node::Block`] of module-level statements).
+        body: NodeId,
+        /// The module docstring span (L§8.6), if present.
+        doc: Option<Span>,
+    },
+    /// A dynamic-parameter declaration `parameter name = default` (L§5.5).
+    Parameter {
+        /// The dynamic-parameter name.
+        name: Box<str>,
+        /// The default-value expression.
+        default: NodeId,
+    },
+    /// An `exports name, …` declaration (L§11.1): the module's public surface.
+    Exports(Vec<Box<str>>),
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
     /// A file/root module body: its top-level statements in source order (L§7),

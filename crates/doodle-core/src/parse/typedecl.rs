@@ -15,6 +15,7 @@ use crate::span::Span;
 impl super::Parser<'_> {
     /// A record declaration `[ref] record Name with f1, f2, … [doc] end` (L§9.1).
     pub(super) fn record_decl(&mut self) -> NodeId {
+        self.require_module_level("record");
         let start = self.peek_span().start;
         let is_ref = matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::Ref)));
         if is_ref {
@@ -72,6 +73,7 @@ impl super::Parser<'_> {
     /// A protocol declaration `protocol Name [extends P] [doc] members… end`
     /// (L§10.1).
     pub(super) fn protocol_decl(&mut self) -> NodeId {
+        self.require_module_level("protocol");
         let start = self.peek_span().start;
         self.advance(); // `protocol`
         let (name, _) = self.expect_name("expected a protocol name");
@@ -160,6 +162,7 @@ impl super::Parser<'_> {
     /// An `implement P for T methods… end` block (L§10.2): the methods are
     /// `to`/`fn` declarations registering `(T, P member) → callable`.
     pub(super) fn implement_decl(&mut self) -> NodeId {
+        self.require_module_level("implement");
         let start = self.peek_span().start;
         self.advance(); // `implement`
         let (protocol, _) = self.expect_name("expected a protocol name after `implement`");
