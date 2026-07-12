@@ -1,0 +1,17 @@
+#! clause: L8.6
+#! mode: static
+#! stage: parse
+"This module demonstrates docstrings."
+
+to stub()
+    "A stub procedure — its lone string is the docstring."
+end
+
+fn greeting()
+    "hello"
+end
+
+fn documented()
+    "Returns a greeting; this string is the docstring."
+    "hi"
+end

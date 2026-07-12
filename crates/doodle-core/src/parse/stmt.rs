@@ -18,24 +18,73 @@ enum ExitKind {
 
 impl super::Parser<'_> {
     /// Parses a whole program: a module body of statements up to end-of-input
-    /// (L§7.1, Appendix A). Sets and returns the [`Node::Module`] root.
+    /// (L§7.1, Appendix A), with an optional leading docstring (L§8.6). Sets and
+    /// returns the [`Node::Module`] root.
     pub(super) fn program(&mut self) -> NodeId {
+        self.skip_separators();
+        // A module body never produces a value, so a leading string is always
+        // the docstring — captured raw (its `{ … }` is inert, S-27), never
+        // parsed as an expression.
+        let doc = self.capture_docstring();
         let start = self.peek_span().start;
         let stmts = self.statements(|_| false);
         let end = self.body_span_end(start, &stmts);
-        let node = self.push(Node::Module(stmts), Span::new(start, end));
+        let node = self.push(Node::Module { stmts, doc }, Span::new(start, end));
         self.ast.set_root(node);
         node
     }
 
     /// Parses a `body` (L§7.1): statements up to a terminator keyword (per
     /// `is_term`) or end-of-input, as a [`Node::Block`]. The terminator itself
-    /// is left for the enclosing construct to consume.
+    /// is left for the enclosing construct to consume. This is a plain body (a
+    /// loop/`with`/`if`/`try` arm), which carries no docstring.
     pub(super) fn block(&mut self, is_term: fn(TokenKind) -> bool) -> NodeId {
         let start = self.peek_span().start;
         let stmts = self.statements(is_term);
         let end = self.body_span_end(start, &stmts);
         self.push(Node::Block(stmts), Span::new(start, end))
+    }
+
+    /// Parses a procedure/function body (L§8.4) as a [`Node::Block`], returning
+    /// it with any leading docstring (L§8.6).
+    ///
+    /// A leading string is captured **raw** first (its `{ … }` is inert text, so
+    /// it is never parsed as an expression, S-27). In a `value_producing` body
+    /// (an `fn`), a **lone** leading string is the function's *result*, not a
+    /// docstring — so the raw capture is rewound and the string is re-parsed as
+    /// an ordinary literal whose interpolations evaluate. A `to`/module body
+    /// always keeps the leading string as the (raw) docstring.
+    pub(super) fn body_with_doc(
+        &mut self,
+        is_term: fn(TokenKind) -> bool,
+        value_producing: bool,
+    ) -> (NodeId, Option<Span>) {
+        let before = self.pos;
+        self.skip_separators();
+        let mut doc = self.capture_docstring();
+        if doc.is_some() {
+            self.skip_separators();
+            if value_producing && self.at_body_terminator(is_term) {
+                // A lone string in a function body is its result: rewind so it is
+                // parsed as an ordinary literal, not captured as a docstring.
+                self.pos = before;
+                doc = None;
+            }
+        }
+        let start = self.peek_span().start;
+        let stmts = self.statements(is_term);
+        let end = self.body_span_end(start, &stmts);
+        let body = self.push(Node::Block(stmts), Span::new(start, end));
+        (body, doc)
+    }
+
+    /// Whether the cursor is at the end of a body: a terminator keyword (per
+    /// `is_term`) or end-of-input.
+    fn at_body_terminator(&self, is_term: fn(TokenKind) -> bool) -> bool {
+        match self.peek_kind() {
+            None | Some(TokenKind::Eof) => true,
+            Some(k) => is_term(k),
+        }
     }
 
     /// The shared statement-sequence loop for [`program`](Self::program) and

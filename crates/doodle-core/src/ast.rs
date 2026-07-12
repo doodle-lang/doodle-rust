@@ -213,8 +213,14 @@ pub enum Node {
     },
     /// An expression statement (L§7): evaluate the child expression.
     ExprStmt(NodeId),
-    /// A module body: its top-level statements in source order (L§7).
-    Module(Vec<NodeId>),
+    /// A file/root module body: its top-level statements in source order (L§7),
+    /// plus an optional leading docstring (L§8.6, §11.1).
+    Module {
+        /// The top-level statements (the docstring, if any, is removed).
+        stmts: Vec<NodeId>,
+        /// The module docstring span (L§8.6), if present.
+        doc: Option<Span>,
+    },
     /// A placeholder for a syntax error, so parsing can recover and continue.
     Error,
 }

@@ -14,7 +14,13 @@ fn drives_integer_literal_statement_to_completed() {
     let mut ast = Ast::new();
     let lit = ast.push(Node::IntLit(42), Span::new(0, 2));
     let stmt = ast.push(Node::ExprStmt(lit), Span::new(0, 2));
-    let root = ast.push(Node::Module(vec![stmt]), Span::new(0, 2));
+    let root = ast.push(
+        Node::Module {
+            stmts: vec![stmt],
+            doc: None,
+        },
+        Span::new(0, 2),
+    );
     ast.set_root(root);
 
     let mut instance = Instance::new(ast);
@@ -35,7 +41,13 @@ fn drives_integer_literal_statement_to_completed() {
 #[test]
 fn drives_empty_module_to_void_completion() {
     let mut ast = Ast::new();
-    let root = ast.push(Node::Module(vec![]), Span::DUMMY);
+    let root = ast.push(
+        Node::Module {
+            stmts: vec![],
+            doc: None,
+        },
+        Span::DUMMY,
+    );
     ast.set_root(root);
 
     let mut instance = Instance::new(ast);

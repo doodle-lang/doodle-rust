@@ -169,7 +169,7 @@ impl Instance {
     /// core. Today nothing interrupts the walk.
     pub(crate) fn next_statement(&mut self) -> Option<NodeId> {
         let root = self.program.root()?;
-        let Node::Module(stmts) = self.program.node(root) else {
+        let Node::Module { stmts, .. } = self.program.node(root) else {
             return None;
         };
         let stmt = stmts.get(self.next_stmt).copied();

@@ -24,7 +24,7 @@ impl super::Parser<'_> {
             CallableKind::Func => "expected a name after `fn`",
         });
         let params = self.param_list();
-        let body = self.block(is_end_terminator);
+        let (body, doc) = self.body_with_doc(is_end_terminator, kind == CallableKind::Func);
         let end = self.expect_end_span(kind_word(kind));
         self.push(
             Node::Callable {
@@ -32,7 +32,7 @@ impl super::Parser<'_> {
                 name: Some(name),
                 params,
                 body,
-                doc: None,
+                doc,
             },
             Span::new(start, end),
         )
@@ -44,7 +44,9 @@ impl super::Parser<'_> {
         let start = self.peek_span().start;
         self.advance(); // `fn`
         let params = self.param_list();
-        let body = self.block(is_end_terminator);
+        // An anonymous function is value-producing (L§6.10), so a lone leading
+        // string is its result, not a docstring (S-27).
+        let (body, doc) = self.body_with_doc(is_end_terminator, true);
         let end = self.expect_end_span("fn");
         self.push(
             Node::Callable {
@@ -52,7 +54,7 @@ impl super::Parser<'_> {
                 name: None,
                 params,
                 body,
-                doc: None,
+                doc,
             },
             Span::new(start, end),
         )

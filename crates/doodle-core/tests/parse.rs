@@ -120,7 +120,15 @@ fn dump(ast: &Ast, id: NodeId) -> String {
             format!("(assign {} {})", dump(ast, *target), dump(ast, *value))
         }
         Node::Block(stmts) => seq(ast, "block", stmts),
-        Node::Module(stmts) => seq(ast, "module", stmts),
+        Node::Module { stmts, doc } => {
+            let mut s = format!("(module{}", doc_marker(doc));
+            for st in stmts {
+                s.push(' ');
+                s.push_str(&dump(ast, *st));
+            }
+            s.push(')');
+            s
+        }
         Node::If { arms, else_body } => {
             let mut s = String::from("(if");
             for arm in arms {
@@ -159,7 +167,7 @@ fn dump(ast: &Ast, id: NodeId) -> String {
             name,
             params,
             body,
-            ..
+            doc,
         } => {
             let kw = match kind {
                 CallableKind::Proc => "to",
@@ -170,7 +178,8 @@ fn dump(ast: &Ast, id: NodeId) -> String {
                 None => String::new(),
             };
             format!(
-                "({kw}{name_s} {} {})",
+                "({kw}{name_s}{} {} {})",
+                doc_marker(doc),
                 params_dump(ast, params),
                 dump(ast, *body)
             )
@@ -760,6 +769,84 @@ fn implement_declarations() {
 }
 
 #[test]
+fn docstrings_classified_per_s27() {
+    // A `to` body: a leading string is always the docstring (S-27).
+    assert_eq!(
+        program_of("to stub()\n  \"TODO.\"\nend"),
+        "(module (to stub doc (params) (block)))"
+    );
+    // A module docstring: a leading string in the file.
+    assert_eq!(
+        program_of("\"Module doc.\"\nlet x = 1"),
+        "(module doc (let x 1))"
+    );
+    // An `fn` body: a LONE string is the RESULT, not a docstring.
+    assert_eq!(
+        program_of("fn greeting()\n  \"hello\"\nend"),
+        "(module (fn greeting (params) (block (str \"hello\"))))"
+    );
+    // An `fn` body: a leading string FOLLOWED by a statement is the docstring.
+    assert_eq!(
+        program_of("fn f()\n  \"Doc.\"\n  compute()\nend"),
+        "(module (fn f doc (params) (block (call compute))))"
+    );
+    // doc + result: the first string is the docstring, the second the result.
+    assert_eq!(
+        program_of("fn f()\n  \"Doc.\"\n  \"result\"\nend"),
+        "(module (fn f doc (params) (block (str \"result\"))))"
+    );
+}
+
+#[test]
+fn docstring_rawness_follows_classification_s27() {
+    // An `fn`'s lone-string RESULT is an ordinary literal, so its interpolation
+    // is parsed (and evaluates at run time).
+    assert_eq!(
+        program_of("fn f()\n  \"hi {name}\"\nend"),
+        "(module (fn f (params) (block (str \"hi \" {name}))))"
+    );
+    // The same string as a DOCSTRING (followed) is captured as a raw span; its
+    // `{ … }` is not a parsed part of the tree.
+    assert_eq!(
+        program_of("fn g()\n  \"hi {name}\"\n  act()\nend"),
+        "(module (fn g doc (params) (block (call act))))"
+    );
+}
+
+#[test]
+fn docstring_interpolation_is_raw_never_parsed_s27() {
+    // A docstring's `{ … }` is inert text (L§8.6): even when it is NOT a single
+    // valid expression it must be captured raw, never parsed — no spurious
+    // errors, no desync into the following statements. (Regression: a post-parse
+    // extractor parsed the interpolation as code; a `{name}`-only test missed it.)
+    for src in [
+        "to f()\n  \"Returns {the answer} to life.\"\n  return 1\nend",
+        "\"Docs about {the whole module}.\"\nlet x = 1",
+        "fn g()\n  \"the set {1, 2, 3}\"\n  act()\nend",
+        "record R with a\n  \"Returns {the answer}.\"\nend",
+    ] {
+        assert!(
+            prog_diags(src).is_empty(),
+            "a raw docstring must not be parsed as code: {src:?}"
+        );
+    }
+    // The docstring is captured and the body is exactly the following statement.
+    assert_eq!(
+        program_of("to f()\n  \"Returns {the answer}.\"\n  return 1\nend"),
+        "(module (to f doc (params) (block (return 1))))"
+    );
+}
+
+#[test]
+fn parenthesized_lvalue_is_allowed() {
+    // Confirmed by the spec author: redundant parens around an assignment target
+    // are fine (parens are transparent, so the target is the inner lvalue).
+    assert_eq!(program_of("(a) = c"), "(module (assign a c))");
+    assert!(prog_diags("(a) = c").is_empty());
+    assert_eq!(program_of("(a.b) = c"), "(module (assign (. a b) c))");
+}
+
+#[test]
 fn protocol_member_trailing_end_is_a_provisional_ambiguity() {
     // PROVISIONAL (L§10.1 grammar ambiguity — see claude-todo, needs a user
     // ruling). A required member is a bare signature; a default has a NON-empty
@@ -797,7 +884,7 @@ fn docstring_span_captures_the_raw_literal() {
 /// The docstring span of the first top-level record, if any.
 fn record_doc_span(ast: &Ast) -> Option<Span> {
     let root = ast.root()?;
-    let Node::Module(stmts) = ast.node(root) else {
+    let Node::Module { stmts, .. } = ast.node(root) else {
         return None;
     };
     stmts.iter().find_map(|&s| match ast.node(s) {

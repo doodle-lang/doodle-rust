@@ -12,13 +12,14 @@ Ast {
                 0,
             ),
         ),
-        Module(
-            [
+        Module {
+            stmts: [
                 NodeId(
                     1,
                 ),
             ],
-        ),
+            doc: None,
+        },
     ],
     spans: [
         Span {
