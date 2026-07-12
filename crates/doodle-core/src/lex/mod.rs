@@ -6,6 +6,7 @@ mod escape;
 mod number;
 mod string;
 pub mod token;
+mod triple;
 
 pub use token::{Keyword, Token, TokenKind};
 

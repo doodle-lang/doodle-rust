@@ -2,9 +2,7 @@
 #! mode: static
 #! stage: parse
 protocol Iterable
-    """
-    Types whose elements can be visited in order.
-    """
+    """Types whose elements can be visited in order."""
     to each(self, do body)
         "Visits each element in order."
     end

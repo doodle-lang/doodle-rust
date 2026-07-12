@@ -358,6 +358,84 @@ fn triple_quoted_interpolation_and_literal_quotes() {
 }
 
 #[test]
+fn triple_quoted_single_line_form() {
+    use TokenKind::{Eof, Ident, InterpEnd, InterpStart, Plus, StrEnd, StrStart, StrText};
+    // The single-line form opens and closes on the same line (S-53).
+    assert_eq!(
+        kinds("\"\"\"hello\"\"\""),
+        vec![StrStart, StrText, StrEnd, Eof]
+    );
+    assert_eq!(str_text("\"\"\"hello\"\"\""), "hello");
+    assert!(diag_codes("\"\"\"hello\"\"\"").is_empty());
+    // `""""""` (six quotes) is the empty single-line string.
+    assert_eq!(kinds("\"\"\"\"\"\""), vec![StrStart, StrEnd, Eof]);
+    assert!(diag_codes("\"\"\"\"\"\"").is_empty());
+    // A single/double `"` is literal content; only `"""` closes.
+    assert_eq!(str_text("\"\"\"He said \"hi\".\"\"\""), "He said \"hi\".");
+    assert!(diag_codes("\"\"\"He said \"hi\".\"\"\"").is_empty());
+    // Interpolation and escapes behave as in any string; no margin machinery.
+    assert_eq!(
+        kinds("\"\"\"x {a} y\"\"\""),
+        vec![
+            StrStart,
+            StrText,
+            InterpStart,
+            Ident,
+            InterpEnd,
+            StrText,
+            StrEnd,
+            Eof
+        ]
+    );
+    assert!(diag_codes("\"\"\"a\\tb\"\"\"").is_empty());
+    // Ordinary code may follow the closing `"""`.
+    assert_eq!(
+        kinds("\"\"\"hi\"\"\" + x"),
+        vec![StrStart, StrText, StrEnd, Plus, Ident, Eof]
+    );
+    // A `"""` inside an interpolation is the interpolation's, not a closer — the
+    // single-line form still closes at the top-level `"""`.
+    assert_eq!(
+        kinds("\"\"\"a {b} c\"\"\""),
+        vec![
+            StrStart,
+            StrText,
+            InterpStart,
+            Ident,
+            InterpEnd,
+            StrText,
+            StrEnd,
+            Eof
+        ]
+    );
+}
+
+#[test]
+fn triple_quoted_single_line_interp_stays_monotonic_s53() {
+    // Regression: a `"""` byte-run INSIDE an interpolation must not be mistaken
+    // for the closing delimiter — that produced a backward-jumping, re-lexed
+    // token stream. The lexer must always emit strictly forward, non-overlapping
+    // spans (an invariant the parser relies on).
+    for src in [
+        "\"\"\"{\"\"\"\"}",                   // `"""{""""}` — two empty strings, no close
+        "\"\"\"{\"\"\"\"}\"\"\"",             // `"""{""""}"""` — closes after the interp
+        "\"\"\"a {f(\"\"\"x\"\"\")} c\"\"\"", // a triple-quoted string inside the interp
+        "\"\"\"a {\"n\"} b\"\"\"",            // a plain nested string in the interp
+        "\"\"\"a {b\"\"\"",                   // an unterminated interp
+    ] {
+        let nfc = normalize(src);
+        let mut prev = 0u32;
+        for t in &lex(nfc.as_ref(), M).tokens {
+            assert!(
+                t.span.start >= prev,
+                "non-monotonic token span in {src:?}: {t:?} starts before end {prev}"
+            );
+            prev = t.span.end;
+        }
+    }
+}
+
+#[test]
 fn triple_quoted_errors() {
     // An under-indented content line fails the margin match.
     assert_eq!(
