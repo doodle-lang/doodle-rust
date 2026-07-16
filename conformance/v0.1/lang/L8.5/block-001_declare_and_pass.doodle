@@ -1,0 +1,18 @@
+#! clause: L8.5
+#! clause: L8.2
+#! mode: static
+#! stage: parse
+# A callee declares a block parameter (`do name`, §8.2 — last parameter) and
+# invokes it by name; the caller passes the block as the trailing `do … end`
+# argument (§8.5), with its own block parameters.
+fn map(xs, do transform)
+    let result = []
+    each(xs) do (x)
+        result = result + [transform(x)]
+    end
+    return result
+end
+
+map(items) do (n)
+    n * n
+end

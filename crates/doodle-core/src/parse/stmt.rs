@@ -40,13 +40,30 @@ impl super::Parser<'_> {
     /// loop/`with`/`if`/`try` arm), which carries no docstring. Its statements
     /// are nested (module-level-only declarations report inside it, L§7.1).
     pub(super) fn block(&mut self, is_term: fn(TokenKind) -> bool) -> NodeId {
-        let prev = self.nested;
-        self.nested = true;
+        let (prev_nested, prev_no_block) = self.enter_body();
         let start = self.peek_span().start;
         let stmts = self.statements(is_term);
-        self.nested = prev;
+        self.exit_body(prev_nested, prev_no_block);
         let end = self.body_span_end(start, &stmts);
         self.push(Node::Block(stmts), Span::new(start, end))
+    }
+
+    /// Enters a body: marks the position nested (module-level-only declarations
+    /// report, L§7.1) and clears no-trailing-block mode — a body is delimited by
+    /// its terminator, so a `do … end` inside it is a block argument even when
+    /// the body appears in a construct header (S-4 is header-local, §6.4).
+    /// Returns the prior `(nested, no_block_arg)` to restore with [`exit_body`].
+    fn enter_body(&mut self) -> (bool, bool) {
+        let prev = (self.nested, self.no_block_arg);
+        self.nested = true;
+        self.no_block_arg = false;
+        prev
+    }
+
+    /// Restores the flags saved by [`enter_body`].
+    fn exit_body(&mut self, prev_nested: bool, prev_no_block: bool) {
+        self.nested = prev_nested;
+        self.no_block_arg = prev_no_block;
     }
 
     /// Parses a module body (L§11.1) — statements up to `is_term`/end-of-input at
@@ -89,8 +106,7 @@ impl super::Parser<'_> {
         is_term: fn(TokenKind) -> bool,
         value_producing: bool,
     ) -> (NodeId, Option<Span>) {
-        let prev = self.nested;
-        self.nested = true; // a callable body is nested (L§7.1)
+        let (prev_nested, prev_no_block) = self.enter_body(); // a callable body is nested (L§7.1)
         let before = self.pos;
         self.skip_separators();
         let mut doc = self.capture_docstring();
@@ -105,7 +121,7 @@ impl super::Parser<'_> {
         }
         let start = self.peek_span().start;
         let stmts = self.statements(is_term);
-        self.nested = prev;
+        self.exit_body(prev_nested, prev_no_block);
         let end = self.body_span_end(start, &stmts);
         let body = self.push(Node::Block(stmts), Span::new(start, end));
         (body, doc)
@@ -297,13 +313,17 @@ impl super::Parser<'_> {
     /// into further errors.
     fn stray_do(&mut self) -> NodeId {
         let span = self.peek_span();
-        // The parenthesized-block escape hatch (L§6.4) is deliberately not
-        // suggested here: block arguments don't parse yet (M1.8), so pointing at
-        // `(f() do … end)` would send the user toward a different error.
+        // A block argument attaches to the call it trails (§6.4/§8.5), so it must
+        // sit on the same line as the call; a `do` that opens a statement has no
+        // call to attach to. Point at both legitimate uses and the header
+        // escape hatch (`(f() do … end)`, now that block arguments parse).
         self.error(
             span,
             "a `do … end` block can't start a statement — it opens a \
-             `while`/`loop`/`with` body, or is a call's trailing block argument",
+             `while`/`loop`/`with` body, or is a call's trailing block argument \
+             (keep it on the same line as the call, `f() do … end`; parenthesize \
+             to pass a block to a call in a `while`/`with` header, \
+             `while (f() do … end) do … end`)",
         );
         self.advance(); // `do`
         self.block(is_end_terminator);

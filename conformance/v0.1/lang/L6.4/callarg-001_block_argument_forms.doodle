@@ -1,0 +1,18 @@
+#! clause: L6.4
+#! clause: L8.5
+#! mode: static
+#! stage: parse
+# Block-argument forms (§6.4/§8.5): a trailing `do … end` is a call's block
+# argument. A zero-parameter block omits the `()`; parameters are plain names in
+# `( … )` before the body; a call may carry both ordinary arguments and a block.
+each(items) do
+    show(item)
+end
+
+map(items) do (x)
+    x * 2
+end
+
+fold(items, 0) do (acc, x)
+    acc + x
+end

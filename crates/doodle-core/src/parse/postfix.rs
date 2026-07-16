@@ -2,8 +2,9 @@
 //! `object.name`, indexing `object[…]` (L§6.3), and calls `callee(…)` with
 //! positional-then-keyword arguments (L§6.4). They chain left-to-right.
 
-use crate::ast::{Arg, Node, NodeId};
-use crate::lex::TokenKind;
+use super::stmt::is_end_terminator;
+use crate::ast::{Arg, BlockArg, Node, NodeId};
+use crate::lex::{Keyword, TokenKind};
 use crate::span::Span;
 
 impl super::Parser<'_> {
@@ -30,7 +31,9 @@ impl super::Parser<'_> {
 
     fn index_access(&mut self, object: NodeId) -> NodeId {
         self.advance(); // `[`
-        let index = self.expr(0);
+        // The `]` delimits any inner block, so the index parses with block
+        // arguments enabled even inside a construct header (S-4, §6.4).
+        let index = self.delimited(|p| p.expr(0));
         let end = self.expect_close(TokenKind::RBracket, "expected `]` to close this index");
         let span = Span::new(self.node_start(object), end);
         self.push(Node::Index { object, index }, span)
@@ -38,6 +41,37 @@ impl super::Parser<'_> {
 
     fn call(&mut self, callee: NodeId) -> NodeId {
         self.advance(); // `(`
+        // The `)` delimits any block passed inside the argument list, so
+        // arguments parse with block arguments enabled even inside a construct
+        // header (S-4, §6.4).
+        let args = self.delimited(Self::call_args);
+        let mut end = self.expect_close(TokenKind::RParen, "expected `)` to close this call");
+        // A trailing `do … end` is a block argument to this call (§6.4/§8.5),
+        // unless we are in a construct header (no-trailing-block mode, S-4),
+        // where the `do` opens the construct's body instead.
+        let block = if !self.no_block_arg
+            && matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::Do)))
+        {
+            let (block, block_end) = self.block_arg();
+            end = block_end;
+            Some(block)
+        } else {
+            None
+        };
+        let span = Span::new(self.node_start(callee), end);
+        self.push(
+            Node::Call {
+                callee,
+                args,
+                block,
+            },
+            span,
+        )
+    }
+
+    /// Parses the argument list between `(` and `)` (positional then keyword,
+    /// L§6.4); the cursor starts just past `(` and stops at `)`/end-of-input.
+    fn call_args(&mut self) -> Vec<Arg> {
         let mut args = Vec::new();
         let mut saw_keyword = false;
         loop {
@@ -68,9 +102,46 @@ impl super::Parser<'_> {
                 break;
             }
         }
-        let end = self.expect_close(TokenKind::RParen, "expected `)` to close this call");
-        let span = Span::new(self.node_start(callee), end);
-        self.push(Node::Call { callee, args }, span)
+        args
+    }
+
+    /// Parses a trailing block argument `do ( '(' params ')' )? body 'end'`
+    /// (§6.4/§8.5); the cursor is at `do`. Returns the block and the offset just
+    /// past its closing `end`.
+    fn block_arg(&mut self) -> (BlockArg, u32) {
+        self.advance(); // `do`
+        let params = if matches!(self.peek_kind(), Some(TokenKind::LParen)) {
+            self.block_params()
+        } else {
+            Vec::new()
+        };
+        let body = self.block(is_end_terminator);
+        let end = self.expect_end_span("do");
+        (BlockArg { params, body }, end)
+    }
+
+    /// Parses a block parameter list `'(' ( IDENT ( ',' IDENT )* )? ')'` (§8.5) —
+    /// plain names, no defaults; the cursor is at `(`.
+    fn block_params(&mut self) -> Vec<Box<str>> {
+        self.advance(); // `(`
+        let mut params = Vec::new();
+        loop {
+            if matches!(self.peek_kind(), Some(TokenKind::RParen) | None) {
+                break;
+            }
+            let (name, _) = self.expect_name("expected a block parameter name");
+            params.push(name);
+            if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect_close(
+            TokenKind::RParen,
+            "expected `)` to close the block parameters",
+        );
+        params
     }
 
     /// Whether the cursor is at `IDENT :` — a keyword argument (or a bare-word

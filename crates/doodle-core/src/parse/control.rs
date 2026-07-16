@@ -3,11 +3,13 @@
 //! (L§7.6/§7.7/§5.5). Each parses a header, one or more `body` blocks, and a
 //! closing `end`.
 //!
-//! S-4: a construct's header expression is parsed in no-trailing-block mode — a
-//! `do … end` after the header opens the construct's body, never a block
-//! argument to a call in the header. With block arguments unimplemented (M1.8),
-//! that already holds (nothing here consumes a trailing `do`); the leftover-`do`
-//! confusion is diagnosed in [`super::Parser::stray_do`](super::Parser).
+//! S-4: a construct's header expression (a `while` condition, a `with` value) is
+//! parsed in no-trailing-block mode via [`Parser::header_expr`](super::Parser) —
+//! a `do … end` after the header opens the construct's body, never a block
+//! argument (§8.5) to a call in the header. To pass a block to a call in a
+//! header, parenthesize it (`while (f() do … end) do … end`). A leftover `do`
+//! that begins a statement is diagnosed in
+//! [`Parser::stray_do`](super::Parser).
 
 use super::stmt::is_end_terminator;
 use crate::ast::{IfArm, Node, NodeId};
@@ -22,7 +24,11 @@ impl super::Parser<'_> {
         self.advance(); // `if`
         let mut arms = Vec::new();
         let else_body = loop {
-            let cond = self.expr(0);
+            // An `if` condition is delimited by `then`, so a `do … end` in it is
+            // a block argument — re-enable them even when this `if` is itself a
+            // construct header expression (no-trailing-block mode is header-local,
+            // S-4/§6.4).
+            let cond = self.delimited(|p| p.expr(0));
             self.expect_then();
             let body = self.block(is_else_or_end);
             arms.push(IfArm { cond, body });
@@ -64,7 +70,7 @@ impl super::Parser<'_> {
     pub(super) fn while_stmt(&mut self) -> NodeId {
         let start = self.peek_span().start;
         self.advance(); // `while`
-        let cond = self.expr(0);
+        let cond = self.header_expr();
         self.expect_do("while");
         let body = self.block(is_end_terminator);
         let end = self.expect_end_span("while");
@@ -87,11 +93,23 @@ impl super::Parser<'_> {
         self.advance(); // `with`
         let (name, _) = self.expect_name("expected a dynamic-parameter name after `with`");
         self.expect_eq("with");
-        let value = self.expr(0);
+        let value = self.header_expr();
         self.expect_do("with");
         let body = self.block(is_end_terminator);
         let end = self.expect_end_span("with");
         self.push(Node::With { name, value, body }, Span::new(start, end))
+    }
+
+    /// Parses a construct header expression (a `while` condition or `with`
+    /// value) in no-trailing-block mode (S-4, §6.4): a trailing `do … end` opens
+    /// the construct's body, not a block argument to a call in the header.
+    /// (`if` uses `then`, so it needs no such mode.)
+    fn header_expr(&mut self) -> NodeId {
+        let prev = self.no_block_arg;
+        self.no_block_arg = true;
+        let expr = self.expr(0);
+        self.no_block_arg = prev;
+        expr
     }
 
     fn expect_then(&mut self) {

@@ -1,0 +1,11 @@
+#! clause: L6.4
+#! clause: L7.6
+#! mode: static
+#! stage: parse
+# In a construct header a `do … end` opens the construct body, not a block
+# argument to a call in the header (S-4). To pass a block to a call in a header,
+# parenthesize it: the inner `do … end` is `stream()`'s block argument, the
+# outer `do … end` is the `while` body.
+while (stream() do (line) handle(line) end) do
+    step()
+end

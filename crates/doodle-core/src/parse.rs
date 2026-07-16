@@ -3,9 +3,10 @@
 //! Numeric value lowering (digits → `i64`/bignum/`f64`) happens here — the lexer
 //! validated only shape (M1.3).
 //!
-//! Expressions (M1.6, `stmt`/`control`/`collection`/`decode`/`postfix`): the
-//! operator-precedence tower (L§6.5), string/bytes literals with escape decoding
-//! and `{ … }` interpolation, postfix `.`/`[]`/`()`, list/dict literals, and the
+//! Expressions (M1.6, `stmt`/`control`/`collection`/`decode`/`literal`/
+//! `postfix`): the operator-precedence tower (L§6.5), string/bytes literals with
+//! escape decoding and `{ … }` interpolation (`literal`), postfix `.`/`[]`/`()`,
+//! list/dict literals, and the
 //! `if`/`try` forms (which double as statements). Statements (M1.7, `stmt`):
 //! `let`/`const`/assignment, `while`/`loop`/`with`, `try`, and the non-local
 //! exits, separated into bodies (L§7.1). Named declarations and anonymous `fn`
@@ -15,12 +16,13 @@ mod collection;
 mod control;
 mod decl;
 mod decode;
+mod literal;
 mod moddecl;
 mod postfix;
 mod stmt;
 mod typedecl;
 
-use crate::ast::{Ast, BinaryOp, Node, NodeId, StrPart, UnaryOp};
+use crate::ast::{Ast, BinaryOp, Node, NodeId, UnaryOp};
 use crate::diag::Diagnostic;
 use crate::diag::code::DiagnosticCode;
 use crate::lex::{Keyword, Lexed, TokenKind, lex};
@@ -117,6 +119,13 @@ struct Parser<'a> {
     /// callable body (true) rather than at module level (false). Module-level-
     /// only declarations (L§7.1) report when parsed while this is set.
     nested: bool,
+    /// No-trailing-block mode (S-4, §6.4): while true, a call does not consume a
+    /// trailing `do … end` as a block argument — the `do` opens the enclosing
+    /// construct's body. Set only across a `while`/`with` header expression, and
+    /// cleared inside any delimited sub-expression (a group, collection, index,
+    /// argument list, or interpolation), whose closer already delimits an inner
+    /// block. Off (block arguments attach) everywhere else.
+    no_block_arg: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -136,7 +145,21 @@ impl<'a> Parser<'a> {
             depth: 0,
             bailed: false,
             nested: false,
+            no_block_arg: false,
         }
+    }
+
+    /// Runs `f` with no-trailing-block mode cleared (block arguments attach),
+    /// restoring the prior mode afterward. A delimited sub-expression — a group,
+    /// collection, index, argument list, or interpolation — uses this: its
+    /// closer delimits any inner `do … end`, so a call inside it is free to take
+    /// a block even within a construct header (S-4, §6.4).
+    fn delimited<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let prev = self.no_block_arg;
+        self.no_block_arg = false;
+        let result = f(self);
+        self.no_block_arg = prev;
+        result
     }
 
     /// Parses an expression whose operators all bind at least as tightly as
@@ -294,7 +317,7 @@ impl<'a> Parser<'a> {
     /// Parenthesized grouping (transparent — the parens only set precedence).
     fn grouping(&mut self) -> NodeId {
         self.advance(); // `(`
-        let inner = self.expr(0);
+        let inner = self.delimited(|p| p.expr(0));
         if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             self.advance();
         } else {
@@ -302,87 +325,6 @@ impl<'a> Parser<'a> {
             self.error(span, "expected a `)` to close this group");
         }
         inner
-    }
-
-    /// Assembles a string literal from the structured stream `StrStart (StrText
-    /// | interpolation)* StrEnd`, decoding escapes and parsing each `{ … }`.
-    /// Adjacent decoded text (including triple-quoted `\n`-join chunks) merges
-    /// into one `Text` part.
-    fn string_lit(&mut self, start_span: Span) -> NodeId {
-        let source = self.source;
-        // A chunk-final `\` is only a real error in a triple-quoted string (a
-        // line-final backslash, S-49 × S-3). In a single-line string it can only
-        // arise from `\` before the terminating newline, which the lexer already
-        // reports as unterminated-string — that diagnostic takes precedence.
-        let is_triple = start_span.end - start_span.start == 3;
-        self.advance(); // StrStart
-        let mut parts = Vec::new();
-        let mut acc = String::new();
-        let mut end = start_span.end;
-        loop {
-            match self.peek_kind() {
-                Some(TokenKind::StrText) => {
-                    let sp = self.peek_span();
-                    self.advance();
-                    let (text, dangling) =
-                        decode::decode_text(&source[sp.start as usize..sp.end as usize]);
-                    if let Some(off) = dangling.filter(|_| is_triple) {
-                        let at = sp.start + off as u32;
-                        self.error(
-                            Span::new(at, at + 1),
-                            "a backslash can't end a line — write `\\\\` for a literal \
-                             backslash; Doodle doesn't join lines with `\\` (each line of a \
-                             multi-line string is its own line in the value)",
-                        );
-                    }
-                    acc.push_str(&text);
-                }
-                Some(TokenKind::InterpStart) => {
-                    flush_text(&mut parts, &mut acc);
-                    self.advance();
-                    // An empty interpolation was already diagnosed by the lexer;
-                    // skip it rather than pile on an "expected expression".
-                    if matches!(self.peek_kind(), Some(TokenKind::InterpEnd)) {
-                        self.advance();
-                    } else {
-                        let expr = self.expr(0);
-                        if matches!(self.peek_kind(), Some(TokenKind::InterpEnd)) {
-                            self.advance();
-                        } else {
-                            let sp = self.peek_span();
-                            self.error(sp, "expected `}` to close this interpolation");
-                        }
-                        parts.push(StrPart::Interp(expr));
-                    }
-                }
-                Some(TokenKind::StrEnd) => {
-                    end = self.peek_span().end;
-                    self.advance();
-                    break;
-                }
-                // The lexer always balances StrStart/StrEnd (a synthetic StrEnd
-                // even for an unterminated string), so this stops rather than
-                // loops on an otherwise-impossible malformed stream.
-                _ => break,
-            }
-        }
-        flush_text(&mut parts, &mut acc);
-        self.push(Node::StrLit(parts), Span::new(start_span.start, end))
-    }
-
-    /// Decodes a bytes literal `b"…"` to its byte sequence.
-    fn decode_bytes_literal(&mut self, span: Span) -> Node {
-        let text = &self.source[span.start as usize..span.end as usize];
-        let inner = text.strip_prefix("b\"").unwrap_or(text);
-        let (bytes, dangling) = decode::decode_bytes(inner);
-        if let Some(off) = dangling {
-            let at = span.start + 2 + off as u32; // past the `b"` prefix
-            self.error(
-                Span::new(at, at + 1),
-                "a backslash here isn't a valid escape",
-            );
-        }
-        Node::BytesLit(bytes)
     }
 
     fn peek_kind(&self) -> Option<TokenKind> {
@@ -422,13 +364,6 @@ impl<'a> Parser<'a> {
         }
         self.diagnostics
             .push(Diagnostic::error(code, self.module, span, message));
-    }
-}
-
-/// Flushes accumulated decoded text into a `Text` part, if any.
-fn flush_text(parts: &mut Vec<StrPart>, acc: &mut String) {
-    if !acc.is_empty() {
-        parts.push(StrPart::Text(std::mem::take(acc).into()));
     }
 }
 

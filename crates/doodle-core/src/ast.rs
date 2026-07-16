@@ -81,12 +81,15 @@ pub enum Node {
         /// The index/key expression.
         index: NodeId,
     },
-    /// A call `callee(args)` (L§6.4). Parens are always required.
+    /// A call `callee(args)` (L§6.4). Parens are always required. A trailing
+    /// `do … end` supplies the optional block argument (§6.4/§8.5).
     Call {
         /// The callee expression.
         callee: NodeId,
         /// The arguments, positional before keyword.
         args: Vec<Arg>,
+        /// The trailing `do … end` block argument (§6.4/§8.5), if present.
+        block: Option<BlockArg>,
     },
     /// A `let` binding `let name = value` (L§5.2): a new mutable binding.
     Let {
@@ -333,6 +336,20 @@ pub enum DictKey {
     Bare(Box<str>),
     /// A computed key `expr:`.
     Expr(NodeId),
+}
+
+/// A trailing block argument on a call (L§6.4/§8.5): the `do … end` unit passed
+/// as a callee's last argument, bound to the callee's block parameter (§8.2).
+///
+/// A block is **second-class** (§8.5): the parser attaches it only here, on a
+/// call, never as a standalone value.
+#[derive(Clone, Debug)]
+pub struct BlockArg {
+    /// The block parameter names, in order — plain identifiers with no defaults
+    /// (`do (a, b) …`), empty when the `()` is omitted (a zero-parameter block).
+    pub params: Vec<Box<str>>,
+    /// The block body (a [`Node::Block`]).
+    pub body: NodeId,
 }
 
 /// A call argument (L§6.4): positional, or a keyword `name: value`.

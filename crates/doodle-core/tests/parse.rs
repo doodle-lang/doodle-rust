@@ -2,7 +2,8 @@
 //! associativity, and value lowering are visible in the expected output.
 
 use doodle_core::ast::{
-    Arg, Ast, BinaryOp, CallableKind, DictKey, Node, NodeId, Param, ProtoMember, StrPart, UnaryOp,
+    Arg, Ast, BinaryOp, BlockArg, CallableKind, DictKey, Node, NodeId, Param, ProtoMember, StrPart,
+    UnaryOp,
 };
 use doodle_core::parse::{parse_expression, parse_program};
 use doodle_core::source::normalize;
@@ -63,7 +64,11 @@ fn dump(ast: &Ast, id: NodeId) -> String {
         Node::Index { object, index } => {
             format!("([] {} {})", dump(ast, *object), dump(ast, *index))
         }
-        Node::Call { callee, args } => {
+        Node::Call {
+            callee,
+            args,
+            block,
+        } => {
             let mut s = format!("(call {}", dump(ast, *callee));
             for arg in args {
                 match arg {
@@ -75,6 +80,10 @@ fn dump(ast: &Ast, id: NodeId) -> String {
                         s.push_str(&format!(" {name}:{}", dump(ast, *value)));
                     }
                 }
+            }
+            if let Some(b) = block {
+                s.push(' ');
+                s.push_str(&block_arg_dump(ast, b));
             }
             s.push(')');
             s
@@ -278,6 +287,17 @@ fn proto_member_dump(ast: &Ast, m: &ProtoMember) -> String {
             dump(ast, b)
         ),
     }
+}
+
+/// Renders a call's trailing block argument: `(do <body>)`, or with parameters
+/// `(do a b <body>)` — the block param names before the body block.
+fn block_arg_dump(ast: &Ast, b: &BlockArg) -> String {
+    let mut s = String::from("(do");
+    for p in &b.params {
+        s.push_str(&format!(" {p}"));
+    }
+    s.push_str(&format!(" {})", dump(ast, b.body)));
+    s
 }
 
 /// Renders a parameter list: `(params a b=<default> do:blk)`, `(params)` empty.
@@ -663,8 +683,130 @@ fn s4_header_parses_in_no_trailing_block_mode() {
         "(module (while (call f) (block (call g))))"
     );
     assert!(prog_diags("while f() do g() end").is_empty());
+    // A header call with arguments still yields no block argument.
+    assert_eq!(
+        program_of("while ready(x) do step() end"),
+        "(module (while (call ready x) (block (call step))))"
+    );
+    // A `with` value is a header too (§5.5): the `do` opens the body.
+    assert_eq!(
+        program_of("with c = f() do paint(c) end"),
+        "(module (with c (call f) (block (call paint c))))"
+    );
+    // To pass a block to a call in a header, parenthesize it: the inner
+    // `do x end` is `f()`'s block, the outer `do y end` the `while` body.
+    assert_eq!(
+        program_of("while (f() do x end) do y end"),
+        "(module (while (call f (do (block x))) (block y)))"
+    );
+    // Inside the header call's own argument list, a block attaches normally
+    // (the `)` delimits it); the outer `do … end` is still the `while` body.
+    assert_eq!(
+        program_of("while f(g() do x end) do y end"),
+        "(module (while (call f (call g (do (block x)))) (block y)))"
+    );
     // A second, dangling `do … end` has nothing to attach to → the S-4 error.
     assert!(prog_diags("while f() do g() end\ndo h() end").contains(&"syntax-error"));
+}
+
+#[test]
+fn block_arguments_l64_l85() {
+    // A call's trailing `do … end` is its block argument (§6.4/§8.5); a
+    // zero-parameter block omits the `()`.
+    assert_eq!(
+        program_of("each(xs) do show(x) end"),
+        "(module (call each xs (do (block (call show x)))))"
+    );
+    // Block parameters are plain names in `( … )` before the body.
+    assert_eq!(
+        program_of("map(xs) do (x) x * 2 end"),
+        "(module (call map xs (do x (block (* x 2)))))"
+    );
+    assert_eq!(
+        program_of("fold(xs, 0) do (acc, x) acc + x end"),
+        "(module (call fold xs 0 (do acc x (block (+ acc x)))))"
+    );
+    // The block attaches to the trailing call in a postfix chain (`b()` here,
+    // not `a()`).
+    assert_eq!(
+        program_of("a().b() do x end"),
+        "(module (call (. (call a) b) (do (block x))))"
+    );
+    // A multi-statement block body.
+    assert_eq!(
+        program_of("run() do\n  a()\n  b()\nend"),
+        "(module (call run (do (block (call a) (call b)))))"
+    );
+    // An explicit empty `()` is a zero-parameter list, the same as omitting it.
+    assert_eq!(
+        program_of("go() do () step() end"),
+        "(module (call go (do (block (call step)))))"
+    );
+    // A block attaches after keyword arguments, and its body may be empty.
+    assert_eq!(
+        program_of("Widget(color: red) do end"),
+        "(module (call Widget color:red (do (block))))"
+    );
+    assert!(prog_diags("each(xs) do show(x) end").is_empty());
+    assert!(prog_diags("map(xs) do (x) x end").is_empty());
+    assert!(prog_diags("fold(xs, 0) do (acc, x) acc + x end").is_empty());
+    assert!(prog_diags("Widget(color: red) do end").is_empty());
+    // A malformed block parameter (not an identifier) recovers with a diagnostic,
+    // no panic or non-termination.
+    assert!(prog_diags("f() do (1) x end").contains(&"syntax-error"));
+}
+
+#[test]
+fn s4_nested_body_in_header_re_enables_blocks() {
+    // No-trailing-block mode is header-*local*: a nested body inside the header
+    // expression (an anonymous-`fn` body, an `if`/`try` arm) is delimited by its
+    // own terminator, so a call inside it takes its block argument normally.
+    // Here the anon-fn body's `log()` takes the block `do cleanup() end`; the
+    // outer `do run() end` is the `with` body.
+    assert_eq!(
+        program_of("with h = fn() log() do cleanup() end end do run() end"),
+        "(module (with h (fn (params) (block (call log (do (block (call cleanup)))))) \
+         (block (call run))))"
+    );
+    assert!(prog_diags("with h = fn() log() do cleanup() end end do run() end").is_empty());
+    // A `try` used as a `while` condition: its protected body's `f()` takes the
+    // block `do a end`; the outer `do body end` is the loop body.
+    assert_eq!(
+        program_of("while try f() do a end rescue e g() end do work() end"),
+        "(module (while (try (block (call f (do (block a)))) rescue e (block (call g))) \
+         (block (call work))))"
+    );
+    assert!(prog_diags("while try f() do a end rescue e g() end do work() end").is_empty());
+    // An `if` *condition* is delimited by `then`, so `f()` in the condition of an
+    // `if` used as a `while` header takes its block; the outer `do body end` is
+    // the loop body. (The no-trailing-block flag must not leak past `then`.)
+    assert_eq!(
+        program_of("while if f() do x end then a() end do body end"),
+        "(module (while (if ((call f (do (block x))) (block (call a)))) (block body)))"
+    );
+    assert!(prog_diags("while if f() do x end then a() end do body end").is_empty());
+    // An anonymous-`fn` parameter *default* is delimited by `,`/`)`, so `g()` in
+    // a default takes its block even when the `fn` is a `with` header value.
+    assert_eq!(
+        program_of("with v = fn(z = g() do y end) z end do run() end"),
+        "(module (with v (fn (params z=(call g (do (block y)))) (block z)) (block (call run))))"
+    );
+    assert!(prog_diags("with v = fn(z = g() do y end) z end do run() end").is_empty());
+}
+
+#[test]
+fn stray_do_suggests_parenthesizing_s4() {
+    // A `do` that opens a statement has no call to attach to; now that block
+    // arguments parse, the diagnostic points at the header escape hatch (§6.4).
+    let nfc = normalize("do work() end");
+    let p = parse_program(nfc.as_ref(), M);
+    assert!(
+        p.diagnostics.iter().any(|d| {
+            d.message.contains("can't start a statement") && d.message.contains("parenthesize")
+        }),
+        "stray `do` should suggest parenthesizing: {:?}",
+        p.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
 }
 
 #[test]

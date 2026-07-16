@@ -12,13 +12,18 @@ impl super::Parser<'_> {
     pub(super) fn list_lit(&mut self) -> NodeId {
         let start = self.peek_span().start;
         self.advance(); // `[`
-        let mut elems = Vec::new();
-        while !matches!(self.peek_kind(), Some(TokenKind::RBracket) | None) {
-            elems.push(self.expr(0));
-            if !self.eat_comma() {
-                break;
+        // The `]` delimits any inner block, so elements parse with block
+        // arguments enabled even inside a construct header (S-4, §6.4).
+        let elems = self.delimited(|p| {
+            let mut elems = Vec::new();
+            while !matches!(p.peek_kind(), Some(TokenKind::RBracket) | None) {
+                elems.push(p.expr(0));
+                if !p.eat_comma() {
+                    break;
+                }
             }
-        }
+            elems
+        });
         let end = self.expect_close(TokenKind::RBracket, "expected `]` to close this list");
         self.push(Node::List(elems), Span::new(start, end))
     }
@@ -27,16 +32,21 @@ impl super::Parser<'_> {
     pub(super) fn dict_lit(&mut self) -> NodeId {
         let start = self.peek_span().start;
         self.advance(); // `{`
-        let mut entries = Vec::new();
-        while !matches!(self.peek_kind(), Some(TokenKind::RBrace) | None) {
-            let key = self.dict_key();
-            self.expect_colon();
-            let value = self.expr(0);
-            entries.push(DictEntry { key, value });
-            if !self.eat_comma() {
-                break;
+        // The `}` delimits any inner block, so entries parse with block
+        // arguments enabled even inside a construct header (S-4, §6.4).
+        let entries = self.delimited(|p| {
+            let mut entries = Vec::new();
+            while !matches!(p.peek_kind(), Some(TokenKind::RBrace) | None) {
+                let key = p.dict_key();
+                p.expect_colon();
+                let value = p.expr(0);
+                entries.push(DictEntry { key, value });
+                if !p.eat_comma() {
+                    break;
+                }
             }
-        }
+            entries
+        });
         let end = self.expect_close(TokenKind::RBrace, "expected `}` to close this dict");
         self.push(Node::Dict(entries), Span::new(start, end))
     }

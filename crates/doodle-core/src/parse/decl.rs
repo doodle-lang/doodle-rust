@@ -109,7 +109,11 @@ impl super::Parser<'_> {
         let (name, _) = self.expect_name("expected a parameter name");
         let default = if matches!(self.peek_kind(), Some(TokenKind::Eq)) {
             self.advance(); // `=`
-            Some(self.expr(0))
+            // The default is delimited by `,`/`)`, so a `do … end` in it is a
+            // block argument — re-enable them even when this parameter list
+            // belongs to an anonymous `fn` used as a construct header expression
+            // (no-trailing-block mode is header-local, S-4/§6.4).
+            Some(self.delimited(|p| p.expr(0)))
         } else {
             None
         };
