@@ -66,6 +66,9 @@ pub enum DiagnosticCode {
     /// read-only, S-39) (L§5.3). `const` and declaration targets are the distinct
     /// [`ConstReassignment`](Self::ConstReassignment) family instead.
     UndeclaredAssignment,
+    /// A function (`fn`) whose body can complete without producing a value, where
+    /// that is statically determinable (L§8.4, S-5 tail classifier).
+    FunctionFallsOffEnd,
 }
 
 impl DiagnosticCode {
@@ -90,6 +93,7 @@ impl DiagnosticCode {
             DiagnosticCode::MisplacedExit => "misplaced-exit",
             DiagnosticCode::DuplicateDeclaration => "duplicate-declaration",
             DiagnosticCode::UndeclaredAssignment => "undeclared-assignment",
+            DiagnosticCode::FunctionFallsOffEnd => "function-falls-off-end",
         }
     }
 }

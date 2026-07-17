@@ -55,6 +55,11 @@ impl super::Resolver<'_> {
             Some(Ctrl::Block) => Some(ExitTarget::ThisBlock),
             Some(Ctrl::Callable) | None => None,
         };
+        // Record a `break` bound to a loop, so the S-5 tail classifier knows that
+        // loop can exit (a `loop` with no bound `break` diverges).
+        if let (true, Some(ExitTarget::ThisLoop(loop_node))) = (is_break, target) {
+            self.loops_with_break.push(loop_node);
+        }
         match target {
             Some(t) => self.set_exit(node, t),
             None => {

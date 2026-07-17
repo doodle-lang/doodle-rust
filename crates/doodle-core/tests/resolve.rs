@@ -377,6 +377,53 @@ fn assigning_to_a_selective_import_names_the_source() {
 }
 
 #[test]
+fn fn_falls_off_end_when_tail_is_value_less() {
+    let dup = "function-falls-off-end";
+    assert_eq!(diags(&resolved("fn f() end")), vec![dup]); // empty body
+    assert_eq!(diags(&resolved("fn f()\n  let x = 1\nend")), vec![dup]); // tail `let`
+    assert_eq!(
+        diags(&resolved("fn f()\n  while c do g() end\nend")),
+        vec![dup]
+    ); // `while` yields nothing
+    assert_eq!(
+        diags(&resolved("fn f()\n  if c then 1 end\nend")),
+        vec![dup]
+    ); // `if` with no `else`
+    assert_eq!(
+        diags(&resolved("to p() end\nfn f()\n  p()\nend")),
+        vec![dup]
+    ); // tail call to a `to` (Void)
+    assert_eq!(
+        diags(&resolved("fn f()\n  loop do break end\nend")),
+        vec![dup]
+    ); // a `loop` that can exit
+}
+
+#[test]
+fn fn_does_not_fall_off_when_tail_produces_or_diverges() {
+    assert!(diags(&resolved("fn f()\n  1\nend")).is_empty()); // a value
+    assert!(diags(&resolved("fn f()\n  return 1\nend")).is_empty()); // return a value
+    // A `raise` tail DIVERGES — it never falls off (the earlier-draft unsoundness).
+    assert!(diags(&resolved("fn f()\n  raise err\nend")).is_empty());
+    // A `loop` with no bound `break` is an infinite loop → diverges.
+    assert!(diags(&resolved("fn f()\n  loop do g() end\nend")).is_empty());
+    // Every `if` branch produces.
+    assert!(diags(&resolved("fn f()\n  if c then 1 else 2 end\nend")).is_empty());
+    // A call whose proc/fn nature isn't lexically known → indeterminate → runtime.
+    assert!(diags(&resolved("fn f()\n  unknown()\nend")).is_empty());
+    // A same-module `fn` call produces a value.
+    assert!(diags(&resolved("fn g() 1 end\nfn f()\n  g()\nend")).is_empty());
+    // `to` bodies are never checked (a procedure yields no value by design).
+    assert!(diags(&resolved("to p()\n  let x = 1\nend")).is_empty());
+    // try: a produces-or-diverges mix is fine (the ruling's example).
+    assert!(diags(&resolved("fn f()\n  try h() rescue e raise end\nend")).is_empty());
+    // `return expr` PRODUCES (the fn doesn't fall off) — even `return p()` for a
+    // `to` p: that's an S-6 return-operand error, not falls-off-end. Not flagged
+    // by S-5 (S-6's consuming-site check owns it).
+    assert!(diags(&resolved("to p() end\nfn f()\n  return p()\nend")).is_empty());
+}
+
+#[test]
 fn resolver_diagnostics_are_source_ordered() {
     // The deferred (module-name) assign check runs in a post-pass, but the front
     // end guarantees source-ordered diagnostics — so the `y` (line 1) error must

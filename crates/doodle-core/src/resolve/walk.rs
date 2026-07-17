@@ -18,6 +18,7 @@ use crate::span::{ModuleId, Span};
 mod dispatch;
 mod errors;
 mod exits;
+mod tailcheck;
 
 /// A lexical control context, for `return`/`break`/`continue` targets +
 /// placement (machine-design §12). A callable is a `return` target and a
@@ -79,6 +80,10 @@ pub(super) struct Resolver<'a> {
     /// (imports are read-only, S-39). Wildcard sources aren't nameable until load
     /// (M5), so a wildcard-supplied name falls to the generic undeclared message.
     selective_imports: Vec<(Box<str>, Box<str>)>,
+    /// Loops (`while`/`loop` nodes) that have a `break` lexically bound to them —
+    /// for the S-5 tail classifier's loop-divergence check (a `loop` with no bound
+    /// `break` diverges; one with a bound `break` is value-less).
+    loops_with_break: Vec<NodeId>,
     frames: Vec<Frame>,
     scopes: Vec<Scope>,
     ctrl: Vec<Ctrl>,
@@ -103,6 +108,7 @@ impl<'a> Resolver<'a> {
             deferred_captures: Vec::new(),
             pending_assigns: Vec::new(),
             selective_imports: Vec::new(),
+            loops_with_break: Vec::new(),
             frames: Vec::new(),
             scopes: Vec::new(),
             ctrl: Vec::new(),
@@ -110,6 +116,7 @@ impl<'a> Resolver<'a> {
         };
         r.resolve_module(root);
         r.check_pending_assigns(); // now that `globals` is complete
+        r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
         // The whole-module assign post-pass appends out of source order; the front
         // end guarantees source-ordered diagnostics (diag::mod, the renderer never
         // re-sorts), so restore that here. Stable to stay deterministic.
