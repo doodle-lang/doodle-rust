@@ -1,18 +1,25 @@
-//! The S-6 Void consuming-site check (M1.10c): a post-pass that walks the whole
-//! module and, at every value-**consuming** position, reports a consumed
-//! expression that *statically* produces Void — the unified L§6.11 diagnostic.
+//! The S-6/L§6.8 value-discipline check (M1.10c): a post-pass that walks the
+//! whole module and, at every value-**consuming** position, reports a consumed
+//! expression that *statically* produces Void. Three producer causes, each with
+//! its own diagnostic (producer-site blame, framed by the consuming context):
+//! a call to a module-level `to` (`procedure-in-expression`, L§6.11); an `if`
+//! used as a value with no `else` (`if-expression-missing-else`, L§6.8); and a
+//! present branch/body of a value-position `if`/`try` whose tail produces no
+//! value (`non-producing-branch`, L§6.8/§6.9).
 //!
-//! "Statically determinable" is deliberately a **subset**: the ruling scopes the
-//! static half to a callee that resolves to a same-module `to` (a procedure).
-//! That Void propagates up through an expression-position `if`/`try` to the outer
-//! consumer (and grouping parens, which the parser makes transparent — there is
-//! no paren node), so a `to` call reached through such branches is caught too.
-//! Everything else defers to the runtime check at M2a: a call whose proc/fn
-//! nature isn't lexically known (needs dispatch, M5), and a value-less *statement*
-//! (`let`/`while`/…) as a value-position branch tail. The missing-`else` case (an
-//! `if` with no `else` used as a value) is the **separate `if`-expr-requires-
-//! `else`** piece — [`void_cause`] returns `None` for it here, so it is neither
-//! misreported nor flagged until that chunk lands.
+//! "Statically determinable" is a normative **subset** (S-6 ratified 2026-07-17):
+//! a Void-producing call is caught only when the callee resolves to a
+//! **module-level** `to` — a locally-declared `to` is indeterminate → the runtime
+//! check (M2a). Void propagates up through an expression-position `if`/`try` to
+//! the outer consumer (and grouping parens, which the parser makes transparent —
+//! there is no paren node), so a cause reached through such branches is caught
+//! too. Branch-tail Void-ness follows the S-5 lattice `tailcheck` uses, with one
+//! consuming-site refinement: a tail that transfers control away — `raise`, a
+//! **non-local `return`/`break`/`continue`**, or an infinite `loop` — diverges
+//! past the consumer, so it is not Void. (`tailcheck` classifies a bare `return`
+//! as value-less because at an *fn tail* it means "the fn yields no value"; at a
+//! consuming site inside the fn, the same `return` instead leaves before the
+//! consumer runs. The S-5/S-6 spec text should carry this one-line note.)
 //!
 //! Two positions are NOT consuming sites and so are never checked here: a **bare
 //! expression statement** (§7.2 — its value is discarded) and an **`fn` body's
@@ -26,8 +33,13 @@ use crate::resolve::{GlobalKind, Resolution};
 /// Why a consumed expression statically produces Void, and where to blame it
 /// (producer-site blame — the span covers the Void-producing expression).
 enum VoidCause {
-    /// A call to a same-module `to`: the call node to blame, and the proc's name.
+    /// A call to a module-level `to`: the call node to blame, and the proc's name.
     Proc(NodeId, Box<str>),
+    /// An `if` used as a value with no `else` (L§6.8): the `if` node to blame.
+    MissingElse(NodeId),
+    /// A branch/body of a value-position `if`/`try` whose tail produces no value
+    /// (L§6.8/§6.9): the value-less tail statement to blame.
+    NonProducing(NodeId),
 }
 
 impl Resolver<'_> {
@@ -251,12 +263,29 @@ impl Resolver<'_> {
     /// Reports `e` if it statically produces Void, framed by `subject` (the
     /// consuming context) with producer-site blame.
     fn consume(&mut self, e: NodeId, subject: &str) {
-        if let Some(VoidCause::Proc(call, name)) = self.void_cause(e) {
-            let msg = format!(
-                "{subject}, but `{name}` is a procedure (a `to`) and produces none \
-                 — call it as its own statement, or make `{name}` an `fn`"
-            );
-            self.error(DiagnosticCode::ProcedureInExpression, call, &msg);
+        match self.void_cause(e) {
+            Some(VoidCause::Proc(call, name)) => {
+                let msg = format!(
+                    "{subject}, but `{name}` is a procedure (a `to`) and produces none \
+                     — call it as its own statement, or make `{name}` an `fn`"
+                );
+                self.error(DiagnosticCode::ProcedureInExpression, call, &msg);
+            }
+            Some(VoidCause::MissingElse(if_node)) => {
+                let msg = format!(
+                    "{subject}, but an `if` used as a value needs an `else` — every \
+                     branch must produce a value; add an `else` branch"
+                );
+                self.error(DiagnosticCode::IfExpressionMissingElse, if_node, &msg);
+            }
+            Some(VoidCause::NonProducing(stmt)) => {
+                let msg = format!(
+                    "{subject}, but this branch produces no value — a branch used as a \
+                     value must end in an expression that produces one"
+                );
+                self.error(DiagnosticCode::NonProducingBranch, stmt, &msg);
+            }
+            None => {}
         }
     }
 
@@ -269,11 +298,12 @@ impl Resolver<'_> {
             Node::Call { callee, .. } => self
                 .proc_callee_name(*callee)
                 .map(|name| VoidCause::Proc(e, name)),
-            // Void flows out of a value-producing `if` from whichever branch is
-            // Void. A missing `else` is the separate `if`-expr-requires-`else`
-            // piece (a later chunk), so it is not a cause here.
+            // An `if` as a value with no `else` is always an error (L§6.8); with an
+            // `else`, the Void flows out of whichever branch produces none.
             Node::If { arms, else_body } => {
-                let else_body = (*else_body)?;
+                let Some(else_body) = *else_body else {
+                    return Some(VoidCause::MissingElse(e));
+                };
                 for arm in arms {
                     if let Some(c) = self.block_void_cause(arm.body) {
                         return Some(c);
@@ -281,6 +311,7 @@ impl Resolver<'_> {
                 }
                 self.block_void_cause(else_body)
             }
+            // A `try` as a value: either body producing none makes it Void (L§6.9).
             Node::Try {
                 body, rescue_body, ..
             } => self
@@ -290,18 +321,36 @@ impl Resolver<'_> {
         }
     }
 
-    /// The Void cause of a block's *value* — its last statement's tail expression
-    /// (mirroring the S-5 tail notion, but only the static-subset causes).
+    /// The Void cause of a block's *value* — its last statement classified by the
+    /// same S-5 lattice `tailcheck` uses: a diverging tail (`raise`/`return`/an
+    /// infinite `loop`) never yields Void; a value-less tail does. A tail `if`/`try`
+    /// or bare expression carries the block's value, so recurse into it.
     fn block_void_cause(&self, block: NodeId) -> Option<VoidCause> {
-        let stmt = self.last_stmt(block)?;
-        // A tail `if`/`try` statement carries the block's value; a bare expression
-        // statement's expression is that value. Any other tail (`let`, `while`, …)
-        // is value-less but not a static-subset cause → runtime.
-        let tail = match self.ast.node(stmt) {
-            Node::ExprStmt(inner) => *inner,
-            _ => stmt,
+        let Some(stmt) = self.last_stmt(block) else {
+            // An empty block produces no value (matching `tailcheck`'s
+            // `tail_of_block`); blame the block itself.
+            return Some(VoidCause::NonProducing(block));
         };
-        self.void_cause(tail)
+        match self.ast.node(stmt) {
+            Node::ExprStmt(inner) => self.void_cause(*inner),
+            // Defensive: the parser wraps a statement-position `if`/`try` in an
+            // `ExprStmt` (the arm above), so this is not normally reached.
+            Node::If { .. } | Node::Try { .. } => self.void_cause(stmt),
+            // A non-local exit transfers control away, so the consumer never
+            // receives this block's value — it diverges, no Void is consumed. (At an
+            // *fn tail* a bare `return` instead means "the fn yields no value", which
+            // is `tailcheck`'s concern; here the consuming site is never reached.)
+            Node::Raise(_) | Node::Return(_) | Node::Break(_) | Node::Continue(_) => None,
+            // A `loop` with no `break` bound to it is infinite (diverges); one that
+            // can `break` completes with no value.
+            Node::Loop { .. } => self
+                .loops_with_break
+                .contains(&stmt)
+                .then_some(VoidCause::NonProducing(stmt)),
+            // A value-less statement tail (`let`/`const`/assignment/`while`/`with`)
+            // or any declaration in tail position: the branch produces no value.
+            _ => Some(VoidCause::NonProducing(stmt)),
+        }
     }
 
     /// The name of `callee` if it resolves to a same-module `to` (a procedure);

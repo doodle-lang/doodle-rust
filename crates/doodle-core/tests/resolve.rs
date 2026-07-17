@@ -337,6 +337,13 @@ fn assigning_to_a_const_or_declaration_is_rule_2a() {
         diags(&resolved("to greet() end\ngreet = 2")),
         vec!["const-reassignment"]
     );
+    // Rule 2a still catches a *local* declaration (S-6 ratified 2026-07-17): the
+    // static-subset narrowing is about the Void *value* check, not assignability —
+    // rule 2a runs in the scope walk where the binding kind is in hand.
+    assert_eq!(
+        diags(&resolved("to f()\n  to helper() end\n  helper = 5\nend")),
+        vec!["const-reassignment"]
+    );
     // A dynamic parameter is `with`-rebindable, not `=`-assignable.
     assert_eq!(
         diags(&resolved("parameter p = 1\np = 2")),
@@ -503,16 +510,65 @@ fn void_propagates_through_expression_position_if_and_try() {
 
 #[test]
 fn void_not_statically_determinable_is_deferred_to_runtime() {
-    // Only a same-module `to` callee is static (S-6). These all defer to the M2a
-    // runtime check, so the resolver stays silent.
+    // The static subset is a *module-level* `to` callee (S-6, normative). These all
+    // defer to the M2a runtime check, so the resolver stays silent.
     assert!(diags(&resolved("let x = unknown()")).is_empty()); // an unknown callee
     assert!(diags(&resolved("fn g() 1 end\nlet x = g()")).is_empty()); // an `fn` produces
-    assert!(diags(&resolved("to f(g)\n  let x = g()\n  x\nend")).is_empty()); // a local callee
-    // A missing `else` in value position is the separate `if`-expr-requires-`else`
-    // piece (a later chunk) — not reported here, and not misreported as a proc.
-    assert!(diags(&resolved("let x = if c then 1 end")).is_empty());
+    assert!(diags(&resolved("to f(g)\n  let x = g()\n  x\nend")).is_empty()); // a local param
+    // A *locally*-declared `to` is indeterminate (declaration-kind is only known
+    // module-level, ratified 2026-07-17) → runtime, not a static error here.
+    assert!(diags(&resolved("fn f()\n  to p() end\n  let x = p()\n  x\nend")).is_empty());
     // A field/index *mutation* target is not a consuming read of a value.
     assert!(diags(&resolved("to p() end\nlet a = thing()\na.b = 1")).is_empty());
+}
+
+#[test]
+fn if_or_try_as_a_value_requires_every_branch_to_produce() {
+    // L§6.8/§6.9: an `if`/`try` used as a value must produce on every branch.
+    // A missing `else` in value position (L§6.8).
+    assert_eq!(
+        diags(&resolved("let x = if c then 1 end")),
+        vec!["if-expression-missing-else"]
+    );
+    // A present branch whose tail produces no value (ends in a `let`).
+    assert_eq!(
+        diags(&resolved("let x = if c then 1 else\n  let y = 2\nend")),
+        vec!["non-producing-branch"]
+    );
+    // A `while` tail branch — value-less (like the fn-falls-off `while` case).
+    assert_eq!(
+        diags(&resolved(
+            "let x = if c then 1 else\n  while d do g() end\nend"
+        )),
+        vec!["non-producing-branch"]
+    );
+    // A `try` body that produces no value (L§6.9) — no `else` concept for `try`.
+    assert_eq!(
+        diags(&resolved("let x = try\n  let y = 1\nrescue e\n  2\nend")),
+        vec!["non-producing-branch"]
+    );
+    // An *empty* branch/body produces no value (the empty block is value-less, per
+    // the S-5 lattice) — for `if` (either branch) and `try` (either body).
+    let npb = vec!["non-producing-branch"];
+    assert_eq!(diags(&resolved("let x = if c then 1 else\nend")), npb);
+    assert_eq!(diags(&resolved("let x = if c then\nelse 2 end")), npb);
+    assert_eq!(diags(&resolved("let x = try\nrescue e\n  2\nend")), npb);
+    assert_eq!(diags(&resolved("let x = try\n  1\nrescue e\nend")), npb);
+    // A *diverging* branch is fine (produces-or-diverges mixes, per the S-5 lattice):
+    // `raise` in one branch, a value in the other.
+    assert!(diags(&resolved("let x = if c then raise oops else 2 end")).is_empty());
+    // A non-local exit (bare `return`/`break`) also diverges past the consumer, so
+    // the `if` is not Void here — unlike an *fn tail*, where a bare `return` is the
+    // fn's own value-less concern (S-5). See the voidcheck module note.
+    assert!(
+        diags(&resolved(
+            "to f()\n  let x = if c then 1 else return end\n  show(x)\nend"
+        ))
+        .is_empty()
+    );
+    // Both branches produce → OK; a bare statement `if` needs no `else`.
+    assert!(diags(&resolved("let x = if c then 1 else 2 end")).is_empty());
+    assert!(diags(&resolved("if c then g() end")).is_empty());
 }
 
 #[test]
