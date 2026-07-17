@@ -16,6 +16,8 @@ use crate::diag::code::DiagnosticCode;
 use crate::span::{ModuleId, Span};
 
 mod dispatch;
+mod errors;
+mod exits;
 
 /// A lexical control context, for `return`/`break`/`continue` targets +
 /// placement (machine-design §12). A callable is a `return` target and a
@@ -43,10 +45,18 @@ enum FrameKind {
     Module,
 }
 
-/// An open lexical scope: `name → slot`, with the frame the slots live in.
+/// An open lexical scope: its bindings, with the frame the slots live in.
 struct Scope {
     frame: usize,
-    bindings: Vec<(Box<str>, u16)>,
+    bindings: Vec<Binding>,
+}
+
+/// A local binding in a scope: name, slot, and declaration kind (which decides
+/// assignability — only [`GlobalKind::Let`] is `=`-assignable, S-6 rule 2a).
+struct Binding {
+    name: Box<str>,
+    slot: u16,
+    kind: GlobalKind,
 }
 
 pub(super) struct Resolver<'a> {
@@ -60,6 +70,10 @@ pub(super) struct Resolver<'a> {
     stmt_spans: Vec<(Span, NodeId)>,
     diagnostics: Vec<Diagnostic>,
     deferred_captures: Vec<NodeId>,
+    /// Assignment targets that resolved to a module name (not a local): their
+    /// assignability is checked in a post-pass, once `globals` is complete (a
+    /// module-level `let` may be declared after the assignment).
+    pending_assigns: Vec<(NodeId, Box<str>)>,
     frames: Vec<Frame>,
     scopes: Vec<Scope>,
     ctrl: Vec<Ctrl>,
@@ -82,12 +96,18 @@ impl<'a> Resolver<'a> {
             stmt_spans: Vec::new(),
             diagnostics: Vec::new(),
             deferred_captures: Vec::new(),
+            pending_assigns: Vec::new(),
             frames: Vec::new(),
             scopes: Vec::new(),
             ctrl: Vec::new(),
             module_direct: true,
         };
         r.resolve_module(root);
+        r.check_pending_assigns(); // now that `globals` is complete
+        // The whole-module assign post-pass appends out of source order; the front
+        // end guarantees source-ordered diagnostics (diag::mod, the renderer never
+        // re-sorts), so restore that here. Stable to stay deterministic.
+        r.diagnostics.sort_by_key(|d| d.span.map_or(0, |s| s.start));
         let Resolver {
             resolutions,
             exit_targets,
@@ -219,7 +239,7 @@ impl<'a> Resolver<'a> {
         });
         let mut param_infos = Vec::new();
         for name in &block.params {
-            let slot = self.declare_local(name);
+            let slot = self.declare_local(name, GlobalKind::Let);
             param_infos.push(ParamInfo {
                 name: name.clone(),
                 slot,
@@ -252,7 +272,7 @@ impl<'a> Resolver<'a> {
         for p in params {
             match p {
                 Param::Ordinary { name, default } => {
-                    let slot = self.declare_local(name);
+                    let slot = self.declare_local(name, GlobalKind::Let);
                     infos.push(ParamInfo {
                         name: name.clone(),
                         slot,
@@ -261,7 +281,7 @@ impl<'a> Resolver<'a> {
                     });
                 }
                 Param::Block { name } => {
-                    let slot = self.declare_local(name);
+                    let slot = self.declare_local(name, GlobalKind::Let);
                     infos.push(ParamInfo {
                         name: name.clone(),
                         slot,
@@ -281,75 +301,11 @@ impl<'a> Resolver<'a> {
         self.pop_scope(saved);
     }
 
-    /// Resolves a `while`/`loop` body: a construct scope plus a [`Ctrl::Loop`]
-    /// context so `break`/`continue` inside it target this `loop_node`.
-    pub(super) fn resolve_loop_body(&mut self, loop_node: NodeId, body: NodeId) {
-        self.ctrl.push(Ctrl::Loop(loop_node));
-        self.resolve_construct_body(body);
-        self.ctrl.pop();
-    }
-
-    /// Annotates a `return` with its lexical target — the nearest enclosing
-    /// callable (machine-design §12) — or reports a misplaced `return`.
-    pub(super) fn resolve_return(&mut self, node: NodeId, operand: Option<NodeId>) {
-        if let Some(e) = operand {
-            self.resolve(e);
-        }
-        if self.ctrl.iter().any(|c| matches!(c, Ctrl::Callable)) {
-            self.set_exit(node, ExitTarget::HomeCallable);
-        } else {
-            self.exit_error(
-                node,
-                "`return` can only appear inside a procedure or function",
-            );
-        }
-    }
-
-    /// Annotates a `break`/`continue` with its target — the nearest enclosing loop
-    /// or block (machine-design §12), not crossing a callable boundary — or reports
-    /// a misplaced exit.
-    pub(super) fn resolve_break_continue(
-        &mut self,
-        node: NodeId,
-        operand: Option<NodeId>,
-        is_break: bool,
-    ) {
-        if let Some(e) = operand {
-            self.resolve(e);
-        }
-        // `if`/`with`/`try` don't push `ctrl`, so the innermost `ctrl` entry IS
-        // the nearest enclosing control context. A callable there is a barrier
-        // (break/continue can't escape it to an outer loop) → misplaced.
-        let target = match self.ctrl.last() {
-            Some(Ctrl::Loop(loop_node)) => Some(ExitTarget::ThisLoop(*loop_node)),
-            Some(Ctrl::Block) if is_break => Some(ExitTarget::ConsumerCall),
-            Some(Ctrl::Block) => Some(ExitTarget::ThisBlock),
-            Some(Ctrl::Callable) | None => None,
-        };
-        match target {
-            Some(t) => self.set_exit(node, t),
-            None => {
-                let kw = if is_break { "break" } else { "continue" };
-                self.exit_error(
-                    node,
-                    &format!("`{kw}` can only appear inside a loop or a block"),
-                );
-            }
-        }
-    }
-
-    fn set_exit(&mut self, node: NodeId, target: ExitTarget) {
-        self.exit_targets[node.0 as usize] = Some(target);
-    }
-
-    fn exit_error(&mut self, node: NodeId, message: &str) {
+    /// Pushes a resolver diagnostic at `node`'s span.
+    pub(super) fn error(&mut self, code: DiagnosticCode, node: NodeId, message: &str) {
         let span = self.ast.span(node);
-        self.diagnostics.push(Diagnostic::error(
-            DiagnosticCode::MisplacedExit,
-            self.module,
-            span,
-            message,
-        ));
+        self.diagnostics
+            .push(Diagnostic::error(code, self.module, span, message));
     }
 
     /// Resolves the statements of a [`Node::Block`] in the current scope.
@@ -378,22 +334,42 @@ impl<'a> Resolver<'a> {
     }
 
     /// Declares a binding: a module `global` when directly at module level, else a
-    /// local slot in the current frame (recording a decl-site resolution).
-    fn declare_binding(&mut self, decl: NodeId, name: &str, kind: GlobalKind) {
+    /// local slot in the current frame (recording a decl-site resolution). A same-
+    /// scope/same-namespace duplicate is reported (L§5.2) but still bound, for
+    /// recovery. (Duplicate *parameters* are not checked here — params have no
+    /// node span; deferred.)
+    pub(super) fn declare_binding(&mut self, decl: NodeId, name: &str, kind: GlobalKind) {
         if self.module_direct {
+            if self.globals.iter().any(|g| &*g.name == name) {
+                self.duplicate_error(decl, name);
+            }
             self.globals.push(GlobalDecl {
                 name: name.into(),
                 kind,
                 decl,
             });
         } else {
-            let slot = self.declare_local(name);
+            if self.scope_has(name) {
+                self.duplicate_error(decl, name);
+            }
+            let slot = self.declare_local(name, kind);
             self.set_res(decl, Resolution::LocalSlot(slot));
         }
     }
 
-    /// Assigns the next slot in the current frame to `name`.
-    fn declare_local(&mut self, name: &str) -> u16 {
+    /// Whether the current (innermost) scope already binds `name`.
+    fn scope_has(&self, name: &str) -> bool {
+        self.scopes
+            .last()
+            .expect("a scope is open")
+            .bindings
+            .iter()
+            .any(|b| &*b.name == name)
+    }
+
+    /// Assigns the next slot in the current frame to `name`, with declaration
+    /// `kind` (which decides assignability — S-6 rule 2a).
+    pub(super) fn declare_local(&mut self, name: &str, kind: GlobalKind) -> u16 {
         let frame = self.frames.last_mut().expect("a frame is open");
         let slot = u16::try_from(frame.next_slot).expect("frame exceeds the u16 slot space");
         frame.next_slot += 1;
@@ -402,7 +378,11 @@ impl<'a> Resolver<'a> {
             .last_mut()
             .expect("a scope is open")
             .bindings
-            .push((name.into(), slot));
+            .push(Binding {
+                name: name.into(),
+                slot,
+                kind,
+            });
         slot
     }
 
@@ -410,7 +390,7 @@ impl<'a> Resolver<'a> {
     /// deferred capture (cross-`fn`), or a free module name.
     fn resolve_ref(&mut self, node: NodeId, name: &str) {
         match self.lookup(name) {
-            Some((frame, slot)) => {
+            Some((frame, slot, _)) => {
                 let cur = self.frames.len() - 1;
                 if frame == cur {
                     self.set_res(node, Resolution::LocalSlot(slot));
@@ -446,12 +426,13 @@ impl<'a> Resolver<'a> {
         i
     }
 
-    /// Looks up `name` in the scope stack (innermost first).
-    fn lookup(&self, name: &str) -> Option<(usize, u16)> {
+    /// Looks up `name` in the scope stack (innermost first), returning its frame,
+    /// slot, and declaration kind.
+    pub(super) fn lookup(&self, name: &str) -> Option<(usize, u16, GlobalKind)> {
         for scope in self.scopes.iter().rev() {
-            for (n, slot) in scope.bindings.iter().rev() {
-                if &**n == name {
-                    return Some((scope.frame, *slot));
+            for b in scope.bindings.iter().rev() {
+                if &*b.name == name {
+                    return Some((scope.frame, b.slot, b.kind));
                 }
             }
         }

@@ -294,3 +294,89 @@ fn break_targets_the_nearest_loop_not_an_outer_one() {
         Some(ExitTarget::ThisLoop(inner))
     );
 }
+
+#[test]
+fn duplicate_declaration_in_a_scope() {
+    assert_eq!(
+        diags(&resolved("let x = 1\nlet x = 2")),
+        vec!["duplicate-declaration"]
+    );
+    // Different scopes = shadowing, not duplicate (the warning is M1.11).
+    assert!(diags(&resolved("let x = 1\nto f()\n  let x = 2\nend")).is_empty());
+    // A `let` colliding with a param in the same fn scope IS a duplicate.
+    assert_eq!(
+        diags(&resolved("to f(x)\n  let x = 2\nend")),
+        vec!["duplicate-declaration"]
+    );
+}
+
+#[test]
+fn assigning_to_a_mutable_let_is_allowed() {
+    assert!(diags(&resolved("let x = 1\nx = 2")).is_empty());
+    // A forward module `let` (declared later) is still a binding (checked post-pass).
+    assert!(diags(&resolved("x = 2\nlet x = 1")).is_empty());
+    // A parameter is a mutable local.
+    assert!(diags(&resolved("to f(x)\n  x = 2\nend")).is_empty());
+    // Field/index assignment mutates a pointee — always allowed, never rule-2a.
+    assert!(diags(&resolved("let a = thing()\na.b = 1\na[0] = 2")).is_empty());
+}
+
+#[test]
+fn assigning_to_a_const_or_declaration_is_rule_2a() {
+    // `const` — module and local.
+    assert_eq!(
+        diags(&resolved("const c = 1\nc = 2")),
+        vec!["const-reassignment"]
+    );
+    assert_eq!(
+        diags(&resolved("to f()\n  const c = 1\n  c = 2\nend")),
+        vec!["const-reassignment"]
+    );
+    // A declaration binding is non-assignable (S-6 rule 2a).
+    assert_eq!(
+        diags(&resolved("to greet() end\ngreet = 2")),
+        vec!["const-reassignment"]
+    );
+    // A dynamic parameter is `with`-rebindable, not `=`-assignable.
+    assert_eq!(
+        diags(&resolved("parameter p = 1\np = 2")),
+        vec!["const-reassignment"]
+    );
+}
+
+#[test]
+fn assigning_to_an_unbound_name_is_undeclared() {
+    // Sound and complete without import resolution: a name that isn't a visible
+    // `let` can only be undeclared or a read-only import — both errors (S-39).
+    assert_eq!(diags(&resolved("x = 5")), vec!["undeclared-assignment"]);
+    assert_eq!(
+        diags(&resolved("to f()\n  y = 5\nend")),
+        vec!["undeclared-assignment"]
+    );
+    // Reading an unknown name is fine (that's an IDE/load concern, AD5) — only
+    // *assignment* to one is a static error.
+    assert!(diags(&resolved("show(unknown)")).is_empty());
+}
+
+#[test]
+fn resolver_diagnostics_are_source_ordered() {
+    // The deferred (module-name) assign check runs in a post-pass, but the front
+    // end guarantees source-ordered diagnostics — so the `y` (line 1) error must
+    // precede the inline `c` (line 4) error.
+    let r = resolved("y = 5\nto f()\n  const c = 1\n  c = 2\nend");
+    assert_eq!(
+        diags(&r),
+        vec!["undeclared-assignment", "const-reassignment"]
+    );
+}
+
+#[test]
+fn forward_reference_to_a_local_let_is_undeclared() {
+    // Locals are visible declaration-point-onward (L§5.1), so assigning a local
+    // `let` BEFORE its declaration is undeclared — unlike a module `let`, which is
+    // whole-scope (mutual recursion). This asymmetry is deliberate.
+    let r = resolved("to f()\n  x = 2\n  let x = 1\nend");
+    assert_eq!(diags(&r), vec!["undeclared-assignment"]);
+    // The module-level equivalent IS allowed (forward module `let`).
+    assert!(diags(&resolved("x = 2\nlet x = 1")).is_empty());
+}

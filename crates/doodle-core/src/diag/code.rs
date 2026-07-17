@@ -59,6 +59,13 @@ pub enum DiagnosticCode {
     /// A `return`/`break`/`continue` outside its valid context — `return` outside
     /// a procedure/function, or `break`/`continue` outside a loop or block (L§7.10).
     MisplacedExit,
+    /// Two bindings of the same name in one scope (L§5.2).
+    DuplicateDeclaration,
+    /// Assigning to a name that is not a mutable (`let`) binding visible here — an
+    /// undeclared name, or one that could only come from an import (imports are
+    /// read-only, S-39) (L§5.3). `const` and declaration targets are the distinct
+    /// [`ConstReassignment`](Self::ConstReassignment) family instead.
+    UndeclaredAssignment,
 }
 
 impl DiagnosticCode {
@@ -81,6 +88,8 @@ impl DiagnosticCode {
             DiagnosticCode::MalformedTripleQuote => "malformed-triple-quote",
             DiagnosticCode::Shadowing => "shadowing",
             DiagnosticCode::MisplacedExit => "misplaced-exit",
+            DiagnosticCode::DuplicateDeclaration => "duplicate-declaration",
+            DiagnosticCode::UndeclaredAssignment => "undeclared-assignment",
         }
     }
 }

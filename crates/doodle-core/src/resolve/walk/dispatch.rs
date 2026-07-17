@@ -95,6 +95,7 @@ impl super::Resolver<'_> {
                 let (target, value) = (*target, *value);
                 self.resolve(value);
                 self.resolve(target);
+                self.check_assign_target(target);
             }
 
             // Control constructs — their bodies are construct scopes (same frame).
@@ -136,7 +137,7 @@ impl super::Resolver<'_> {
                 // The caught value binds `rescue_name` for the handler's scope: a
                 // slot in the enclosing frame, recorded on the `try` node.
                 let saved = self.push_scope();
-                let slot = self.declare_local(&rescue_name);
+                let slot = self.declare_local(&rescue_name, GlobalKind::Let);
                 self.set_res(node, Resolution::LocalSlot(slot));
                 self.resolve_block_stmts(rescue_body);
                 self.pop_scope(saved);
