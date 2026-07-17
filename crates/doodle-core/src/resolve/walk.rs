@@ -19,6 +19,7 @@ mod dispatch;
 mod errors;
 mod exits;
 mod tailcheck;
+mod voidcheck;
 
 /// A lexical control context, for `return`/`break`/`continue` targets +
 /// placement (machine-design §12). A callable is a `return` target and a
@@ -117,6 +118,7 @@ impl<'a> Resolver<'a> {
         r.resolve_module(root);
         r.check_pending_assigns(); // now that `globals` is complete
         r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
+        r.check_void_sites(root); // Void consumed as a value (S-6), globals complete
         // The whole-module assign post-pass appends out of source order; the front
         // end guarantees source-ordered diagnostics (diag::mod, the renderer never
         // re-sorts), so restore that here. Stable to stay deterministic.

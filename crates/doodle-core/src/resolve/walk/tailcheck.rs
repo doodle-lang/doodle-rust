@@ -56,7 +56,9 @@ impl Resolver<'_> {
         }
     }
 
-    fn last_stmt(&self, block: NodeId) -> Option<NodeId> {
+    /// The last statement of a [`Node::Block`], or `None` if it is empty or not a
+    /// block. Shared with the S-6 consuming-site check (`voidcheck`).
+    pub(super) fn last_stmt(&self, block: NodeId) -> Option<NodeId> {
         match self.ast.node(block) {
             Node::Block(stmts) => stmts.last().copied(),
             _ => None,

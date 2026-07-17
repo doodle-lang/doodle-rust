@@ -69,6 +69,12 @@ pub enum DiagnosticCode {
     /// A function (`fn`) whose body can complete without producing a value, where
     /// that is statically determinable (L§8.4, S-5 tail classifier).
     FunctionFallsOffEnd,
+    /// A procedure (`to`) call used where a value is required — Void consumed as a
+    /// value, where that is statically determinable (a same-module `to` callee,
+    /// directly or propagated through an expression-position `if`/`try`). The
+    /// unified L§6.11 diagnostic (S-6 consuming-site check). An unknown callee's
+    /// Void-ness is deferred to the runtime check (M2a).
+    ProcedureInExpression,
 }
 
 impl DiagnosticCode {
@@ -94,6 +100,7 @@ impl DiagnosticCode {
             DiagnosticCode::DuplicateDeclaration => "duplicate-declaration",
             DiagnosticCode::UndeclaredAssignment => "undeclared-assignment",
             DiagnosticCode::FunctionFallsOffEnd => "function-falls-off-end",
+            DiagnosticCode::ProcedureInExpression => "procedure-in-expression",
         }
     }
 }

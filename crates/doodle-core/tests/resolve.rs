@@ -417,10 +417,102 @@ fn fn_does_not_fall_off_when_tail_produces_or_diverges() {
     assert!(diags(&resolved("to p()\n  let x = 1\nend")).is_empty());
     // try: a produces-or-diverges mix is fine (the ruling's example).
     assert!(diags(&resolved("fn f()\n  try h() rescue e raise end\nend")).is_empty());
-    // `return expr` PRODUCES (the fn doesn't fall off) — even `return p()` for a
-    // `to` p: that's an S-6 return-operand error, not falls-off-end. Not flagged
-    // by S-5 (S-6's consuming-site check owns it).
-    assert!(diags(&resolved("to p() end\nfn f()\n  return p()\nend")).is_empty());
+    // `return expr` PRODUCES (the fn doesn't fall off), so S-5 never flags it. But
+    // `return p()` for a `to` p uses Void as the return value — an S-6 consuming-
+    // site error at the operand (`procedure-in-expression`), NOT falls-off-end.
+    assert_eq!(
+        diags(&resolved("to p() end\nfn f()\n  return p()\nend")),
+        vec!["procedure-in-expression"]
+    );
+}
+
+#[test]
+fn procedure_call_where_a_value_is_required_is_a_consuming_site_error() {
+    // A same-module `to` yields Void (S-6); using it as a value is a static error
+    // at each consuming site (`procedure-in-expression`), regardless of the site.
+    let pie = "procedure-in-expression";
+    let p = "to p() end\n"; // a procedure in scope
+    for consume in [
+        "let x = p()",          // a `let` initializer
+        "const x = p()",        // a `const` initializer
+        "let x = 1\nx = p()",   // an assignment RHS
+        "show(p())",            // a call argument
+        "let x = p() + 1",      // an operator operand
+        "let x = p().f",        // a `.field` base
+        "let x = p()[0]",       // an `[i]` base
+        "let s = \"{p()}\"",    // an interpolation
+        "if p() then g() end",  // an `if` condition
+        "while p() do g() end", // a `while` condition
+        "let xs = [p()]",       // a list element
+        "let d = {a: p()}",     // a dict value
+        "p()()",                // the thing being called
+    ] {
+        let src = format!("{p}{consume}");
+        assert_eq!(diags(&resolved(&src)), vec![pie], "for source: {src:?}");
+    }
+    // A parameter default and a module `parameter` default are consuming sites too.
+    assert_eq!(
+        diags(&resolved("to p() end\nto f(x = p())\n  x\nend")),
+        vec![pie]
+    );
+    assert_eq!(diags(&resolved("to p() end\nparameter c = p()")), vec![pie]);
+    // `raise`/`break` operands consume a value (Void is not a value, so this errors
+    // regardless of how S-10 lands).
+    assert_eq!(diags(&resolved("to p() end\nraise p()")), vec![pie]);
+    assert_eq!(
+        diags(&resolved("to p() end\nwhile c do\n  break p()\nend")),
+        vec![pie]
+    );
+    // The producer-site blame names the procedure and points at the call.
+    let r = resolved("to p() end\nlet x = p()");
+    assert!(
+        r.diagnostics[0].message.contains("`p` is a procedure"),
+        "expected the proc named, got: {}",
+        r.diagnostics[0].message
+    );
+}
+
+#[test]
+fn a_procedure_call_as_its_own_statement_is_fine() {
+    // The one non-consuming position (§7.2): a bare expression statement discards
+    // its value, so calling a `to` there is exactly how procedures are used.
+    assert!(diags(&resolved("to p() end\np()")).is_empty());
+    // Forward reference: `p` is declared after the use — the post-pass sees it.
+    assert!(diags(&resolved("p()\nto p() end")).is_empty());
+}
+
+#[test]
+fn void_propagates_through_expression_position_if_and_try() {
+    // Void flows out of a value-producing `if`/`try` from the branch that produces
+    // it, to the outer consumer (blaming the branch's call).
+    let pie = vec!["procedure-in-expression"];
+    let p = "to p() end\n";
+    assert_eq!(
+        diags(&resolved(&format!("{p}let x = if c then p() else 2 end"))),
+        pie
+    );
+    assert_eq!(
+        diags(&resolved(&format!("{p}let x = if c then 1 else p() end"))),
+        pie
+    );
+    assert_eq!(
+        diags(&resolved(&format!("{p}let x = try p() rescue e 2 end"))),
+        pie
+    );
+}
+
+#[test]
+fn void_not_statically_determinable_is_deferred_to_runtime() {
+    // Only a same-module `to` callee is static (S-6). These all defer to the M2a
+    // runtime check, so the resolver stays silent.
+    assert!(diags(&resolved("let x = unknown()")).is_empty()); // an unknown callee
+    assert!(diags(&resolved("fn g() 1 end\nlet x = g()")).is_empty()); // an `fn` produces
+    assert!(diags(&resolved("to f(g)\n  let x = g()\n  x\nend")).is_empty()); // a local callee
+    // A missing `else` in value position is the separate `if`-expr-requires-`else`
+    // piece (a later chunk) — not reported here, and not misreported as a proc.
+    assert!(diags(&resolved("let x = if c then 1 end")).is_empty());
+    // A field/index *mutation* target is not a consuming read of a value.
+    assert!(diags(&resolved("to p() end\nlet a = thing()\na.b = 1")).is_empty());
 }
 
 #[test]
