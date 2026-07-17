@@ -18,8 +18,14 @@ impl super::Resolver<'_> {
             | Node::NilLit
             | Node::BytesLit(_)
             | Node::Error
-            | Node::Exports(_)
-            | Node::Import(_) => {}
+            | Node::Exports(_) => {}
+
+            // Record selective imports so an assignment to an imported name gets a
+            // specific "imported from …" message (imports are read-only, S-39).
+            Node::Import(targets) => {
+                let targets = targets.clone();
+                self.record_selective_imports(&targets);
+            }
 
             Node::Ident(name) => {
                 let name = name.clone();

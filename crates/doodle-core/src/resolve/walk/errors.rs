@@ -13,11 +13,32 @@
 //! message (naming the source module is deferred to M5).
 
 use super::Resolver;
-use crate::ast::{Node, NodeId};
+use crate::ast::{ImportTarget, Node, NodeId};
 use crate::diag::code::DiagnosticCode;
 use crate::resolve::GlobalKind;
 
 impl Resolver<'_> {
+    /// Records each selective (non-wildcard) import as `bound-name → source
+    /// display`, for the assignment check's "imported from …" message. The bound
+    /// name is the alias, else the last path segment.
+    pub(super) fn record_selective_imports(&mut self, targets: &[ImportTarget]) {
+        for t in targets {
+            if t.wildcard {
+                continue; // a wildcard's names aren't known until load (M5)
+            }
+            let Some(last) = t.path.last() else { continue };
+            let name = t.alias.clone().unwrap_or_else(|| last.clone());
+            let source: Box<str> = t
+                .path
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<&str>>()
+                .join(".")
+                .into();
+            self.selective_imports.push((name, source));
+        }
+    }
+
     /// Checks a resolved assignment target (L§5.3). A bare-name target must be a
     /// `let`; a `const`/declaration target is rule-2a. A module-name target is
     /// deferred to [`check_pending_assigns`](Self::check_pending_assigns), since
@@ -76,10 +97,24 @@ impl Resolver<'_> {
         );
     }
 
-    /// An assignment target that is not a visible binding: undeclared, or a name
-    /// that could only come from a read-only import (L§5.3). One honest message
-    /// covers both (naming a wildcard source is M5 provenance polish).
+    /// An assignment target that is not a visible binding (L§5.3). A *selective*
+    /// import gets a specific "imported from …" message (its source is lexically
+    /// known); an undeclared or wildcard-supplied name gets the dual-intent
+    /// message (typo of a `let`, or a read-only import — naming a wildcard source
+    /// is M5 provenance polish).
     fn undeclared_assign_error(&mut self, node: NodeId, name: &str) {
+        if let Some((_, source)) = self.selective_imports.iter().find(|(n, _)| &**n == name) {
+            let source = source.clone();
+            self.error(
+                DiagnosticCode::UndeclaredAssignment,
+                node,
+                &format!(
+                    "`{name}` is imported from `{source}` — imported names can't be \
+                     assigned (imports are read-only)"
+                ),
+            );
+            return;
+        }
         self.error(
             DiagnosticCode::UndeclaredAssignment,
             node,

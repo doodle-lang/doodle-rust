@@ -74,6 +74,11 @@ pub(super) struct Resolver<'a> {
     /// assignability is checked in a post-pass, once `globals` is complete (a
     /// module-level `let` may be declared after the assignment).
     pending_assigns: Vec<(NodeId, Box<str>)>,
+    /// Selective (non-wildcard) imports as `bound-name → source display`, so an
+    /// assignment to an imported name gets a specific "imported from …" message
+    /// (imports are read-only, S-39). Wildcard sources aren't nameable until load
+    /// (M5), so a wildcard-supplied name falls to the generic undeclared message.
+    selective_imports: Vec<(Box<str>, Box<str>)>,
     frames: Vec<Frame>,
     scopes: Vec<Scope>,
     ctrl: Vec<Ctrl>,
@@ -97,6 +102,7 @@ impl<'a> Resolver<'a> {
             diagnostics: Vec::new(),
             deferred_captures: Vec::new(),
             pending_assigns: Vec::new(),
+            selective_imports: Vec::new(),
             frames: Vec::new(),
             scopes: Vec::new(),
             ctrl: Vec::new(),

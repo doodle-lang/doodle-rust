@@ -359,6 +359,24 @@ fn assigning_to_an_unbound_name_is_undeclared() {
 }
 
 #[test]
+fn assigning_to_a_selective_import_names_the_source() {
+    // A selective (non-wildcard) import is lexically visible, so assigning to it
+    // gets a specific "imported from …" message (imports are read-only, S-39).
+    let r = resolved("import turtle.pen_color\npen_color = red");
+    assert_eq!(diags(&r), vec!["undeclared-assignment"]);
+    let msg = &r.diagnostics[0].message;
+    assert!(
+        msg.contains("pen_color") && msg.contains("imported from") && msg.contains("turtle"),
+        "expected an 'imported from' message, got: {msg}"
+    );
+    // A wildcard-supplied name isn't nameable until load (M5), so it falls to the
+    // generic message — but the verdict is still an error.
+    let r2 = resolved("import turtle.*\npen_color = red");
+    assert_eq!(diags(&r2), vec!["undeclared-assignment"]);
+    assert!(r2.diagnostics[0].message.contains("no `let` named"));
+}
+
+#[test]
 fn resolver_diagnostics_are_source_ordered() {
     // The deferred (module-name) assign check runs in a post-pass, but the front
     // end guarantees source-ordered diagnostics — so the `y` (line 1) error must
