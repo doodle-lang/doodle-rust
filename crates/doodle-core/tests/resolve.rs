@@ -7,7 +7,7 @@
 
 use doodle_core::ast::{Node, NodeId};
 use doodle_core::parse::parse_program;
-use doodle_core::resolve::{Resolution, Resolved, resolve};
+use doodle_core::resolve::{ExitTarget, Resolution, Resolved, resolve};
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
 
@@ -63,6 +63,34 @@ fn name_refs(r: &Resolved) -> Vec<String> {
         .iter()
         .map(|n| n.name.to_string())
         .collect()
+}
+
+/// Each `return`/`break`/`continue` as `kw:target`, in node order (`?` = no
+/// target = a misplaced exit with a diagnostic).
+fn exits(r: &Resolved) -> Vec<String> {
+    let m = &r.module;
+    (0..m.ast.len())
+        .filter_map(|i| {
+            let kw = match m.ast.node(NodeId(i as u32)) {
+                Node::Return(_) => "return",
+                Node::Break(_) => "break",
+                Node::Continue(_) => "continue",
+                _ => return None,
+            };
+            let t = match m.exit_targets[i] {
+                None => "?",
+                Some(ExitTarget::HomeCallable) => "home",
+                Some(ExitTarget::ThisLoop(_)) => "loop",
+                Some(ExitTarget::ThisBlock) => "block",
+                Some(ExitTarget::ConsumerCall) => "consumer",
+            };
+            Some(format!("{kw}:{t}"))
+        })
+        .collect()
+}
+
+fn diags(r: &Resolved) -> Vec<&'static str> {
+    r.diagnostics.iter().map(|d| d.code.slug()).collect()
 }
 
 #[test]
@@ -190,4 +218,79 @@ fn resolving_an_empty_module_is_clean() {
         r.module.callables[0].kind,
         doodle_core::resolve::BodyKind::ModuleTopLevel
     ));
+}
+
+#[test]
+fn return_targets_the_home_callable_and_punches_through_blocks() {
+    // `return` in a fn body targets the callable; inside a block it punches
+    // through to the same home callable (MD §12).
+    let r = resolved("to f()\n  return\nend");
+    assert_eq!(exits(&r), vec!["return:home"]);
+    assert!(diags(&r).is_empty());
+    let r = resolved("fn f()\n  each(xs) do (y)\n    return y\n  end\nend");
+    assert_eq!(exits(&r), vec!["return:home"]);
+    assert!(diags(&r).is_empty());
+}
+
+#[test]
+fn return_outside_a_callable_is_misplaced() {
+    let r = resolved("return");
+    assert_eq!(exits(&r), vec!["return:?"]);
+    assert_eq!(diags(&r), vec!["misplaced-exit"]);
+    // A loop at module level is not a callable — `return` there is still misplaced.
+    let r = resolved("while c do return end");
+    assert_eq!(diags(&r), vec!["misplaced-exit"]);
+}
+
+#[test]
+fn break_and_continue_target_the_enclosing_loop() {
+    let r = resolved("while c do\n  continue\n  break\nend");
+    assert_eq!(exits(&r), vec!["continue:loop", "break:loop"]);
+    assert!(diags(&r).is_empty());
+}
+
+#[test]
+fn break_and_continue_in_a_block_target_the_block() {
+    // In a block, `break` exits the block-consuming call, `continue` ends the
+    // block invocation (MD §12).
+    let r = resolved("each(xs) do (y)\n  continue\n  break\nend");
+    assert_eq!(exits(&r), vec!["continue:block", "break:consumer"]);
+    assert!(diags(&r).is_empty());
+}
+
+#[test]
+fn break_outside_a_loop_or_block_is_misplaced() {
+    let r = resolved("break");
+    assert_eq!(diags(&r), vec!["misplaced-exit"]);
+    // A `break` inside a fn cannot escape to an outer loop (the fn is a barrier).
+    let r = resolved("while c do\n  to f()\n    break\n  end\nend");
+    assert_eq!(exits(&r), vec!["break:?"]);
+    assert_eq!(diags(&r), vec!["misplaced-exit"]);
+}
+
+#[test]
+fn break_targets_the_nearest_loop_not_an_outer_one() {
+    // `while a do while b do break end end`: the break targets the INNER loop.
+    let r = resolved("while a do\n  while b do\n    break\n  end\nend");
+    let m = &r.module;
+    // The two `while` nodes; the inner one's span is contained in the outer's.
+    let whiles: Vec<NodeId> = (0..m.ast.len())
+        .map(|i| NodeId(i as u32))
+        .filter(|&id| matches!(m.ast.node(id), Node::While { .. }))
+        .collect();
+    assert_eq!(whiles.len(), 2);
+    let (a, b) = (m.ast.span(whiles[0]), m.ast.span(whiles[1]));
+    let inner = if a.start <= b.start && b.end <= a.end {
+        whiles[1]
+    } else {
+        whiles[0]
+    };
+    let break_id = (0..m.ast.len())
+        .map(|i| NodeId(i as u32))
+        .find(|&id| matches!(m.ast.node(id), Node::Break(_)))
+        .expect("a break");
+    assert_eq!(
+        m.exit_targets[break_id.0 as usize],
+        Some(ExitTarget::ThisLoop(inner))
+    );
 }

@@ -64,6 +64,30 @@ pub struct ResolvedModule {
     /// *reference* (`Ident`) and each local *declaration* (`Let`/`Const`/`Param`,
     /// whose binding slot lives on the decl node, not an `Ident` child).
     pub resolutions: Vec<Option<Resolution>>,
+    /// Per-AST-node exit target, indexed by [`NodeId`]: `Some` at each
+    /// `return`/`break`/`continue` node with a valid lexical target (machine-design
+    /// §12). `raise` is never annotated (its handler search is dynamic); a
+    /// misplaced exit is `None` and has a diagnostic instead.
+    pub exit_targets: Vec<Option<ExitTarget>>,
+}
+
+/// The lexical target of a non-local exit (machine-design §12): the resolver
+/// annotates `return`/`break`/`continue` so the machine performs no dynamic
+/// "nearest-X" scan. `raise` is not annotated (its handler search is genuinely
+/// dynamic).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExitTarget {
+    /// `break`/`continue` to the nearest enclosing loop, named by the
+    /// `while`/`loop` node (the machine pops to the matching reloop cont).
+    ThisLoop(NodeId),
+    /// `continue` in a block body: end this block invocation (the block-return
+    /// path to the block's consumer).
+    ThisBlock,
+    /// `break` in a block body: exit the block-consuming call.
+    ConsumerCall,
+    /// `return`: exit the enclosing callable, chasing the defining chain through
+    /// any intervening blocks/constructs to the home `to`/`fn`.
+    HomeCallable,
 }
 
 /// How a name reference or local declaration resolves (machine-design §6/§7).

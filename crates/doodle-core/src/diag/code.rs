@@ -56,6 +56,9 @@ pub enum DiagnosticCode {
     MalformedTripleQuote,
     /// A binding that hides an outer one of the same name (L§5.1; a warning).
     Shadowing,
+    /// A `return`/`break`/`continue` outside its valid context — `return` outside
+    /// a procedure/function, or `break`/`continue` outside a loop or block (L§7.10).
+    MisplacedExit,
 }
 
 impl DiagnosticCode {
@@ -77,6 +80,7 @@ impl DiagnosticCode {
             DiagnosticCode::MarginMismatch => "margin-mismatch",
             DiagnosticCode::MalformedTripleQuote => "malformed-triple-quote",
             DiagnosticCode::Shadowing => "shadowing",
+            DiagnosticCode::MisplacedExit => "misplaced-exit",
         }
     }
 }

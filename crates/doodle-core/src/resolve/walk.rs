@@ -7,14 +7,25 @@
 //! every body opens one). A construct-body scope shares the enclosing frame.
 
 use super::{
-    BodyKind, CallableInfo, GlobalDecl, GlobalKind, NameRef, ParamInfo, Resolution, Resolved,
-    ResolvedModule,
+    BodyKind, CallableInfo, ExitTarget, GlobalDecl, GlobalKind, NameRef, ParamInfo, Resolution,
+    Resolved, ResolvedModule,
 };
 use crate::ast::{Ast, Node, NodeId, Param};
 use crate::diag::Diagnostic;
+use crate::diag::code::DiagnosticCode;
 use crate::span::{ModuleId, Span};
 
 mod dispatch;
+
+/// A lexical control context, for `return`/`break`/`continue` targets +
+/// placement (machine-design §12). A callable is a `return` target and a
+/// `break`/`continue` barrier; a loop/block is a `break`/`continue` target.
+/// (`if`/`with`/`try` are transparent to exits, so they push nothing.)
+enum Ctrl {
+    Callable,
+    Loop(NodeId),
+    Block,
+}
 
 /// An open frame: a callable or block body's slot storage.
 struct Frame {
@@ -40,7 +51,9 @@ struct Scope {
 
 pub(super) struct Resolver<'a> {
     ast: &'a Ast,
+    module: ModuleId,
     resolutions: Vec<Option<Resolution>>,
+    exit_targets: Vec<Option<ExitTarget>>,
     callables: Vec<CallableInfo>,
     globals: Vec<GlobalDecl>,
     name_refs: Vec<NameRef>,
@@ -49,6 +62,7 @@ pub(super) struct Resolver<'a> {
     deferred_captures: Vec<NodeId>,
     frames: Vec<Frame>,
     scopes: Vec<Scope>,
+    ctrl: Vec<Ctrl>,
     /// Whether the cursor is directly at module top level (a binding here is a
     /// module `global`, not a frame slot). False inside any nested body.
     module_direct: bool,
@@ -59,7 +73,9 @@ impl<'a> Resolver<'a> {
         let node_count = ast.len();
         let mut r = Resolver {
             ast: &ast,
+            module,
             resolutions: vec![None; node_count],
+            exit_targets: vec![None; node_count],
             callables: Vec::new(),
             globals: Vec::new(),
             name_refs: Vec::new(),
@@ -68,11 +84,13 @@ impl<'a> Resolver<'a> {
             deferred_captures: Vec::new(),
             frames: Vec::new(),
             scopes: Vec::new(),
+            ctrl: Vec::new(),
             module_direct: true,
         };
         r.resolve_module(root);
         let Resolver {
             resolutions,
+            exit_targets,
             callables,
             globals,
             name_refs,
@@ -91,6 +109,7 @@ impl<'a> Resolver<'a> {
                 globals,
                 name_refs,
                 resolutions,
+                exit_targets,
             },
             diagnostics,
             deferred_captures,
@@ -167,8 +186,10 @@ impl<'a> Resolver<'a> {
             frame: self.frames.len() - 1,
             bindings: Vec::new(),
         });
+        self.ctrl.push(Ctrl::Callable); // a `return` target; a break/continue barrier
         let param_infos = self.bind_params(params);
         self.resolve_block_stmts(body);
+        self.ctrl.pop();
         let frame = self.frames.pop().expect("callable frame");
         self.scopes.pop();
         self.module_direct = saved;
@@ -206,7 +227,9 @@ impl<'a> Resolver<'a> {
                 has_default: false,
             });
         }
+        self.ctrl.push(Ctrl::Block); // a break (ConsumerCall) / continue (ThisBlock) target
         self.resolve_block_stmts(block.body);
+        self.ctrl.pop();
         let frame = self.frames.pop().expect("block frame");
         self.scopes.pop();
         self.module_direct = saved;
@@ -256,6 +279,77 @@ impl<'a> Resolver<'a> {
         let saved = self.push_scope();
         self.resolve_block_stmts(body);
         self.pop_scope(saved);
+    }
+
+    /// Resolves a `while`/`loop` body: a construct scope plus a [`Ctrl::Loop`]
+    /// context so `break`/`continue` inside it target this `loop_node`.
+    pub(super) fn resolve_loop_body(&mut self, loop_node: NodeId, body: NodeId) {
+        self.ctrl.push(Ctrl::Loop(loop_node));
+        self.resolve_construct_body(body);
+        self.ctrl.pop();
+    }
+
+    /// Annotates a `return` with its lexical target — the nearest enclosing
+    /// callable (machine-design §12) — or reports a misplaced `return`.
+    pub(super) fn resolve_return(&mut self, node: NodeId, operand: Option<NodeId>) {
+        if let Some(e) = operand {
+            self.resolve(e);
+        }
+        if self.ctrl.iter().any(|c| matches!(c, Ctrl::Callable)) {
+            self.set_exit(node, ExitTarget::HomeCallable);
+        } else {
+            self.exit_error(
+                node,
+                "`return` can only appear inside a procedure or function",
+            );
+        }
+    }
+
+    /// Annotates a `break`/`continue` with its target — the nearest enclosing loop
+    /// or block (machine-design §12), not crossing a callable boundary — or reports
+    /// a misplaced exit.
+    pub(super) fn resolve_break_continue(
+        &mut self,
+        node: NodeId,
+        operand: Option<NodeId>,
+        is_break: bool,
+    ) {
+        if let Some(e) = operand {
+            self.resolve(e);
+        }
+        // `if`/`with`/`try` don't push `ctrl`, so the innermost `ctrl` entry IS
+        // the nearest enclosing control context. A callable there is a barrier
+        // (break/continue can't escape it to an outer loop) → misplaced.
+        let target = match self.ctrl.last() {
+            Some(Ctrl::Loop(loop_node)) => Some(ExitTarget::ThisLoop(*loop_node)),
+            Some(Ctrl::Block) if is_break => Some(ExitTarget::ConsumerCall),
+            Some(Ctrl::Block) => Some(ExitTarget::ThisBlock),
+            Some(Ctrl::Callable) | None => None,
+        };
+        match target {
+            Some(t) => self.set_exit(node, t),
+            None => {
+                let kw = if is_break { "break" } else { "continue" };
+                self.exit_error(
+                    node,
+                    &format!("`{kw}` can only appear inside a loop or a block"),
+                );
+            }
+        }
+    }
+
+    fn set_exit(&mut self, node: NodeId, target: ExitTarget) {
+        self.exit_targets[node.0 as usize] = Some(target);
+    }
+
+    fn exit_error(&mut self, node: NodeId, message: &str) {
+        let span = self.ast.span(node);
+        self.diagnostics.push(Diagnostic::error(
+            DiagnosticCode::MisplacedExit,
+            self.module,
+            span,
+            message,
+        ));
     }
 
     /// Resolves the statements of a [`Node::Block`] in the current scope.

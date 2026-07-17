@@ -112,11 +112,11 @@ impl super::Resolver<'_> {
             Node::While { cond, body } => {
                 let (cond, body) = (*cond, *body);
                 self.resolve(cond);
-                self.resolve_construct_body(body);
+                self.resolve_loop_body(node, body);
             }
             Node::Loop { body } => {
                 let body = *body;
-                self.resolve_construct_body(body);
+                self.resolve_loop_body(node, body);
             }
             Node::With { name, value, body } => {
                 let (name, value, body) = (name.clone(), *value, *body);
@@ -142,8 +142,21 @@ impl super::Resolver<'_> {
                 self.pop_scope(saved);
             }
 
-            // Exits: resolve the optional operand.
-            Node::Return(op) | Node::Break(op) | Node::Continue(op) | Node::Raise(op) => {
+            // Exits: annotate the lexical target (MD §12), resolving any operand.
+            // `raise`'s handler search is dynamic, so it is not annotated.
+            Node::Return(op) => {
+                let op = *op;
+                self.resolve_return(node, op);
+            }
+            Node::Break(op) => {
+                let op = *op;
+                self.resolve_break_continue(node, op, true);
+            }
+            Node::Continue(op) => {
+                let op = *op;
+                self.resolve_break_continue(node, op, false);
+            }
+            Node::Raise(op) => {
                 if let Some(e) = *op {
                     self.resolve(e);
                 }
