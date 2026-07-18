@@ -12,16 +12,16 @@ use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::source::{LineIndex, Position, normalize};
 use doodle_core::stage::Stage;
-use doodle_core::{lex_to_diagnostics, parse_to_diagnostics};
+use doodle_core::{full_to_diagnostics, lex_to_diagnostics, parse_to_diagnostics};
 
 /// Executes `test` (whose required stage doodle-core implements) against
 /// `source`, returning `Ok(())` on a full match or `Err(reasons)` listing every
 /// mismatch found.
 pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
     match test.required {
-        Stage::Lex | Stage::Parse => run_static(test, source, test.required),
+        Stage::Lex | Stage::Parse | Stage::Full => run_static(test, source, test.required),
         // The caller dispatches here only when implemented_through() >= required,
-        // and Stage::Parse is the highest implemented stage, so no higher stage
+        // and Stage::Full is the highest implemented stage, so no higher stage
         // reaches this arm. It exists so a future bump that forgets its executor
         // fails loudly instead of silently passing.
         other => Err(vec![format!(
@@ -40,9 +40,10 @@ fn stage_label(stage: Stage) -> &'static str {
     }
 }
 
-/// Runs `source` to the given static `stage` (lexing, or lexing+parsing) and
-/// matches the resulting diagnostics against the test's static-error / warning
-/// expectations (conformance/README.md § `mode: static`).
+/// Runs `source` to the given static `stage` (lexing; lexing+parsing; or
+/// lexing+parsing+resolving) and matches the resulting diagnostics against the
+/// test's static-error / warning expectations (conformance/README.md §
+/// `mode: static`).
 fn run_static(test: &Test, source: &str, stage: Stage) -> Result<(), Vec<String>> {
     let mut reasons = Vec::new();
     let label = stage_label(stage);
@@ -68,6 +69,7 @@ fn run_static(test: &Test, source: &str, stage: Stage) -> Result<(), Vec<String>
     let nfc = normalize(source);
     let index = LineIndex::new(nfc.as_ref());
     let diagnostics = match stage {
+        Stage::Full => full_to_diagnostics(nfc.as_ref()),
         Stage::Parse => parse_to_diagnostics(nfc.as_ref()),
         _ => lex_to_diagnostics(nfc.as_ref()),
     };
@@ -271,5 +273,28 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("not valid at `stage: parse`"))
         );
+    }
+
+    fn full_test(expectations: Vec<Expectation>) -> Test {
+        Test {
+            id: "L5.3-const-001".to_string(),
+            clauses: vec!["L5.3".to_string()],
+            mode: Mode::Static,
+            required: Stage::Full,
+            expectations,
+        }
+    }
+
+    #[test]
+    fn full_stage_matches_a_resolver_error() {
+        // Reassigning a `const` is a resolver-stage static error that lex+parse
+        // alone never surface — so this exercises the resolver (full) arm.
+        let t = full_test(vec![expect_error("can't assign to", 2, 1)]);
+        assert!(execute(&t, "const c = 1\nc = 2\n").is_ok());
+    }
+
+    #[test]
+    fn full_stage_clean_source_passes() {
+        assert!(execute(&full_test(vec![]), "fn f()\n  1\nend\n").is_ok());
     }
 }

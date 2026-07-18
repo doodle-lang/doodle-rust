@@ -1,0 +1,5 @@
+#! clause: L5.3
+#! mode: static
+#! stage: full
+#! expect-static-error: no `let` named @ 5:1
+x = 5

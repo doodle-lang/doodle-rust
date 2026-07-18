@@ -1,0 +1,6 @@
+#! clause: L5.3
+#! mode: static
+#! stage: full
+#! expect-static-error: it is a constant (`const`) @ 6:1
+const c = 1
+c = 2

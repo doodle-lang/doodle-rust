@@ -1,0 +1,6 @@
+#! clause: L6.8
+#! mode: static
+#! stage: full
+#! expect-static-error: needs an `else` @ 6:9
+let c = true
+let x = if c then 1 end

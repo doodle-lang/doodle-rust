@@ -1,0 +1,8 @@
+#! clause: L6.8
+#! mode: static
+#! stage: full
+#! expect-static-error: this branch produces no value @ 7:3
+let c = true
+let x = if c then 1 else
+  let y = 2
+end

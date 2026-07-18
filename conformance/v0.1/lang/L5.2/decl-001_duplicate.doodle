@@ -1,0 +1,6 @@
+#! clause: L5.2
+#! mode: static
+#! stage: full
+#! expect-static-error: is already declared in this scope @ 6:1
+let x = 1
+let x = 2

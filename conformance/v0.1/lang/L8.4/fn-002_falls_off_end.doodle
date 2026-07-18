@@ -1,0 +1,7 @@
+#! clause: L8.4
+#! mode: static
+#! stage: full
+#! expect-static-error: finish without producing a value @ 6:3
+fn total(xs)
+  let sum = 0
+end

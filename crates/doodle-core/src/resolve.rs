@@ -18,7 +18,7 @@
 mod walk;
 
 use crate::ast::{Ast, NodeId};
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, Severity};
 use crate::span::{ModuleId, Span};
 
 /// The result of resolving a module: the resolved module and any diagnostics.
@@ -268,4 +268,28 @@ pub struct NameRef {
 #[must_use]
 pub fn resolve(ast: Ast, root: NodeId, module: ModuleId) -> Resolved {
     walk::Resolver::run(ast, root, module)
+}
+
+/// Lexes, parses, and resolves `source` (load-normalized, see
+/// [`crate::source::normalize`]), returning all static diagnostics — the
+/// conformance runner's `stage: full` entry, mirroring
+/// [`crate::parse_to_diagnostics`].
+///
+/// A syntax **error** leaves the AST partial, so resolution (which would cascade
+/// spurious errors over a broken tree) is skipped and the syntactic diagnostics
+/// are returned; an error-free parse is resolved and the resolver's diagnostics
+/// returned. Either way the result is source-ordered. (The gate keys on
+/// `Severity::Error`, not on any diagnostic: a lex/parse *warning* — none exist
+/// today — would not suppress resolution; when one lands, merge it here.)
+#[must_use]
+pub fn full_to_diagnostics(source: &str) -> Vec<Diagnostic> {
+    let parsed = crate::parse::parse_program(source, ModuleId(0));
+    if parsed
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
+        return parsed.diagnostics;
+    }
+    resolve(parsed.ast, parsed.root, ModuleId(0)).diagnostics
 }

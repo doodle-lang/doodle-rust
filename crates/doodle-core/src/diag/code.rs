@@ -24,7 +24,8 @@ pub enum DiagnosticCode {
     ChainedComparison,
     /// A general syntax error — an unexpected or missing token (L§6, M1.6).
     SyntaxError,
-    /// Reassigning a `const` binding (L§5.2).
+    /// Assigning to a non-mutable binding — a `const` or a declaration (`to`/`fn`/
+    /// `record`/`protocol`/`parameter`/`module`, S-6 rule 2a) (L§5.3).
     ConstReassignment,
     /// A string literal that reaches end of input unclosed (L§3).
     UnterminatedString,

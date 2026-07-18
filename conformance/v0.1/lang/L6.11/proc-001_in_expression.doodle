@@ -1,0 +1,6 @@
+#! clause: L6.11
+#! mode: static
+#! stage: full
+#! expect-static-error: is a procedure (a `to`) and produces none @ 6:9
+to setup() end
+let x = setup()

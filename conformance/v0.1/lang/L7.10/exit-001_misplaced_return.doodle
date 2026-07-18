@@ -1,0 +1,5 @@
+#! clause: L7.10
+#! mode: static
+#! stage: full
+#! expect-static-error: `return` can only appear inside a procedure or function @ 5:1
+return
