@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[misplaced-exit]: `continue` can only appear inside a loop or a block
+  --> 23-continue-outside-block.doodle:1:1
+1 | continue
+  | ^^^^^^^^

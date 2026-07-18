@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[duplicate-declaration]: `a` is already declared in this scope
+  --> 26-duplicate-declaration.doodle:2:1
+2 | let a = 2
+  | ^^^^^^^^^

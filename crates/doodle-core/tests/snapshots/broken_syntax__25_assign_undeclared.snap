@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[undeclared-assignment]: no `let` named `total` is visible here — write `let total = …` to create it; an imported name can't be assigned (imports are read-only), and a dynamic parameter is set with `with`
+  --> 25-assign-undeclared.doodle:1:1
+1 | total = 5
+  | ^^^^^

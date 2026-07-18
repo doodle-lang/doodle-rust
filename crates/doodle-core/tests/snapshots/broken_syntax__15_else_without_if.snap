@@ -1,0 +1,13 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected an expression
+  --> 15-else-without-if.doodle:2:3
+2 |   else
+  |   ^^^^
+
+error[syntax-error]: expected an expression
+  --> 15-else-without-if.doodle:5:1
+5 | end
+  | ^^^

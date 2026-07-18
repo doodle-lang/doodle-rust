@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[misplaced-exit]: `return` can only appear inside a procedure or function
+  --> 21-return-outside-callable.doodle:1:1
+1 | return 5
+  | ^^^^^^^^

@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[non-ascii-bytes]: a bytes literal must be ASCII — use `\xHH` for a byte
+  --> 40-non-ascii-bytes.doodle:1:14
+1 | let b = b"café"
+  |              ^

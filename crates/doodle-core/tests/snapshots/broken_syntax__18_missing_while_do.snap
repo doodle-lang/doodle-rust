@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected `do` to open the `while` body
+  --> 18-missing-while-do.doodle:1:8
+1 | while x
+  |        ^

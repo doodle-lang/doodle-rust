@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[non-producing-branch]: a `let` needs a value, but this branch produces no value — a branch used as a value must end in an expression that produces one
+  --> 29-non-producing-branch.doodle:1:18
+1 | let x = if a then
+  |                  ^

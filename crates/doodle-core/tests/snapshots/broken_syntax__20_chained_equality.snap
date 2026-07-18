@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[chained-comparison]: comparisons don't chain — write `a < b and b < c`
+  --> 20-chained-equality.doodle:1:11
+1 | if a == b == c then
+  |           ^^

@@ -1,0 +1,3 @@
+fn double(n)
+  let result = n * 2
+end

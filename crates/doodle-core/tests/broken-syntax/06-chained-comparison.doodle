@@ -1,0 +1,4 @@
+to main()
+  if a < b < c then
+  end
+end

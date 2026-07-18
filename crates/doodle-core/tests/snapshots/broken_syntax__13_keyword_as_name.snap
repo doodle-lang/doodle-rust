@@ -1,0 +1,33 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected a name after `let`
+  --> 13-keyword-as-name.doodle:1:5
+1 | let end = 3
+  |     ^^^
+
+error[syntax-error]: expected `=` in this `let`
+  --> 13-keyword-as-name.doodle:1:5
+1 | let end = 3
+  |     ^^^
+
+error[syntax-error]: expected an expression
+  --> 13-keyword-as-name.doodle:1:5
+1 | let end = 3
+  |     ^^^
+
+error[syntax-error]: expected a statement separator
+  --> 13-keyword-as-name.doodle:1:9
+1 | let end = 3
+  |         ^
+
+error[syntax-error]: expected an expression
+  --> 13-keyword-as-name.doodle:1:9
+1 | let end = 3
+  |         ^
+
+error[syntax-error]: expected a statement separator
+  --> 13-keyword-as-name.doodle:1:11
+1 | let end = 3
+  |           ^

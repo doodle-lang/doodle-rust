@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: positional arguments must come before keyword arguments
+  --> 34-positional-after-keyword.doodle:1:17
+1 | move(steps: 10, 5)
+  |                 ^

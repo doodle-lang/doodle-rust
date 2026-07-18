@@ -1,0 +1,5 @@
+to main()
+  if x
+    show(x)
+  end
+end

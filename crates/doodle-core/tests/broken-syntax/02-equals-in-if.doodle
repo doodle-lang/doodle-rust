@@ -1,0 +1,5 @@
+to main()
+  if x = 3 then
+    show(x)
+  end
+end

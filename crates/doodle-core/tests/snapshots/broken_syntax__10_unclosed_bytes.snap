@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[unterminated-string]: this bytes literal is never closed
+  --> 10-unclosed-bytes.doodle:1:12
+1 | let data = b"AB
+  |            ^^^^

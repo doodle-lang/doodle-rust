@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[malformed-number]: underscores in a number must sit between digits
+  --> 14-double-underscore-number.doodle:1:11
+1 | let big = 1__000
+  |           ^^^^^^

@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+warning[shadowing]: this `count` hides an outer `count` declared earlier — that's allowed, but check you meant to
+  --> 31-shadowing-warning.doodle:3:1
+3 | to tally(count)
+  | ^^^^^^^^^^^^^^^

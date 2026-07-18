@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[procedure-in-expression]: a `let` needs a value, but `greet` is a procedure (a `to`) and produces none — call it as its own statement, or make `greet` an `fn`
+  --> 27-procedure-in-expression.doodle:5:9
+5 | let x = greet()
+  |         ^^^^^^^

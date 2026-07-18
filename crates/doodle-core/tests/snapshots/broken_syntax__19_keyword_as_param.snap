@@ -1,0 +1,48 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected a parameter name
+  --> 19-keyword-as-param.doodle:1:6
+1 | to f(fn)
+  |      ^^
+
+error[syntax-error]: expected `)` to close the parameter list
+  --> 19-keyword-as-param.doodle:1:6
+1 | to f(fn)
+  |      ^^
+
+error[syntax-error]: expected `(` to begin the parameter list
+  --> 19-keyword-as-param.doodle:1:8
+1 | to f(fn)
+  |        ^
+
+error[syntax-error]: expected an expression
+  --> 19-keyword-as-param.doodle:1:8
+1 | to f(fn)
+  |        ^
+
+error[syntax-error]: expected `(` to begin the parameter list
+  --> 19-keyword-as-param.doodle:2:10
+2 |   show(fn)
+  |          ^
+
+error[syntax-error]: expected an expression
+  --> 19-keyword-as-param.doodle:2:10
+2 |   show(fn)
+  |          ^
+
+error[syntax-error]: expected `)` to close this call
+  --> 19-keyword-as-param.doodle:3:4
+3 | end
+  |    ^
+
+error[syntax-error]: expected `end` to close this `fn`
+  --> 19-keyword-as-param.doodle:4:1
+4 | 
+  | ^
+
+error[syntax-error]: expected `end` to close this `to`
+  --> 19-keyword-as-param.doodle:4:1
+4 | 
+  | ^

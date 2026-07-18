@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[function-falls-off-end]: this `fn` can finish without producing a value — a function must return a value (`to` is the no-value procedure form)
+  --> 30-fn-falls-off-end.doodle:2:3
+2 |   let result = n * 2
+  |   ^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,23 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected `]` to close this list
+  --> 11-missing-comma-list.doodle:1:13
+1 | let xs = [1 2]
+  |             ^
+
+error[syntax-error]: expected a statement separator
+  --> 11-missing-comma-list.doodle:1:13
+1 | let xs = [1 2]
+  |             ^
+
+error[syntax-error]: expected a statement separator
+  --> 11-missing-comma-list.doodle:1:14
+1 | let xs = [1 2]
+  |              ^
+
+error[syntax-error]: expected an expression
+  --> 11-missing-comma-list.doodle:1:14
+1 | let xs = [1 2]
+  |              ^

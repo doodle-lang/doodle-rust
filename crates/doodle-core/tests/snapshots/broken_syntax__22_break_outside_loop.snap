@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[misplaced-exit]: `break` can only appear inside a loop or a block
+  --> 22-break-outside-loop.doodle:1:1
+1 | break
+  | ^^^^^

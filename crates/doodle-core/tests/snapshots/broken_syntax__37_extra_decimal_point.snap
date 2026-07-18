@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected a field name after `.`
+  --> 37-extra-decimal-point.doodle:1:13
+1 | let x = 1.2.3
+  |             ^

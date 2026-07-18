@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[unknown-escape]: this isn't a valid escape — write `\\` for a literal backslash
+  --> 12-bad-escape.doodle:1:12
+1 | show("oops \q here")
+  |            ^^

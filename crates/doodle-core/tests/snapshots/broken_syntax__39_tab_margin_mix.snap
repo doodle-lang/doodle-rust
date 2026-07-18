@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[margin-mismatch]: a tab where the closing `"""` margin has a space
+  --> 39-tab-margin-mix.doodle:2:1
+2 | 	hello
+  | ^

@@ -1,0 +1,2 @@
+fn double(n)
+  n * 2

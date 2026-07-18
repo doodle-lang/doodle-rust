@@ -1,0 +1,2 @@
+let x = if a then
+else 2 end

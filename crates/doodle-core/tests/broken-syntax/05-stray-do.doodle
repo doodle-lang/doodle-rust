@@ -1,0 +1,3 @@
+to main()
+  show(3) do
+end

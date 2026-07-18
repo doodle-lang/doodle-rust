@@ -1,0 +1,13 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[syntax-error]: expected a statement separator
+  --> 36-stray-close-paren.doodle:1:8
+1 | show(1))
+  |        ^
+
+error[syntax-error]: expected an expression
+  --> 36-stray-close-paren.doodle:1:8
+1 | show(1))
+  |        ^

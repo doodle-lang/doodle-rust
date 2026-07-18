@@ -1,0 +1,3 @@
+to greet()
+  show("hello)
+end

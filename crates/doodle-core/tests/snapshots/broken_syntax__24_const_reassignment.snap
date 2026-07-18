@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[const-reassignment]: can't assign to `pi` — it is a constant (`const`), not a mutable `let`
+  --> 24-const-reassignment.doodle:2:1
+2 | pi = 4
+  | ^^

@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[margin-mismatch]: this line doesn't reach the closing `"""` margin
+  --> 38-margin-under-indent.doodle:2:1
+2 | hello
+  | ^

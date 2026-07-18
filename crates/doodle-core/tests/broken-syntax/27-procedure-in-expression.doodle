@@ -1,0 +1,5 @@
+to greet()
+  show("hi")
+end
+
+let x = greet()

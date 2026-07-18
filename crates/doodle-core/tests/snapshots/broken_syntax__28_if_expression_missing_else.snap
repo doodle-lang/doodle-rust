@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[if-expression-missing-else]: a `let` needs a value, but an `if` used as a value needs an `else` — every branch must produce a value; add an `else` branch
+  --> 28-if-expression-missing-else.doodle:1:13
+1 | let label = if n then "yes" end
+  |             ^^^^^^^^^^^^^^^^^^^
