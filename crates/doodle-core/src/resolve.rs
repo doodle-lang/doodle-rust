@@ -6,8 +6,8 @@
 //! closure **capture** (a cell-boxed slot, representation B), or a free **module
 //! name** (`name_refs`, AD5); records module-level declarations (`globals`); runs
 //! the static-error battery (M1.10b) and the Void / fn-falls-off-end checks
-//! (M1.10c, S-5/S-6). Tail marking (M1.11) layers on later — the [`CallableInfo`]
-//! fields it populates arrive with it.
+//! (M1.10c, S-5/S-6); and marks each call in **tail position** (M1.11,
+//! `tail_calls`, machine-design §11).
 //!
 //! Design: `discussions/plan/resolver-m1.10-design.md` (and machine-design
 //! §2/§6/§7). Two axes are kept distinct (conflating them is the classic
@@ -63,6 +63,15 @@ pub struct ResolvedModule {
     /// §12). `raise` is never annotated (its handler search is dynamic); a
     /// misplaced exit is `None` and has a diagnostic instead.
     pub exit_targets: Vec<Option<ExitTarget>>,
+    /// Per-AST-node tail mark, indexed by [`NodeId`]: `true` at each `Call` node in
+    /// **tail position** (L§8.7, machine-design §11) — its value is the enclosing
+    /// callable's result with no pending work, it is not inside a `with`/`try`
+    /// body, and it passes no block argument (S-45). Parallel to [`resolutions`];
+    /// the M2a machine reads it O(1) when about to execute a call, to reuse the
+    /// current frame rather than grow the control stack. `false` everywhere else.
+    ///
+    /// [`resolutions`]: Self::resolutions
+    pub tail_calls: Vec<bool>,
 }
 
 /// The lexical target of a non-local exit (machine-design §12): the resolver
@@ -149,9 +158,14 @@ pub struct CaptureFrom {
     pub slot: u16,
 }
 
-/// Per callable/block body (machine-design §2 `callables`). M1.10a populates
-/// every field here; `exits` (M1.10b) and tail marks (M1.11) are added by their
-/// chunks — an absent field can't be misread as "computed but empty".
+/// Per callable/block body (machine-design §2 `callables`). Slots, captures, and
+/// docstring live here; the exit-target (M1.10b) and tail (M1.11) annotations are
+/// per-node tables on [`ResolvedModule`] instead ([`exit_targets`], [`tail_calls`]
+/// — machine-design §2 groups them as node annotations), since the machine reads
+/// them by `NodeId` at the `return`/call site, not by callable.
+///
+/// [`exit_targets`]: ResolvedModule::exit_targets
+/// [`tail_calls`]: ResolvedModule::tail_calls
 #[derive(Clone, Debug)]
 pub struct CallableInfo {
     /// Whether this is a procedure, function, block, or the module top level.
@@ -182,9 +196,6 @@ pub struct CallableInfo {
     pub captures: Vec<CaptureSource>,
     /// The docstring span (L§8.6), if any.
     pub doc: Option<Span>,
-    // Later chunks add: `exits` (M1.10b, machine-design §12) and tail marks
-    // (M1.11, machine-design §11). An absent field can't be misread as "computed
-    // but empty".
 }
 
 /// What a callable body is (machine-design §8 `FrameKind`).

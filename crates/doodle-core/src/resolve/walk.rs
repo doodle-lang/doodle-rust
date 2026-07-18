@@ -21,6 +21,7 @@ mod errors;
 mod exits;
 mod refs;
 mod tailcheck;
+mod tailmark;
 mod voidcheck;
 
 /// A lexical control context, for `return`/`break`/`continue` targets +
@@ -83,6 +84,10 @@ pub(super) struct Resolver<'a> {
     module: ModuleId,
     resolutions: Vec<Option<Resolution>>,
     exit_targets: Vec<Option<ExitTarget>>,
+    /// Per-AST-node tail mark, indexed by [`NodeId`]: `true` at each `Call` node in
+    /// tail position (L§8.7, machine-design §11). Parallel to `resolutions`; the
+    /// M2a machine reads it O(1) when about to execute a call, to reuse the frame.
+    tail_calls: Vec<bool>,
     callables: Vec<CallableInfo>,
     globals: Vec<GlobalDecl>,
     /// Every module-level declaration *name*, collected up front so the shadowing
@@ -122,6 +127,7 @@ impl<'a> Resolver<'a> {
             module,
             resolutions: vec![None; node_count],
             exit_targets: vec![None; node_count],
+            tail_calls: vec![false; node_count],
             callables: Vec::new(),
             globals: Vec::new(),
             module_global_names: Vec::new(),
@@ -140,6 +146,7 @@ impl<'a> Resolver<'a> {
         r.check_pending_assigns(); // now that `globals` is complete
         r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
         r.check_void_sites(root); // Void consumed as a value (S-6), globals complete
+        r.mark_tail_calls(); // tail positions (L§8.7/§11); reads only ast + callables
         // The whole-module assign post-pass appends out of source order; the front
         // end guarantees source-ordered diagnostics (diag::mod, the renderer never
         // re-sorts), so restore that here. Stable to stay deterministic.
@@ -147,6 +154,7 @@ impl<'a> Resolver<'a> {
         let Resolver {
             resolutions,
             exit_targets,
+            tail_calls,
             callables,
             globals,
             name_refs,
@@ -165,6 +173,7 @@ impl<'a> Resolver<'a> {
                 name_refs,
                 resolutions,
                 exit_targets,
+                tail_calls,
             },
             diagnostics,
         }

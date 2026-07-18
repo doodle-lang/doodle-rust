@@ -94,6 +94,27 @@ fn diags(r: &Resolved) -> Vec<&'static str> {
     r.diagnostics.iter().map(|d| d.code.slug()).collect()
 }
 
+/// Each `Call` as `callee:mark` in node order — `T` if marked a **tail** call
+/// (L§8.7), `-` if not. The callee is its `Ident` name when simple, else `<expr>`.
+fn tails(r: &Resolved) -> Vec<String> {
+    let m = &r.module;
+    (0..m.ast.len())
+        .filter_map(|i| {
+            let Node::Call { callee, .. } = m.ast.node(NodeId(i as u32)) else {
+                return None;
+            };
+            let name = match m.ast.node(*callee) {
+                Node::Ident(n) => n.to_string(),
+                _ => "<expr>".to_string(),
+            };
+            Some(format!(
+                "{name}:{}",
+                if m.tail_calls[i] { "T" } else { "-" }
+            ))
+        })
+        .collect()
+}
+
 /// Every callable's frame layout, in table order: `Kind(slots)[caps]`. A slot is
 /// prefixed `*` when cell-boxed; a capture is `slot<-hops.slot` (target slot ←
 /// static-link source from the creating frame). Makes capture wiring visible.
@@ -743,4 +764,158 @@ fn forward_reference_to_a_local_let_is_undeclared() {
     assert_eq!(diags(&r), vec!["undeclared-assignment"]);
     // The module-level equivalent IS allowed (forward module `let`).
     assert!(diags(&resolved("x = 2\nlet x = 1")).is_empty());
+}
+
+// --- Tail-call marking (M1.11, L§8.7 / machine-design §11) ------------------
+
+#[test]
+fn last_statement_call_is_tail() {
+    // A body's last statement (a `to` or `fn`) is a fall-through tail position:
+    // after the call returns, the callable returns with no pending work.
+    assert_eq!(tails(&resolved("to p()\n  q()\nend")), vec!["q:T"]);
+    assert_eq!(tails(&resolved("fn f()\n  g()\nend")), vec!["g:T"]);
+    // Module top level is not a callable — a call there is never tail.
+    assert_eq!(tails(&resolved("g()")), vec!["g:-"]);
+}
+
+#[test]
+fn calls_with_pending_work_are_not_tail() {
+    // An operator operand, a call argument, and a `let`/assignment RHS all leave
+    // work pending after the inner call returns.
+    assert_eq!(tails(&resolved("fn f()\n  g() + 1\nend")), vec!["g:-"]);
+    // Node order is post-order (a `Call` node follows its args), so the inner
+    // `h()` precedes the outer `g(…)`.
+    assert_eq!(
+        tails(&resolved("fn f()\n  g(h())\nend")),
+        vec!["h:-", "g:T"]
+    );
+    assert_eq!(
+        tails(&resolved("to p()\n  let x = g()\n  q()\nend")),
+        vec!["g:-", "q:T"]
+    );
+}
+
+#[test]
+fn tail_if_branches_are_tail_but_the_condition_is_not() {
+    // The selected branch of a tail `if` is tail (L§8.7); the condition is not.
+    assert_eq!(
+        tails(&resolved("to p()\n  if cond() then a() else b() end\nend")),
+        vec!["cond:-", "a:T", "b:T"]
+    );
+    // A non-tail `if` (a statement with code after) propagates non-tail to its
+    // branches — but a `return` inside stays tail (next test).
+    assert_eq!(
+        tails(&resolved("to p()\n  if c then a() end\n  q()\nend")),
+        vec!["a:-", "q:T"]
+    );
+}
+
+#[test]
+fn return_operand_is_a_tail_position_wherever_it_sits() {
+    // `return expr` delivers expr as the callable's result — expr is tail even
+    // where later code (which the return abandons) follows.
+    assert_eq!(tails(&resolved("fn f()\n  return g()\nend")), vec!["g:T"]);
+    // `return g() + 1` leaves the `+ 1` pending → not tail.
+    assert_eq!(
+        tails(&resolved("fn f()\n  return g() + 1\nend")),
+        vec!["g:-"]
+    );
+    // A `return` in a non-tail branch, with a statement after it, is still tail.
+    assert_eq!(
+        tails(&resolved("to p()\n  if c then return g() end\n  h()\nend")),
+        vec!["g:T", "h:T"]
+    );
+}
+
+#[test]
+fn a_call_passing_a_block_argument_is_not_tail() {
+    // S-45: a `do … end` block references the caller's frame, so the frame cannot
+    // be reused — the block-consuming call is never tail. The block's OWN last
+    // statement is tail with respect to the block's invocation.
+    assert_eq!(
+        tails(&resolved("to p()\n  each(xs) do (x)\n    q()\n  end\nend")),
+        vec!["q:T", "each:-"] // post-order: the block-body `q()` precedes `each(…)`
+    );
+}
+
+#[test]
+fn calls_inside_with_and_try_bodies_are_not_tail() {
+    // A `with` body (a dynamic binding to restore) and a `try` body/handler (a
+    // handler to unwind) are barriers — a call inside is never tail (L§8.7).
+    assert_eq!(
+        tails(&resolved(
+            "to p()\n  with pen = red do\n    q()\n  end\nend"
+        )),
+        vec!["q:-"]
+    );
+    assert_eq!(
+        tails(&resolved(
+            "to p()\n  try risky() rescue e handle(e) end\nend"
+        )),
+        vec!["risky:-", "handle:-"]
+    );
+}
+
+#[test]
+fn a_return_through_a_with_or_try_barrier_is_not_tail() {
+    // The correctness-critical direction: a `return g()` inside a `with`/`try`
+    // body must NOT be marked — restoring the dynamic binding / unwinding the
+    // handler is pending work after `g()` returns, so the frame can't be reused.
+    // (Distinct from the fall-through cases above; a `return` is tail wherever it
+    // sits *unless* a barrier intervenes.)
+    assert_eq!(
+        tails(&resolved(
+            "fn f()\n  with pen = red do\n    return g()\n  end\nend"
+        )),
+        vec!["g:-"]
+    );
+    assert_eq!(
+        tails(&resolved(
+            "fn f()\n  try\n    return g()\n  rescue e\n    0\n  end\nend"
+        )),
+        vec!["g:-"]
+    );
+}
+
+#[test]
+fn a_call_in_a_loop_body_is_not_tail_but_a_return_there_is() {
+    // A `loop`/`while` body repeats, so its calls are not fall-through tail; but a
+    // `return` inside a loop is a same-frame exit → its operand is a tail call.
+    assert_eq!(
+        tails(&resolved("to p()\n  loop do\n    q()\n  end\nend")),
+        vec!["q:-"]
+    );
+    assert_eq!(
+        tails(&resolved("fn f()\n  loop do\n    return g()\n  end\nend")),
+        vec!["g:T"]
+    );
+}
+
+#[test]
+fn a_return_inside_a_block_is_a_non_local_exit_not_a_tail_call() {
+    // A `return` inside a `do … end` block targets an outer callable, not the
+    // block frame — so it is a non-local exit, not this block's tail. The block's
+    // fall-through last statement still IS a tail call w.r.t. its invocation.
+    assert_eq!(
+        tails(&resolved(
+            "fn f()\n  each(xs) do (x)\n    return g()\n  end\nend"
+        )),
+        vec!["g:-", "each:-"]
+    );
+    assert_eq!(
+        tails(&resolved("fn f()\n  each(xs) do (x)\n    g()\n  end\nend")),
+        vec!["g:T", "each:-"]
+    );
+}
+
+#[test]
+fn nested_callables_are_marked_independently() {
+    // Each callable body is marked on its own: the inner fn's tail call is marked
+    // regardless of the outer's non-tail position for the `fn` expression itself.
+    assert_eq!(
+        tails(&resolved(
+            "fn outer()\n  let h = fn ()\n    g()\n  end\n  h()\nend"
+        )),
+        vec!["g:T", "h:T"]
+    );
 }
