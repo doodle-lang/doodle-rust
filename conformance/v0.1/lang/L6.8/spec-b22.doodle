@@ -1,0 +1,7 @@
+#! clause: L6.8
+#! mode: static
+#! stage: full
+let label = if n > 0 then "positive"
+            else if n < 0 then "negative"
+            else "zero"
+            end

@@ -1,0 +1,102 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Ident(
+            "x",
+        ),
+        IntLit(
+            2,
+        ),
+        Binary {
+            op: Mul,
+            lhs: NodeId(
+                0,
+            ),
+            rhs: NodeId(
+                1,
+            ),
+        },
+        ExprStmt(
+            NodeId(
+                2,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    3,
+                ),
+            ],
+        ),
+        Callable {
+            kind: Func,
+            name: None,
+            params: [
+                Ordinary {
+                    name: "x",
+                    default: None,
+                },
+            ],
+            body: NodeId(
+                4,
+            ),
+            doc: None,
+        },
+        Let {
+            name: "double",
+            value: NodeId(
+                5,
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    6,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 19,
+            end: 20,
+        },
+        Span {
+            start: 23,
+            end: 24,
+        },
+        Span {
+            start: 19,
+            end: 24,
+        },
+        Span {
+            start: 19,
+            end: 24,
+        },
+        Span {
+            start: 19,
+            end: 24,
+        },
+        Span {
+            start: 13,
+            end: 28,
+        },
+        Span {
+            start: 0,
+            end: 28,
+        },
+        Span {
+            start: 0,
+            end: 28,
+        },
+    ],
+    root: Some(
+        NodeId(
+            7,
+        ),
+    ),
+}

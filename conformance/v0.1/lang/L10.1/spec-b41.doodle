@@ -1,0 +1,9 @@
+#! clause: L10.1
+#! mode: static
+#! stage: full
+protocol Iterable
+    """Types whose elements can be visited in order."""
+    to each(self, do body)
+        "Visits each element in order."
+    end                             # empty body: each is required
+end

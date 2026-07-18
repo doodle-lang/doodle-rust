@@ -1,0 +1,154 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Ident(
+            "Turtle",
+        ),
+        Ident(
+            "home",
+        ),
+        IntLit(
+            0,
+        ),
+        BoolLit(
+            true,
+        ),
+        Call {
+            callee: NodeId(
+                0,
+            ),
+            args: [
+                Keyword {
+                    name: "position",
+                    value: NodeId(
+                        1,
+                    ),
+                },
+                Keyword {
+                    name: "heading",
+                    value: NodeId(
+                        2,
+                    ),
+                },
+                Keyword {
+                    name: "pen_down",
+                    value: NodeId(
+                        3,
+                    ),
+                },
+            ],
+            block: None,
+        },
+        Let {
+            name: "t",
+            value: NodeId(
+                4,
+            ),
+        },
+        Ident(
+            "t",
+        ),
+        Let {
+            name: "u",
+            value: NodeId(
+                6,
+            ),
+        },
+        Ident(
+            "u",
+        ),
+        Field {
+            object: NodeId(
+                8,
+            ),
+            name: "heading",
+        },
+        IntLit(
+            90,
+        ),
+        Assign {
+            target: NodeId(
+                9,
+            ),
+            value: NodeId(
+                10,
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    5,
+                ),
+                NodeId(
+                    7,
+                ),
+                NodeId(
+                    11,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 8,
+            end: 14,
+        },
+        Span {
+            start: 25,
+            end: 29,
+        },
+        Span {
+            start: 40,
+            end: 41,
+        },
+        Span {
+            start: 53,
+            end: 57,
+        },
+        Span {
+            start: 8,
+            end: 58,
+        },
+        Span {
+            start: 0,
+            end: 58,
+        },
+        Span {
+            start: 67,
+            end: 68,
+        },
+        Span {
+            start: 59,
+            end: 68,
+        },
+        Span {
+            start: 110,
+            end: 111,
+        },
+        Span {
+            start: 110,
+            end: 119,
+        },
+        Span {
+            start: 122,
+            end: 124,
+        },
+        Span {
+            start: 110,
+            end: 124,
+        },
+        Span {
+            start: 0,
+            end: 124,
+        },
+    ],
+    root: Some(
+        NodeId(
+            12,
+        ),
+    ),
+}

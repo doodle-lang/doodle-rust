@@ -1,0 +1,12 @@
+#! clause: L5.5
+#! mode: static
+#! stage: full
+parameter pen_color = "black"
+
+to demo()
+    draw()                       # sees pen_color == "black"
+    with pen_color = "red" do
+        draw()                   # sees pen_color == "red"
+    end
+    draw()                       # sees "black" again
+end

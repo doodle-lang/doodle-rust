@@ -1,0 +1,6 @@
+#! clause: L4.14
+#! mode: static
+#! stage: full
+let t = Turtle(position: home, heading: 0, pen_down: true)
+let u = t          # u and t share the same turtle
+u.heading = 90     # visible as t.heading == 90

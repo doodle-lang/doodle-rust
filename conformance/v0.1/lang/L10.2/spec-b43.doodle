@@ -1,0 +1,12 @@
+#! clause: L10.2
+#! mode: static
+#! stage: full
+implement Iterable for Range
+    to each(r, do body)
+        let i = r.start
+        while i < r.stop do
+            body(i)
+            i = i + r.step
+        end
+    end
+end

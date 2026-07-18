@@ -1,0 +1,4 @@
+#! clause: L6.10
+#! mode: static
+#! stage: full
+let double = fn(x) x * 2 end

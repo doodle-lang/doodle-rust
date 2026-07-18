@@ -1,0 +1,6 @@
+#! clause: L4.14
+#! mode: static
+#! stage: full
+let a = Point(x: 3, y: 4)
+let b = a          # b is a copy
+b.x = 10           # does not affect a

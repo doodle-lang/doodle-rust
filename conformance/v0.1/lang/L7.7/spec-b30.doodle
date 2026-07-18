@@ -1,0 +1,8 @@
+#! clause: L7.7
+#! mode: static
+#! stage: full
+loop do
+    let line = read_line()
+    if line == "" then break end
+    handle(line)
+end

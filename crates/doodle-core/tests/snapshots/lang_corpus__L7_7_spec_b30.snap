@@ -1,0 +1,192 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Ident(
+            "read_line",
+        ),
+        Call {
+            callee: NodeId(
+                0,
+            ),
+            args: [],
+            block: None,
+        },
+        Let {
+            name: "line",
+            value: NodeId(
+                1,
+            ),
+        },
+        Ident(
+            "line",
+        ),
+        StrLit(
+            [],
+        ),
+        Binary {
+            op: Eq,
+            lhs: NodeId(
+                3,
+            ),
+            rhs: NodeId(
+                4,
+            ),
+        },
+        Break(
+            None,
+        ),
+        Block(
+            [
+                NodeId(
+                    6,
+                ),
+            ],
+        ),
+        If {
+            arms: [
+                IfArm {
+                    cond: NodeId(
+                        5,
+                    ),
+                    body: NodeId(
+                        7,
+                    ),
+                },
+            ],
+            else_body: None,
+        },
+        ExprStmt(
+            NodeId(
+                8,
+            ),
+        ),
+        Ident(
+            "handle",
+        ),
+        Ident(
+            "line",
+        ),
+        Call {
+            callee: NodeId(
+                10,
+            ),
+            args: [
+                Positional(
+                    NodeId(
+                        11,
+                    ),
+                ),
+            ],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                12,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    2,
+                ),
+                NodeId(
+                    9,
+                ),
+                NodeId(
+                    13,
+                ),
+            ],
+        ),
+        Loop {
+            body: NodeId(
+                14,
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    15,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 23,
+            end: 32,
+        },
+        Span {
+            start: 23,
+            end: 34,
+        },
+        Span {
+            start: 12,
+            end: 34,
+        },
+        Span {
+            start: 42,
+            end: 46,
+        },
+        Span {
+            start: 50,
+            end: 52,
+        },
+        Span {
+            start: 42,
+            end: 52,
+        },
+        Span {
+            start: 58,
+            end: 63,
+        },
+        Span {
+            start: 58,
+            end: 63,
+        },
+        Span {
+            start: 39,
+            end: 67,
+        },
+        Span {
+            start: 39,
+            end: 67,
+        },
+        Span {
+            start: 72,
+            end: 78,
+        },
+        Span {
+            start: 79,
+            end: 83,
+        },
+        Span {
+            start: 72,
+            end: 84,
+        },
+        Span {
+            start: 72,
+            end: 84,
+        },
+        Span {
+            start: 7,
+            end: 84,
+        },
+        Span {
+            start: 0,
+            end: 88,
+        },
+        Span {
+            start: 0,
+            end: 88,
+        },
+    ],
+    root: Some(
+        NodeId(
+            16,
+        ),
+    ),
+}

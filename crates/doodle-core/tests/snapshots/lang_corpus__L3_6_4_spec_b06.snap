@@ -1,0 +1,28 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Module {
+            stmts: [],
+            doc: Some(
+                Span {
+                    start: 0,
+                    end: 33,
+                },
+            ),
+        },
+    ],
+    spans: [
+        Span {
+            start: 33,
+            end: 33,
+        },
+    ],
+    root: Some(
+        NodeId(
+            0,
+        ),
+    ),
+}

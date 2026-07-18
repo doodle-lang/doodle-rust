@@ -1,0 +1,48 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        StrLit(
+            [
+                Text(
+                    "Ingredients:\n  - flour\n  - sugar\nMix well.",
+                ),
+            ],
+        ),
+        Let {
+            name: "recipe",
+            value: NodeId(
+                0,
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    1,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 13,
+            end: 83,
+        },
+        Span {
+            start: 0,
+            end: 83,
+        },
+        Span {
+            start: 0,
+            end: 83,
+        },
+    ],
+    root: Some(
+        NodeId(
+            2,
+        ),
+    ),
+}

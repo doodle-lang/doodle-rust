@@ -1,0 +1,8 @@
+#! clause: L3.6.3
+#! mode: static
+#! stage: full
+"hello"
+"tab:\there"
+"café \u{2728}"
+"Hello, {name}! You have {count} messages."
+"a literal brace: {{ and }}"

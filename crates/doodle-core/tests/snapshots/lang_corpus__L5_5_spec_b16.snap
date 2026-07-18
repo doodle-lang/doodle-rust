@@ -1,0 +1,199 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        StrLit(
+            [
+                Text(
+                    "black",
+                ),
+            ],
+        ),
+        Parameter {
+            name: "pen_color",
+            default: NodeId(
+                0,
+            ),
+        },
+        Ident(
+            "draw",
+        ),
+        Call {
+            callee: NodeId(
+                2,
+            ),
+            args: [],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                3,
+            ),
+        ),
+        StrLit(
+            [
+                Text(
+                    "red",
+                ),
+            ],
+        ),
+        Ident(
+            "draw",
+        ),
+        Call {
+            callee: NodeId(
+                6,
+            ),
+            args: [],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                7,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    8,
+                ),
+            ],
+        ),
+        With {
+            name: "pen_color",
+            value: NodeId(
+                5,
+            ),
+            body: NodeId(
+                9,
+            ),
+        },
+        Ident(
+            "draw",
+        ),
+        Call {
+            callee: NodeId(
+                11,
+            ),
+            args: [],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                12,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    4,
+                ),
+                NodeId(
+                    10,
+                ),
+                NodeId(
+                    13,
+                ),
+            ],
+        ),
+        Callable {
+            kind: Proc,
+            name: Some(
+                "demo",
+            ),
+            params: [],
+            body: NodeId(
+                14,
+            ),
+            doc: None,
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    1,
+                ),
+                NodeId(
+                    15,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 22,
+            end: 29,
+        },
+        Span {
+            start: 0,
+            end: 29,
+        },
+        Span {
+            start: 45,
+            end: 49,
+        },
+        Span {
+            start: 45,
+            end: 51,
+        },
+        Span {
+            start: 45,
+            end: 51,
+        },
+        Span {
+            start: 123,
+            end: 128,
+        },
+        Span {
+            start: 140,
+            end: 144,
+        },
+        Span {
+            start: 140,
+            end: 146,
+        },
+        Span {
+            start: 140,
+            end: 146,
+        },
+        Span {
+            start: 131,
+            end: 146,
+        },
+        Span {
+            start: 106,
+            end: 198,
+        },
+        Span {
+            start: 203,
+            end: 207,
+        },
+        Span {
+            start: 203,
+            end: 209,
+        },
+        Span {
+            start: 203,
+            end: 209,
+        },
+        Span {
+            start: 45,
+            end: 209,
+        },
+        Span {
+            start: 31,
+            end: 256,
+        },
+        Span {
+            start: 0,
+            end: 256,
+        },
+    ],
+    root: Some(
+        NodeId(
+            16,
+        ),
+    ),
+}

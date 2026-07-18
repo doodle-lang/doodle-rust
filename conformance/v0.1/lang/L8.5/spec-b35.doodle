@@ -1,0 +1,14 @@
+#! clause: L8.5
+#! mode: static
+#! stage: full
+to each(items, do body)
+    let i = 0
+    while i < length(items) do
+        body(items[i])
+        i = i + 1
+    end
+end
+
+each(shapes) do(shape)
+    draw(shape)
+end

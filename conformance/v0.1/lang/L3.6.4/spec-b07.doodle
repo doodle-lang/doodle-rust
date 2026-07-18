@@ -1,0 +1,9 @@
+#! clause: L3.6.4
+#! mode: static
+#! stage: full
+let recipe = """
+    Ingredients:
+      - flour
+      - sugar
+    Mix well.
+    """

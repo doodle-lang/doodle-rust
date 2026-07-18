@@ -1,0 +1,263 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Ident(
+            "r",
+        ),
+        Field {
+            object: NodeId(
+                0,
+            ),
+            name: "start",
+        },
+        Let {
+            name: "i",
+            value: NodeId(
+                1,
+            ),
+        },
+        Ident(
+            "i",
+        ),
+        Ident(
+            "r",
+        ),
+        Field {
+            object: NodeId(
+                4,
+            ),
+            name: "stop",
+        },
+        Binary {
+            op: Lt,
+            lhs: NodeId(
+                3,
+            ),
+            rhs: NodeId(
+                5,
+            ),
+        },
+        Ident(
+            "body",
+        ),
+        Ident(
+            "i",
+        ),
+        Call {
+            callee: NodeId(
+                7,
+            ),
+            args: [
+                Positional(
+                    NodeId(
+                        8,
+                    ),
+                ),
+            ],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                9,
+            ),
+        ),
+        Ident(
+            "i",
+        ),
+        Ident(
+            "i",
+        ),
+        Ident(
+            "r",
+        ),
+        Field {
+            object: NodeId(
+                13,
+            ),
+            name: "step",
+        },
+        Binary {
+            op: Add,
+            lhs: NodeId(
+                12,
+            ),
+            rhs: NodeId(
+                14,
+            ),
+        },
+        Assign {
+            target: NodeId(
+                11,
+            ),
+            value: NodeId(
+                15,
+            ),
+        },
+        Block(
+            [
+                NodeId(
+                    10,
+                ),
+                NodeId(
+                    16,
+                ),
+            ],
+        ),
+        While {
+            cond: NodeId(
+                6,
+            ),
+            body: NodeId(
+                17,
+            ),
+        },
+        Block(
+            [
+                NodeId(
+                    2,
+                ),
+                NodeId(
+                    18,
+                ),
+            ],
+        ),
+        Callable {
+            kind: Proc,
+            name: Some(
+                "each",
+            ),
+            params: [
+                Ordinary {
+                    name: "r",
+                    default: None,
+                },
+                Block {
+                    name: "body",
+                },
+            ],
+            body: NodeId(
+                19,
+            ),
+            doc: None,
+        },
+        Implement {
+            protocol: "Iterable",
+            type_name: "Range",
+            methods: [
+                NodeId(
+                    20,
+                ),
+            ],
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    21,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 69,
+            end: 70,
+        },
+        Span {
+            start: 69,
+            end: 76,
+        },
+        Span {
+            start: 61,
+            end: 76,
+        },
+        Span {
+            start: 91,
+            end: 92,
+        },
+        Span {
+            start: 95,
+            end: 96,
+        },
+        Span {
+            start: 95,
+            end: 101,
+        },
+        Span {
+            start: 91,
+            end: 101,
+        },
+        Span {
+            start: 117,
+            end: 121,
+        },
+        Span {
+            start: 122,
+            end: 123,
+        },
+        Span {
+            start: 117,
+            end: 124,
+        },
+        Span {
+            start: 117,
+            end: 124,
+        },
+        Span {
+            start: 137,
+            end: 138,
+        },
+        Span {
+            start: 141,
+            end: 142,
+        },
+        Span {
+            start: 145,
+            end: 146,
+        },
+        Span {
+            start: 145,
+            end: 151,
+        },
+        Span {
+            start: 141,
+            end: 151,
+        },
+        Span {
+            start: 137,
+            end: 151,
+        },
+        Span {
+            start: 104,
+            end: 151,
+        },
+        Span {
+            start: 85,
+            end: 163,
+        },
+        Span {
+            start: 61,
+            end: 163,
+        },
+        Span {
+            start: 33,
+            end: 171,
+        },
+        Span {
+            start: 0,
+            end: 175,
+        },
+        Span {
+            start: 0,
+            end: 175,
+        },
+    ],
+    root: Some(
+        NodeId(
+            22,
+        ),
+    ),
+}

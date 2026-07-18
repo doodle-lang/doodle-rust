@@ -1,0 +1,5 @@
+#! clause: L9.1
+#! mode: static
+#! stage: full
+record Point with x, y end
+ref record Turtle with position, heading, pen_down end

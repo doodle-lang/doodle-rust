@@ -1,0 +1,9 @@
+#! clause: L8.6
+#! mode: static
+#! stage: full
+fn distance(a, b)
+    """Euclidean distance between two points."""
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    sqrt(dx * dx + dy * dy)
+end

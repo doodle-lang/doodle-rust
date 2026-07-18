@@ -1,0 +1,4 @@
+#! clause: L10.3
+#! mode: static
+#! stage: full
+each(my_range) do(i) show(i) end     # dispatches on my_range's type

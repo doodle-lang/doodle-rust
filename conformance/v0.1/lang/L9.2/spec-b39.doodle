@@ -1,0 +1,4 @@
+#! clause: L9.2
+#! mode: static
+#! stage: full
+let p = Point(x: 3, y: 4)

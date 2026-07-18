@@ -1,0 +1,57 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Record {
+            is_ref: false,
+            name: "Point",
+            fields: [
+                "x",
+                "y",
+            ],
+            doc: None,
+        },
+        Record {
+            is_ref: true,
+            name: "Turtle",
+            fields: [
+                "position",
+                "heading",
+                "pen_down",
+            ],
+            doc: None,
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    0,
+                ),
+                NodeId(
+                    1,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 0,
+            end: 26,
+        },
+        Span {
+            start: 27,
+            end: 81,
+        },
+        Span {
+            start: 0,
+            end: 81,
+        },
+    ],
+    root: Some(
+        NodeId(
+            2,
+        ),
+    ),
+}

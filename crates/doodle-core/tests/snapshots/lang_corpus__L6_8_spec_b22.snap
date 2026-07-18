@@ -1,0 +1,213 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Ident(
+            "n",
+        ),
+        IntLit(
+            0,
+        ),
+        Binary {
+            op: Gt,
+            lhs: NodeId(
+                0,
+            ),
+            rhs: NodeId(
+                1,
+            ),
+        },
+        StrLit(
+            [
+                Text(
+                    "positive",
+                ),
+            ],
+        ),
+        ExprStmt(
+            NodeId(
+                3,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    4,
+                ),
+            ],
+        ),
+        Ident(
+            "n",
+        ),
+        IntLit(
+            0,
+        ),
+        Binary {
+            op: Lt,
+            lhs: NodeId(
+                6,
+            ),
+            rhs: NodeId(
+                7,
+            ),
+        },
+        StrLit(
+            [
+                Text(
+                    "negative",
+                ),
+            ],
+        ),
+        ExprStmt(
+            NodeId(
+                9,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    10,
+                ),
+            ],
+        ),
+        StrLit(
+            [
+                Text(
+                    "zero",
+                ),
+            ],
+        ),
+        ExprStmt(
+            NodeId(
+                12,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    13,
+                ),
+            ],
+        ),
+        If {
+            arms: [
+                IfArm {
+                    cond: NodeId(
+                        2,
+                    ),
+                    body: NodeId(
+                        5,
+                    ),
+                },
+                IfArm {
+                    cond: NodeId(
+                        8,
+                    ),
+                    body: NodeId(
+                        11,
+                    ),
+                },
+            ],
+            else_body: Some(
+                NodeId(
+                    14,
+                ),
+            ),
+        },
+        Let {
+            name: "label",
+            value: NodeId(
+                15,
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    16,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 15,
+            end: 16,
+        },
+        Span {
+            start: 19,
+            end: 20,
+        },
+        Span {
+            start: 15,
+            end: 20,
+        },
+        Span {
+            start: 26,
+            end: 36,
+        },
+        Span {
+            start: 26,
+            end: 36,
+        },
+        Span {
+            start: 26,
+            end: 36,
+        },
+        Span {
+            start: 57,
+            end: 58,
+        },
+        Span {
+            start: 61,
+            end: 62,
+        },
+        Span {
+            start: 57,
+            end: 62,
+        },
+        Span {
+            start: 68,
+            end: 78,
+        },
+        Span {
+            start: 68,
+            end: 78,
+        },
+        Span {
+            start: 68,
+            end: 78,
+        },
+        Span {
+            start: 96,
+            end: 102,
+        },
+        Span {
+            start: 96,
+            end: 102,
+        },
+        Span {
+            start: 96,
+            end: 102,
+        },
+        Span {
+            start: 12,
+            end: 118,
+        },
+        Span {
+            start: 0,
+            end: 118,
+        },
+        Span {
+            start: 0,
+            end: 118,
+        },
+    ],
+    root: Some(
+        NodeId(
+            17,
+        ),
+    ),
+}

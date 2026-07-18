@@ -1,0 +1,70 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        Block(
+            [],
+        ),
+        Protocol {
+            name: "Iterable",
+            extends: None,
+            members: [
+                ProtoMember {
+                    kind: Proc,
+                    name: "each",
+                    params: [
+                        Ordinary {
+                            name: "self",
+                            default: None,
+                        },
+                        Block {
+                            name: "body",
+                        },
+                    ],
+                    body: None,
+                    doc: Some(
+                        Span {
+                            start: 109,
+                            end: 140,
+                        },
+                    ),
+                },
+            ],
+            doc: Some(
+                Span {
+                    start: 22,
+                    end: 73,
+                },
+            ),
+        },
+        Module {
+            stmts: [
+                NodeId(
+                    1,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 145,
+            end: 145,
+        },
+        Span {
+            start: 0,
+            end: 211,
+        },
+        Span {
+            start: 0,
+            end: 211,
+        },
+    ],
+    root: Some(
+        NodeId(
+            2,
+        ),
+    ),
+}
