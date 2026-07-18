@@ -15,6 +15,7 @@ use crate::diag::Diagnostic;
 use crate::diag::code::DiagnosticCode;
 use crate::span::{ModuleId, Span};
 
+mod decls;
 mod dispatch;
 mod errors;
 mod exits;
@@ -84,6 +85,11 @@ pub(super) struct Resolver<'a> {
     exit_targets: Vec<Option<ExitTarget>>,
     callables: Vec<CallableInfo>,
     globals: Vec<GlobalDecl>,
+    /// Every module-level declaration *name*, collected up front so the shadowing
+    /// check (L§5.1) sees module globals as whole-scope — a nested local hides a
+    /// module `let` declared *later* just as it hides one declared earlier
+    /// (consistent with forward module-name references and assignment).
+    module_global_names: Vec<Box<str>>,
     name_refs: Vec<NameRef>,
     stmt_spans: Vec<(Span, NodeId)>,
     diagnostics: Vec<Diagnostic>,
@@ -118,6 +124,7 @@ impl<'a> Resolver<'a> {
             exit_targets: vec![None; node_count],
             callables: Vec::new(),
             globals: Vec::new(),
+            module_global_names: Vec::new(),
             name_refs: Vec::new(),
             stmt_spans: Vec::new(),
             diagnostics: Vec::new(),
@@ -170,6 +177,9 @@ impl<'a> Resolver<'a> {
         };
         let doc = *doc;
         let stmts = stmts.clone();
+        // Collect module-global names up front (whole-scope, so a nested local can
+        // be seen to shadow a global declared later, L§5.1).
+        self.module_global_names = self.collect_global_names(&stmts);
         self.frames.push(Frame {
             kind: FrameKind::Module,
             next_slot: 0,
@@ -182,6 +192,14 @@ impl<'a> Resolver<'a> {
             bindings: Vec::new(),
         });
         self.resolve_body(&stmts);
+        // Every actual module global should have been pre-collected (else the
+        // shadowing check would miss it): the two paths must agree.
+        debug_assert!(
+            self.globals
+                .iter()
+                .all(|g| self.module_global_names.iter().any(|n| n == &g.name)),
+            "a module global was not pre-collected for the shadowing check"
+        );
         let frame = self.frames.pop().expect("module frame");
         self.scopes.pop();
         self.callables.push(CallableInfo {
@@ -244,7 +262,7 @@ impl<'a> Resolver<'a> {
                 self.resolve(*d);
             }
         }
-        self.scope_params(&param_infos);
+        self.scope_params(decl, &param_infos);
         self.resolve_block_stmts(body);
         self.ctrl.pop();
         let frame = self.frames.pop().expect("callable frame");
@@ -280,6 +298,7 @@ impl<'a> Resolver<'a> {
         });
         let mut param_infos = Vec::new();
         for name in &block.params {
+            self.check_shadowing(block.body, name); // block params carry no span
             let slot = self.declare_local(name, GlobalKind::Let);
             param_infos.push(ParamInfo {
                 name: name.clone(),
@@ -307,36 +326,6 @@ impl<'a> Resolver<'a> {
         });
     }
 
-    /// Allocates a slot (frame side only) per parameter, in order, returning the
-    /// param table. Names are bound in scope later by [`scope_params`], after
-    /// defaults resolve (L§8.2), so the param slots are `0..n` while a default can
-    /// neither see a sibling param nor resolve an enclosing local against this
-    /// frame directly (it captures instead).
-    fn alloc_param_slots(&mut self, params: &[Param]) -> Vec<ParamInfo> {
-        let mut infos = Vec::new();
-        for p in params {
-            let (name, is_block, has_default) = match p {
-                Param::Ordinary { name, default } => (name, false, default.is_some()),
-                Param::Block { name } => (name, true, false),
-            };
-            let slot = self.alloc_frame_slot(name);
-            infos.push(ParamInfo {
-                name: name.clone(),
-                slot,
-                is_block,
-                has_default,
-            });
-        }
-        infos
-    }
-
-    /// Binds each parameter's name → slot in the current scope (after defaults).
-    fn scope_params(&mut self, param_infos: &[ParamInfo]) {
-        for pi in param_infos {
-            self.bind_in_scope(&pi.name, pi.slot, GlobalKind::Let);
-        }
-    }
-
     /// Resolves a construct-body [`Node::Block`] in a fresh scope (same frame).
     fn resolve_construct_body(&mut self, body: NodeId) {
         let saved = self.push_scope();
@@ -349,6 +338,14 @@ impl<'a> Resolver<'a> {
         let span = self.ast.span(node);
         self.diagnostics
             .push(Diagnostic::error(code, self.module, span, message));
+    }
+
+    /// Pushes a `Warning`-severity diagnostic at `node`'s span (does not fail the
+    /// load; surfaced by the runner/CLI).
+    pub(super) fn warn(&mut self, code: DiagnosticCode, node: NodeId, message: &str) {
+        let span = self.ast.span(node);
+        self.diagnostics
+            .push(Diagnostic::warning(code, self.module, span, message));
     }
 
     /// Resolves the statements of a [`Node::Block`] in the current scope.
@@ -374,74 +371,6 @@ impl<'a> Resolver<'a> {
     fn pop_scope(&mut self, saved: bool) {
         self.scopes.pop();
         self.module_direct = saved;
-    }
-
-    /// Declares a binding: a module `global` when directly at module level, else a
-    /// local slot in the current frame (recording a decl-site resolution). A same-
-    /// scope/same-namespace duplicate is reported (L§5.2) but still bound, for
-    /// recovery. (Duplicate *parameters* are not checked here — params have no
-    /// node span; deferred.)
-    pub(super) fn declare_binding(&mut self, decl: NodeId, name: &str, kind: GlobalKind) {
-        if self.module_direct {
-            if self.globals.iter().any(|g| &*g.name == name) {
-                self.duplicate_error(decl, name);
-            }
-            self.globals.push(GlobalDecl {
-                name: name.into(),
-                kind,
-                decl,
-            });
-        } else {
-            if self.scope_has(name) {
-                self.duplicate_error(decl, name);
-            }
-            let slot = self.declare_local(name, kind);
-            self.set_res(decl, Resolution::LocalSlot(slot));
-        }
-    }
-
-    /// Whether the current (innermost) scope already binds `name`.
-    fn scope_has(&self, name: &str) -> bool {
-        self.scopes
-            .last()
-            .expect("a scope is open")
-            .bindings
-            .iter()
-            .any(|b| &*b.name == name)
-    }
-
-    /// Assigns the next slot in the current frame to `name` and binds it in the
-    /// current scope, with declaration `kind` (which decides assignability — S-6
-    /// rule 2a). For params, whose slot and scope binding are staged separately
-    /// (L§8.2), see [`alloc_frame_slot`] + [`bind_in_scope`].
-    pub(super) fn declare_local(&mut self, name: &str, kind: GlobalKind) -> u16 {
-        let slot = self.alloc_frame_slot(name);
-        self.bind_in_scope(name, slot, kind);
-        slot
-    }
-
-    /// Allocates the next slot in the current frame for `name` — frame side only
-    /// (name + a `cell_boxed = false` entry), no scope binding.
-    fn alloc_frame_slot(&mut self, name: &str) -> u16 {
-        let frame = self.frames.last_mut().expect("a frame is open");
-        let slot = u16::try_from(frame.next_slot).expect("frame exceeds the u16 slot space");
-        frame.next_slot += 1;
-        frame.slot_names.push(name.into());
-        frame.cell_boxed.push(false); // a plain local; flipped true if captured
-        slot
-    }
-
-    /// Binds `name` → `slot` (declaration `kind`) in the current scope.
-    fn bind_in_scope(&mut self, name: &str, slot: u16, kind: GlobalKind) {
-        self.scopes
-            .last_mut()
-            .expect("a scope is open")
-            .bindings
-            .push(Binding {
-                name: name.into(),
-                slot,
-                kind,
-            });
     }
 
     /// The innermost enclosing `fn`/module frame at or below `i` (blocks belong to

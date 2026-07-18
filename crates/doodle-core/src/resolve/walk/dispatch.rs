@@ -143,6 +143,7 @@ impl super::Resolver<'_> {
                 // The caught value binds `rescue_name` for the handler's scope: a
                 // slot in the enclosing frame, recorded on the `try` node.
                 let saved = self.push_scope();
+                self.check_shadowing(node, &rescue_name);
                 let slot = self.declare_local(&rescue_name, GlobalKind::Let);
                 self.set_res(node, Resolution::LocalSlot(slot));
                 self.resolve_block_stmts(rescue_body);

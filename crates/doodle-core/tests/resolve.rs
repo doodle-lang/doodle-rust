@@ -411,13 +411,54 @@ fn duplicate_declaration_in_a_scope() {
         diags(&resolved("let x = 1\nlet x = 2")),
         vec!["duplicate-declaration"]
     );
-    // Different scopes = shadowing, not duplicate (the warning is M1.11).
-    assert!(diags(&resolved("let x = 1\nto f()\n  let x = 2\nend")).is_empty());
+    // Different scopes = shadowing (a warning), not duplicate: an inner `let x`
+    // hides the module-level `x`.
+    assert_eq!(
+        diags(&resolved("let x = 1\nto f()\n  let x = 2\nend")),
+        vec!["shadowing"]
+    );
     // A `let` colliding with a param in the same fn scope IS a duplicate.
     assert_eq!(
         diags(&resolved("to f(x)\n  let x = 2\nend")),
         vec!["duplicate-declaration"]
     );
+}
+
+#[test]
+fn shadowing_an_outer_binding_warns() {
+    let sh = vec!["shadowing"];
+    // A local hiding an enclosing local across construct scopes (`if` body).
+    assert_eq!(
+        diags(&resolved(
+            "to f()\n  let x = 1\n  if c then\n    let x = 2\n    x\n  end\nend"
+        )),
+        sh
+    );
+    // A `rescue` name hiding an outer local.
+    assert_eq!(
+        diags(&resolved(
+            "to f()\n  let e = 1\n  try g() rescue e h(e) end\nend"
+        )),
+        sh
+    );
+    // A **parameter** hiding a module global (the rubric's flagship case).
+    assert_eq!(
+        diags(&resolved("let count = 0\nto tally(count)\n  count\nend")),
+        sh
+    );
+    // A **block parameter** hiding a module global.
+    assert_eq!(diags(&resolved("let y = 1\neach(xs) do (y)\n  y\nend")), sh);
+    // Module globals are whole-scope: a nested local hides a global declared
+    // *later*, just as one declared earlier (consistent with assignment).
+    assert_eq!(
+        diags(&resolved("to f()\n  let x = 1\n  x\nend\nlet x = 9")),
+        sh
+    );
+    // No warning when nothing is hidden (distinct name; or nothing outer).
+    assert!(diags(&resolved("let x = 1\nto f()\n  let y = 2\n  y\nend")).is_empty());
+    assert!(diags(&resolved("to f()\n  let x = 1\n  x\nend")).is_empty());
+    // Sibling params don't shadow each other (same scope, not enclosing).
+    assert!(diags(&resolved("to f(a, b)\n  a\nend")).is_empty());
 }
 
 #[test]
