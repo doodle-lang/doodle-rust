@@ -1,13 +1,13 @@
 //! The resolver (M1.10): one pass over the parsed [`Ast`] producing an immutable
 //! [`ResolvedModule`] — the environment model the M2 machine consumes.
 //!
-//! This is the M1.10**a** slice: name resolution only. It builds the scope/frame
-//! model (machine-design §7), assigns local **slots**, classifies every name
-//! reference as a local slot, a block **static link**, a closure **capture**, or
-//! a free **module name** (`name_refs`, AD5), and records module-level
-//! declarations (`globals`). The static-error battery (M1.10b), the Void /
-//! fn-falls-off-end checks (M1.10c, S-5/S-6), and tail marking (M1.11) layer on
-//! top later — the [`CallableInfo`] fields they populate arrive with them.
+//! It builds the scope/frame model (machine-design §7), assigns local **slots**,
+//! classifies every name reference as a local slot, a block **static link**, a
+//! closure **capture** (a cell-boxed slot, representation B), or a free **module
+//! name** (`name_refs`, AD5); records module-level declarations (`globals`); runs
+//! the static-error battery (M1.10b) and the Void / fn-falls-off-end checks
+//! (M1.10c, S-5/S-6). Tail marking (M1.11) layers on later — the [`CallableInfo`]
+//! fields it populates arrive with it.
 //!
 //! Design: `discussions/plan/resolver-m1.10-design.md` (and machine-design
 //! §2/§6/§7). Two axes are kept distinct (conflating them is the classic
@@ -26,14 +26,8 @@ use crate::span::{ModuleId, Span};
 pub struct Resolved {
     /// The resolved module (owns the AST arena).
     pub module: ResolvedModule,
-    /// Static diagnostics from resolution (empty until the M1.10b battery).
+    /// Static diagnostics from resolution.
     pub diagnostics: Vec<Diagnostic>,
-    /// Reference sites that resolve to a local across an `fn` boundary — closure
-    /// captures, whose resolution is deferred to M1.10c (pending the capture
-    /// representation ruling). Their `resolutions` entry is `None` for now; this
-    /// list makes the deferral explicit rather than silent. Empty once captures
-    /// land.
-    pub deferred_captures: Vec<NodeId>,
 }
 
 /// A resolved module (machine-design §2): the AST arena plus the resolved
@@ -92,21 +86,27 @@ pub enum ExitTarget {
 
 /// How a name reference or local declaration resolves (machine-design §6/§7).
 ///
-/// M1.10a covers references that don't cross an `fn` boundary. Closure
-/// **captures** (a nested `fn` referencing an enclosing frame's local) are
-/// deferred to M1.10c together with their representation — the resolver design's
-/// open A/B fork (a `Capture` variant + separate array vs. cell-boxed frame
-/// slots). Until then, such a reference is left [`None`] and recorded in
-/// [`Resolved::deferred_captures`].
+/// A reference that crosses an `fn` boundary (a closure **capture**) resolves —
+/// under capture representation **B** (resolver-design §8) — to a `LocalSlot`/
+/// `BlockOuter` naming a **capture slot** of the referencing closure's frame; the
+/// owning frame's `cell_boxed[slot]` (see [`CallableInfo::cell_boxed`]) tells the
+/// machine to dereference the [`CellObj`](machine-design §7) that slot holds.
+/// There is no distinct `Capture` variant: a captured cell is just a cell-boxed
+/// frame slot, filled at closure creation from the closure's [`captures`]
+/// ([`CallableInfo::captures`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resolution {
-    /// A local in the *current* frame at `slot`.
+    /// A local in the *current* frame at `slot`. If that frame's
+    /// `cell_boxed[slot]` is set (a nested `fn` captured it, or it is a capture
+    /// slot), the machine dereferences the cell; otherwise the slot holds the
+    /// value directly.
     LocalSlot(u16),
     /// An enclosing local reached from a block body via the defining chain: chase
     /// `defining` `hops` times (0 = the block's own frame), then index
     /// `locals[slot]` (static links, machine-design §7). Blocks do not capture, so
     /// this covers block references to their enclosing frame(s) up to — but not
-    /// across — an `fn` boundary.
+    /// across — an `fn` boundary; the target frame's `cell_boxed[slot]` still
+    /// decides deref-vs-direct.
     BlockOuter {
         /// Defining-chain hops to the owning frame (≥ 1 here).
         hops: u16,
@@ -116,6 +116,37 @@ pub enum Resolution {
     /// A free name: resolved to a module binding cell lazily on first execution
     /// via `name_refs[name_ref]` and the per-instance cache (machine-design §6).
     ModuleName(u32),
+}
+
+/// One cell a closure splices into its frame at creation (capture representation
+/// **B**, resolver-design §8; machine-design §7/§10). The closure's `captures`
+/// list drives creation: for each entry, read the cell named by [`from`](Self::from)
+/// out of the *creating* (enclosing) environment and place it in this closure
+/// frame's capture [`slot`](Self::slot). At invocation those cells are spliced
+/// into the new frame's capture slots (machine-design §10).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CaptureSource {
+    /// The (trailing) capture slot in *this* closure's frame the cell fills.
+    pub slot: u16,
+    /// Where the cell comes from in the enclosing environment at creation.
+    pub from: CaptureFrom,
+}
+
+/// Where a captured cell comes from at closure creation: a **static link from the
+/// creating frame** (machine-design §7). `hops = 0` is the creating frame's own
+/// slot (a cell-boxed local, or a pass-through capture slot); `hops > 0` chases
+/// the creating frame's `defining` chain (the closure was created inside a block).
+///
+/// **Totality invariant (resolver-design §8):** the chase runs through `Block`
+/// frames only and never crosses a `Callable` boundary — a capture from beyond
+/// the home callable is threaded through that callable's own capture slots
+/// instead. The resolver `debug_assert`s this when it emits each source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CaptureFrom {
+    /// Defining-chain hops from the creating frame to the frame holding the cell.
+    pub hops: u16,
+    /// The slot in that frame.
+    pub slot: u16,
 }
 
 /// Per callable/block body (machine-design §2 `callables`). M1.10a populates
@@ -133,15 +164,27 @@ pub struct CallableInfo {
     pub params: Vec<ParamInfo>,
     /// The frame's `locals` length to allocate.
     pub slot_count: u16,
-    /// Slot → local name, for all slots (params + body locals); the named-locals
-    /// table the debugger reads (machine-design §17, E§8.2).
+    /// Slot → local name, for all slots (params + body locals + capture slots);
+    /// the named-locals table the debugger reads (machine-design §17, E§8.2).
     pub slot_names: Vec<Box<str>>,
+    /// Per-slot: is this slot **cell-boxed** (machine-design §7)? Set when a nested
+    /// `fn` captures the slot (a late promotion — already-emitted `LocalSlot`/
+    /// `BlockOuter` refs stay valid, the flag drives runtime deref) and always set
+    /// for a capture slot. Parallel to `slot_names` (length `slot_count`).
+    pub cell_boxed: Vec<bool>,
+    /// The cells this closure captures (capture representation **B**, resolver-
+    /// design §8). Each is a discovery-order capture slot appended at the frame's
+    /// growing end (never renumbering an already-emitted slot, but not necessarily
+    /// a contiguous suffix — a body local declared after a capture ref sits above
+    /// it); the machine splices each cell into its **explicit** [`CaptureSource::slot`].
+    /// Empty for a `to`/module/block body (only an `fn` captures); a plain `fn`
+    /// with no free enclosing-local references also has none.
+    pub captures: Vec<CaptureSource>,
     /// The docstring span (L§8.6), if any.
     pub doc: Option<Span>,
-    // Later chunks add: `cell_boxed`/`captures` (M1.10c, with the capture
-    // representation ruling), `exits` (M1.10b, machine-design §12), and tail
-    // marks (M1.11, machine-design §11). An absent field can't be misread as
-    // "computed but empty".
+    // Later chunks add: `exits` (M1.10b, machine-design §12) and tail marks
+    // (M1.11, machine-design §11). An absent field can't be misread as "computed
+    // but empty".
 }
 
 /// What a callable body is (machine-design §8 `FrameKind`).

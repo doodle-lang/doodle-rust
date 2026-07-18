@@ -2,8 +2,9 @@
 //! assignment, static links, and free/module classification are visible.
 //!
 //! Reference notation: `L{slot}` = local slot, `B{hops}.{slot}` = block static
-//! link, `M` = module name (free), `?` = unresolved (a deferred cross-`fn`
-//! capture, M1.10c).
+//! link, `M` = module name (free), `?` = unresolved. A cross-`fn` reference is a
+//! closure **capture** (representation B): it resolves to `L`/`B` naming a capture
+//! slot (see [`layout`] for the cell-boxing and capture wiring).
 
 use doodle_core::ast::{Node, NodeId};
 use doodle_core::parse::parse_program;
@@ -93,6 +94,35 @@ fn diags(r: &Resolved) -> Vec<&'static str> {
     r.diagnostics.iter().map(|d| d.code.slug()).collect()
 }
 
+/// Every callable's frame layout, in table order: `Kind(slots)[caps]`. A slot is
+/// prefixed `*` when cell-boxed; a capture is `slot<-hops.slot` (target slot ←
+/// static-link source from the creating frame). Makes capture wiring visible.
+fn layout(r: &Resolved) -> Vec<String> {
+    r.module
+        .callables
+        .iter()
+        .map(|c| {
+            let slots: Vec<String> = c
+                .slot_names
+                .iter()
+                .zip(&c.cell_boxed)
+                .map(|(n, &b)| if b { format!("*{n}") } else { n.to_string() })
+                .collect();
+            let caps: Vec<String> = c
+                .captures
+                .iter()
+                .map(|cap| format!("{}<-{}.{}", cap.slot, cap.from.hops, cap.from.slot))
+                .collect();
+            let caps = if caps.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", caps.join(","))
+            };
+            format!("{:?}({}){caps}", c.kind, slots.join(","))
+        })
+        .collect()
+}
+
 #[test]
 fn module_level_lets_are_globals_referenced_by_module_name() {
     // A module-level `let`/`const`/`to`/`fn` binds a module cell (a global); a
@@ -101,7 +131,6 @@ fn module_level_lets_are_globals_referenced_by_module_name() {
     assert_eq!(globals(&r), vec!["x:Let", "y:Let"]);
     assert_eq!(refs(&r), vec!["x:M"]); // the `x` in `let y = x`
     assert_eq!(name_refs(&r), vec!["x"]);
-    assert!(r.deferred_captures.is_empty());
 }
 
 #[test]
@@ -171,17 +200,98 @@ fn block_argument_outer_reference_is_a_static_link() {
         refs(&r),
         vec!["each:M", "xs:L0", "show:M", "xs:B1.0", "y:L0"]
     );
-    assert!(r.deferred_captures.is_empty()); // a block is not a capture
+    // A block reaches an enclosing fn local by static link, not capture — the fn
+    // frame has no capture slots and `xs` is not cell-boxed.
+    assert_eq!(layout(&r), vec!["Block(y)", "Func(xs)", "ModuleTopLevel()"]);
 }
 
 #[test]
-fn cross_fn_reference_is_deferred_as_a_capture() {
-    // A nested `fn` referencing an enclosing fn's local crosses an `fn` boundary
-    // — a closure capture, deferred to M1.10c (unresolved for now).
+fn cross_fn_reference_resolves_as_a_capture() {
+    // A nested `fn` referencing an enclosing fn's local crosses an `fn` boundary —
+    // a closure capture (representation B): the enclosing slot is cell-boxed, the
+    // closure gets a trailing capture slot filled from the parent's slot (hops 0).
     let r = resolved("fn outer()\n  let x = 1\n  fn inner()\n    x\n  end\nend");
-    // The `x` reference inside `inner` is unresolved (deferred).
-    assert_eq!(refs(&r), vec!["x:?"]);
-    assert_eq!(r.deferred_captures.len(), 1);
+    // `x` inside `inner` resolves to inner's capture slot 0.
+    assert_eq!(refs(&r), vec!["x:L0"]);
+    assert_eq!(
+        layout(&r),
+        vec![
+            "Func(*x)[0<-0.0]", // inner: capture slot 0 for x, from the parent's slot 0
+            "Func(*x,inner)",   // outer: x is cell-boxed (captured); `inner` is not
+            "ModuleTopLevel()",
+        ]
+    );
+}
+
+#[test]
+fn param_default_referencing_an_enclosing_local_is_captured() {
+    // A param default evaluates at call time in the closure's activation (L§8.2),
+    // so a default that names an enclosing fn's local must be CAPTURED into the
+    // closure — not resolved against the enclosing frame. `inner`'s default `a = x`
+    // captures `x` from `outer` (a trailing capture slot after the param `a`).
+    let r = resolved("fn outer()\n  let x = 1\n  fn inner(a = x)\n    a\n  end\nend");
+    assert_eq!(refs(&r), vec!["x:L1", "a:L0"]); // default `x` → cap slot 1; body `a` → slot 0
+    assert_eq!(
+        layout(&r),
+        vec![
+            "Func(a,*x)[1<-0.0]", // inner: param a (slot 0), captured x (slot 1) from parent slot 0
+            "Func(*x,inner)",     // outer: x is cell-boxed (captured); inner is a local
+            "ModuleTopLevel()",
+        ]
+    );
+    // A default still cannot see a sibling param (resolved before params are in
+    // scope): `y = x` in `fn f(x, y = x)` is the enclosing/module `x`, not param x.
+    assert_eq!(
+        refs(&resolved("fn f(x, y = x)\n  y\nend")),
+        vec!["x:M", "y:L1"]
+    );
+}
+
+#[test]
+fn capture_inside_a_block_uses_static_link_hops() {
+    // A closure created INSIDE a block that captures an enclosing-fn local: the
+    // source is `hops > 0` up the block's defining chain (the ratified refinement).
+    // `helper` captures `x` (from `a`, 1 static-link hop up through the block) and
+    // `item` (the block's own local, 0 hops).
+    let src = "fn a()\n  let x = 1\n  each(xs) do (item)\n    fn helper()\n      \
+               x + item\n    end\n    run(helper)\n  end\nend";
+    let r = resolved(src);
+    // In helper: `x` → capture slot 0, `item` → capture slot 1.
+    assert_eq!(
+        refs(&r),
+        vec!["each:M", "xs:M", "x:L0", "item:L1", "run:M", "helper:L1"]
+    );
+    assert_eq!(
+        layout(&r),
+        vec![
+            "Func(*x,*item)[0<-1.0,1<-0.0]", // x from hops 1 (up to `a`); item from hops 0 (block)
+            "Block(*item,helper)",           // the block owns the cell-boxed `item`
+            "Func(*x)",                      // `a` owns the cell-boxed `x`
+            "ModuleTopLevel()",
+        ]
+    );
+}
+
+#[test]
+fn deep_capture_threads_through_intervening_closures() {
+    // closure-in-block-in-closure-in-block: `c` (deepest) captures `x` (from `a`).
+    // `b` never names `x` but gets a pass-through capture slot so `c` can reach it.
+    // Both hops are 1 (a block sits between each closure and its capture source).
+    let src = "fn a()\n  let x = 1\n  each(xs) do (i)\n    fn b()\n      \
+               each(ys) do (j)\n        fn c()\n          x\n        end\n        \
+               run(c)\n      end\n    end\n    run(b)\n  end\nend";
+    let r = resolved(src);
+    assert_eq!(
+        layout(&r),
+        vec![
+            "Func(*x)[0<-1.0]", // c: x from hops 1 up to b's capture slot
+            "Block(j,c)",       // block2 (inside b)
+            "Func(*x)[0<-1.0]", // b: pass-through x from hops 1 up to a's slot
+            "Block(i,b)",       // block1 (inside a)
+            "Func(*x)",         // a owns the cell-boxed x
+            "ModuleTopLevel()",
+        ]
+    );
 }
 
 #[test]

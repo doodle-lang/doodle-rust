@@ -7,8 +7,8 @@
 //! every body opens one). A construct-body scope shares the enclosing frame.
 
 use super::{
-    BodyKind, CallableInfo, ExitTarget, GlobalDecl, GlobalKind, NameRef, ParamInfo, Resolution,
-    Resolved, ResolvedModule,
+    BodyKind, CallableInfo, CaptureSource, ExitTarget, GlobalDecl, GlobalKind, NameRef, ParamInfo,
+    Resolution, Resolved, ResolvedModule,
 };
 use crate::ast::{Ast, Node, NodeId, Param};
 use crate::diag::Diagnostic;
@@ -18,6 +18,7 @@ use crate::span::{ModuleId, Span};
 mod dispatch;
 mod errors;
 mod exits;
+mod refs;
 mod tailcheck;
 mod voidcheck;
 
@@ -38,6 +39,21 @@ struct Frame {
     next_slot: u32,
     /// Slot → local name, accumulated as slots are assigned.
     slot_names: Vec<Box<str>>,
+    /// Per-slot cell-boxing flag (machine-design §7), parallel to `slot_names`:
+    /// `false` for a plain local (flipped `true` if a nested `fn` captures it),
+    /// `true` for a capture slot.
+    cell_boxed: Vec<bool>,
+    /// Cells this frame captures (only an `fn` frame does). `origin` keys dedup
+    /// during the walk; `source` is the emitted [`CaptureSource`].
+    captures: Vec<FrameCapture>,
+}
+
+/// A capture recorded while walking an `fn` frame (capture representation B).
+struct FrameCapture {
+    /// The origin cell as `(owner frame index, owner slot)` — dedup key.
+    origin: (usize, u16),
+    /// The emitted capture-source entry.
+    source: CaptureSource,
 }
 
 #[derive(PartialEq, Eq)]
@@ -71,7 +87,6 @@ pub(super) struct Resolver<'a> {
     name_refs: Vec<NameRef>,
     stmt_spans: Vec<(Span, NodeId)>,
     diagnostics: Vec<Diagnostic>,
-    deferred_captures: Vec<NodeId>,
     /// Assignment targets that resolved to a module name (not a local): their
     /// assignability is checked in a post-pass, once `globals` is complete (a
     /// module-level `let` may be declared after the assignment).
@@ -106,7 +121,6 @@ impl<'a> Resolver<'a> {
             name_refs: Vec::new(),
             stmt_spans: Vec::new(),
             diagnostics: Vec::new(),
-            deferred_captures: Vec::new(),
             pending_assigns: Vec::new(),
             selective_imports: Vec::new(),
             loops_with_break: Vec::new(),
@@ -131,7 +145,6 @@ impl<'a> Resolver<'a> {
             name_refs,
             stmt_spans,
             diagnostics,
-            deferred_captures,
             ..
         } = r;
         Resolved {
@@ -147,7 +160,6 @@ impl<'a> Resolver<'a> {
                 exit_targets,
             },
             diagnostics,
-            deferred_captures,
         }
     }
 
@@ -162,6 +174,8 @@ impl<'a> Resolver<'a> {
             kind: FrameKind::Module,
             next_slot: 0,
             slot_names: Vec::new(),
+            cell_boxed: Vec::new(),
+            captures: Vec::new(),
         });
         self.scopes.push(Scope {
             frame: 0,
@@ -177,6 +191,8 @@ impl<'a> Resolver<'a> {
             params: Vec::new(),
             slot_count: slot_count(&frame),
             slot_names: frame.slot_names,
+            cell_boxed: frame.cell_boxed,
+            captures: frame.captures.into_iter().map(|c| c.source).collect(),
             doc,
         });
     }
@@ -199,9 +215,27 @@ impl<'a> Resolver<'a> {
         body: NodeId,
         doc: Option<Span>,
     ) {
-        // Param defaults evaluate "in the declaration's lexical scope" (L§8.2) —
-        // the *enclosing* scope — so resolve them BEFORE opening the callee frame,
-        // where the params would shadow. (So a default cannot see a sibling param.)
+        let saved = self.module_direct;
+        self.module_direct = false;
+        self.frames.push(Frame {
+            kind: FrameKind::Fn,
+            next_slot: 0,
+            slot_names: Vec::new(),
+            cell_boxed: Vec::new(),
+            captures: Vec::new(),
+        });
+        self.scopes.push(Scope {
+            frame: self.frames.len() - 1,
+            bindings: Vec::new(),
+        });
+        self.ctrl.push(Ctrl::Callable); // a `return` target; a break/continue barrier
+        // Allocate param slots (0..n) in this frame, but bind their names in scope
+        // only AFTER resolving defaults: a default must not see a sibling param
+        // (L§8.2 — the *declaration's* lexical scope), yet it must resolve with THIS
+        // frame current so a reference to an *enclosing* local is captured into this
+        // closure (the default is evaluated at call time in the closure's activation,
+        // not in the enclosing frame).
+        let param_infos = self.alloc_param_slots(params);
         for p in params {
             if let Param::Ordinary {
                 default: Some(d), ..
@@ -210,19 +244,7 @@ impl<'a> Resolver<'a> {
                 self.resolve(*d);
             }
         }
-        let saved = self.module_direct;
-        self.module_direct = false;
-        self.frames.push(Frame {
-            kind: FrameKind::Fn,
-            next_slot: 0,
-            slot_names: Vec::new(),
-        });
-        self.scopes.push(Scope {
-            frame: self.frames.len() - 1,
-            bindings: Vec::new(),
-        });
-        self.ctrl.push(Ctrl::Callable); // a `return` target; a break/continue barrier
-        let param_infos = self.bind_params(params);
+        self.scope_params(&param_infos);
         self.resolve_block_stmts(body);
         self.ctrl.pop();
         let frame = self.frames.pop().expect("callable frame");
@@ -235,6 +257,8 @@ impl<'a> Resolver<'a> {
             params: param_infos,
             slot_count: slot_count(&frame),
             slot_names: frame.slot_names,
+            cell_boxed: frame.cell_boxed,
+            captures: frame.captures.into_iter().map(|c| c.source).collect(),
             doc,
         });
     }
@@ -247,6 +271,8 @@ impl<'a> Resolver<'a> {
             kind: FrameKind::Block,
             next_slot: 0,
             slot_names: Vec::new(),
+            cell_boxed: Vec::new(),
+            captures: Vec::new(),
         });
         self.scopes.push(Scope {
             frame: self.frames.len() - 1,
@@ -275,38 +301,40 @@ impl<'a> Resolver<'a> {
             params: param_infos,
             slot_count: slot_count(&frame),
             slot_names: frame.slot_names,
+            cell_boxed: frame.cell_boxed,
+            captures: frame.captures.into_iter().map(|c| c.source).collect(),
             doc: None,
         });
     }
 
-    /// Binds a callable's parameters to slots (in order). Defaults are resolved by
-    /// the caller [`resolve_callable`](Self::resolve_callable) in the enclosing
-    /// scope *before* the frame opens (L§8.2), so this only assigns slots.
-    fn bind_params(&mut self, params: &[Param]) -> Vec<ParamInfo> {
+    /// Allocates a slot (frame side only) per parameter, in order, returning the
+    /// param table. Names are bound in scope later by [`scope_params`], after
+    /// defaults resolve (L§8.2), so the param slots are `0..n` while a default can
+    /// neither see a sibling param nor resolve an enclosing local against this
+    /// frame directly (it captures instead).
+    fn alloc_param_slots(&mut self, params: &[Param]) -> Vec<ParamInfo> {
         let mut infos = Vec::new();
         for p in params {
-            match p {
-                Param::Ordinary { name, default } => {
-                    let slot = self.declare_local(name, GlobalKind::Let);
-                    infos.push(ParamInfo {
-                        name: name.clone(),
-                        slot,
-                        is_block: false,
-                        has_default: default.is_some(),
-                    });
-                }
-                Param::Block { name } => {
-                    let slot = self.declare_local(name, GlobalKind::Let);
-                    infos.push(ParamInfo {
-                        name: name.clone(),
-                        slot,
-                        is_block: true,
-                        has_default: false,
-                    });
-                }
-            }
+            let (name, is_block, has_default) = match p {
+                Param::Ordinary { name, default } => (name, false, default.is_some()),
+                Param::Block { name } => (name, true, false),
+            };
+            let slot = self.alloc_frame_slot(name);
+            infos.push(ParamInfo {
+                name: name.clone(),
+                slot,
+                is_block,
+                has_default,
+            });
         }
         infos
+    }
+
+    /// Binds each parameter's name → slot in the current scope (after defaults).
+    fn scope_params(&mut self, param_infos: &[ParamInfo]) {
+        for pi in param_infos {
+            self.bind_in_scope(&pi.name, pi.slot, GlobalKind::Let);
+        }
     }
 
     /// Resolves a construct-body [`Node::Block`] in a fresh scope (same frame).
@@ -382,13 +410,29 @@ impl<'a> Resolver<'a> {
             .any(|b| &*b.name == name)
     }
 
-    /// Assigns the next slot in the current frame to `name`, with declaration
-    /// `kind` (which decides assignability — S-6 rule 2a).
+    /// Assigns the next slot in the current frame to `name` and binds it in the
+    /// current scope, with declaration `kind` (which decides assignability — S-6
+    /// rule 2a). For params, whose slot and scope binding are staged separately
+    /// (L§8.2), see [`alloc_frame_slot`] + [`bind_in_scope`].
     pub(super) fn declare_local(&mut self, name: &str, kind: GlobalKind) -> u16 {
+        let slot = self.alloc_frame_slot(name);
+        self.bind_in_scope(name, slot, kind);
+        slot
+    }
+
+    /// Allocates the next slot in the current frame for `name` — frame side only
+    /// (name + a `cell_boxed = false` entry), no scope binding.
+    fn alloc_frame_slot(&mut self, name: &str) -> u16 {
         let frame = self.frames.last_mut().expect("a frame is open");
         let slot = u16::try_from(frame.next_slot).expect("frame exceeds the u16 slot space");
         frame.next_slot += 1;
         frame.slot_names.push(name.into());
+        frame.cell_boxed.push(false); // a plain local; flipped true if captured
+        slot
+    }
+
+    /// Binds `name` → `slot` (declaration `kind`) in the current scope.
+    fn bind_in_scope(&mut self, name: &str, slot: u16, kind: GlobalKind) {
         self.scopes
             .last_mut()
             .expect("a scope is open")
@@ -398,38 +442,6 @@ impl<'a> Resolver<'a> {
                 slot,
                 kind,
             });
-        slot
-    }
-
-    /// Resolves a name *reference* at `node`: a local slot, a block static link, a
-    /// deferred capture (cross-`fn`), or a free module name.
-    fn resolve_ref(&mut self, node: NodeId, name: &str) {
-        match self.lookup(name) {
-            Some((frame, slot, _)) => {
-                let cur = self.frames.len() - 1;
-                if frame == cur {
-                    self.set_res(node, Resolution::LocalSlot(slot));
-                } else if frame >= self.home_fn(cur) {
-                    let hops = u16::try_from(cur - frame).expect("block nesting exceeds u16");
-                    self.set_res(node, Resolution::BlockOuter { hops, slot });
-                } else {
-                    // Crosses an `fn` boundary → a closure capture; deferred to
-                    // M1.10c pending the capture-representation ruling.
-                    self.deferred_captures.push(node);
-                }
-            }
-            None => self.record_name_ref(node, name),
-        }
-    }
-
-    /// Records a free-name reference (resolves to a module cell lazily at load).
-    fn record_name_ref(&mut self, node: NodeId, name: &str) {
-        let idx = u32::try_from(self.name_refs.len()).expect("name_refs exceeds u32");
-        self.name_refs.push(NameRef {
-            name: name.into(),
-            site: node,
-        });
-        self.set_res(node, Resolution::ModuleName(idx));
     }
 
     /// The innermost enclosing `fn`/module frame at or below `i` (blocks belong to
