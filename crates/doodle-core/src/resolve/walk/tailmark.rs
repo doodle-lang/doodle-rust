@@ -1,14 +1,16 @@
 //! Tail-call marking (M1.11): a post-pass over each callable/block body marking
 //! every `Call` node in **tail position** (L§8.7, machine-design §11), so the M2a
-//! machine can reuse the frame instead of growing the control stack.
+//! machine can reuse the frame instead of growing the control stack — when the
+//! callee's kind matches (that apply-time check is M2a's; marking here is
+//! kind-agnostic, S-55).
 //!
-//! A call is tail iff its value is the enclosing callable's result with **no
-//! pending work**, it is not inside a `with` body (a dynamic binding must be
-//! restored on exit) or a `try` body/handler (a handler must be unwound), and it
+//! A call is tail iff its completion is the enclosing callable's completion (an
+//! `fn`'s value, a `to`'s final action — procedures have tail positions too, S-55)
+//! with **no pending work**, it is not inside a `with` body (a dynamic binding must
+//! be restored on exit) or a `try` body/handler (a handler must be unwound), and it
 //! passes **no block argument** (S-45 — a `do … end` block references the caller's
 //! frame, so that frame cannot be reused). Only `to`/`fn`/`do` bodies have tail
-//! positions; the module top level is not a callable (no enclosing function whose
-//! result a tail call would be), so it is skipped.
+//! positions; the module top level is not a callable, so it is skipped.
 //!
 //! Fall-through is not the only source of a tail position: a `return expr`
 //! delivers `expr` as the callable's result *wherever the `return` sits* (it

@@ -64,11 +64,18 @@ pub struct ResolvedModule {
     /// misplaced exit is `None` and has a diagnostic instead.
     pub exit_targets: Vec<Option<ExitTarget>>,
     /// Per-AST-node tail mark, indexed by [`NodeId`]: `true` at each `Call` node in
-    /// **tail position** (L§8.7, machine-design §11) — its value is the enclosing
-    /// callable's result with no pending work, it is not inside a `with`/`try`
-    /// body, and it passes no block argument (S-45). Parallel to [`resolutions`];
-    /// the M2a machine reads it O(1) when about to execute a call, to reuse the
-    /// current frame rather than grow the control stack. `false` everywhere else.
+    /// **tail position** (L§8.7, machine-design §11) — its completion is the
+    /// enclosing callable's completion (an `fn`'s value, a `to`'s final action —
+    /// procedures have tail positions too, S-55) with no pending work, it is not
+    /// inside a `with`/`try` body, and it passes no block argument (S-45). Parallel
+    /// to [`resolutions`]; `false` everywhere else.
+    ///
+    /// Marking is **positional** — it does not depend on the callee's runtime kind,
+    /// which is unknown here. It is necessary but not sufficient for frame reuse:
+    /// the M2a machine reads this O(1) at a call and reuses the current frame only
+    /// when the callee's kind matches the frame's original callable kind (`to`↔`to`,
+    /// `fn`↔`fn`; a block frame reuses for either — S-55); a mismatched marked-tail
+    /// call runs as an ordinary call.
     ///
     /// [`resolutions`]: Self::resolutions
     pub tail_calls: Vec<bool>,
