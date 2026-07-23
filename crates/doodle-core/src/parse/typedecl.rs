@@ -16,7 +16,8 @@ impl super::Parser<'_> {
     /// A record declaration `[ref] record Name with f1, f2, … [doc] end` (L§9.1).
     pub(super) fn record_decl(&mut self) -> NodeId {
         self.require_module_level("record");
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         let is_ref = matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::Ref)));
         if is_ref {
             self.advance(); // `ref`
@@ -26,7 +27,7 @@ impl super::Parser<'_> {
         self.expect_keyword(Keyword::With, "expected `with` before the field list");
         let fields = self.field_list();
         let doc = self.record_body();
-        let end = self.expect_end_span("record");
+        let end = self.expect_end_span("record", open);
         self.push(
             Node::Record {
                 is_ref,
@@ -74,7 +75,8 @@ impl super::Parser<'_> {
     /// (L§10.1).
     pub(super) fn protocol_decl(&mut self) -> NodeId {
         self.require_module_level("protocol");
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `protocol`
         let (name, _) = self.expect_name("expected a protocol name");
         let extends = if matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::Extends))) {
@@ -98,7 +100,7 @@ impl super::Parser<'_> {
             };
             members.push(self.proto_member(kind));
         }
-        let end = self.close_protocol();
+        let end = self.close_protocol(open);
         self.push(
             Node::Protocol {
                 name,
@@ -114,14 +116,14 @@ impl super::Parser<'_> {
     /// missing `end` the message names the member-`end` requirement, since a
     /// bare member signature (missing its own `end`, S-52) silently eats this
     /// `end` and closes the protocol early.
-    fn close_protocol(&mut self) -> u32 {
+    fn close_protocol(&mut self, open: Span) -> u32 {
         let span = self.peek_span();
         if matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::End))) {
             self.advance();
             span.end
         } else {
             self.error(
-                span,
+                open,
                 "expected `end` to close this `protocol` — each `to`/`fn` member \
                  needs its own `end` too (an empty body is a required member)",
             );
@@ -135,11 +137,12 @@ impl super::Parser<'_> {
     /// docstring (a signature has no result), so it is captured raw regardless of
     /// `to`/`fn`.
     fn proto_member(&mut self, kind: CallableKind) -> ProtoMember {
+        let open = self.peek_span();
         self.advance(); // `to` / `fn`
         let (name, _) = self.expect_name("expected a member name");
         let params = self.param_list();
         let (block, doc) = self.body_with_doc(is_end_terminator, false);
-        self.expect_end_span("protocol member");
+        self.expect_end_span("protocol member", open);
         let body = if self.block_is_empty(block) {
             None
         } else {
@@ -163,7 +166,8 @@ impl super::Parser<'_> {
     /// `to`/`fn` declarations registering `(T, P member) → callable`.
     pub(super) fn implement_decl(&mut self) -> NodeId {
         self.require_module_level("implement");
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `implement`
         let (protocol, _) = self.expect_name("expected a protocol name after `implement`");
         self.expect_keyword(Keyword::For, "expected `for` in this `implement`");
@@ -178,7 +182,7 @@ impl super::Parser<'_> {
             };
             methods.push(self.callable_decl(kind));
         }
-        let end = self.expect_end_span("implement");
+        let end = self.expect_end_span("implement", open);
         self.push(
             Node::Implement {
                 protocol,

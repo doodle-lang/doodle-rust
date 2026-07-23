@@ -30,22 +30,28 @@ impl super::Parser<'_> {
     }
 
     fn index_access(&mut self, object: NodeId) -> NodeId {
+        let open = self.peek_span();
         self.advance(); // `[`
         // The `]` delimits any inner block, so the index parses with block
         // arguments enabled even inside a construct header (S-4, §6.4).
         let index = self.delimited(|p| p.expr(0));
-        let end = self.expect_close(TokenKind::RBracket, "expected `]` to close this index");
+        let end = self.expect_close(
+            TokenKind::RBracket,
+            "expected `]` to close this index",
+            open,
+        );
         let span = Span::new(self.node_start(object), end);
         self.push(Node::Index { object, index }, span)
     }
 
     fn call(&mut self, callee: NodeId) -> NodeId {
+        let open = self.peek_span();
         self.advance(); // `(`
         // The `)` delimits any block passed inside the argument list, so
         // arguments parse with block arguments enabled even inside a construct
         // header (S-4, §6.4).
         let args = self.delimited(Self::call_args);
-        let mut end = self.expect_close(TokenKind::RParen, "expected `)` to close this call");
+        let mut end = self.expect_close(TokenKind::RParen, "expected `)` to close this call", open);
         // A trailing `do … end` is a block argument to this call (§6.4/§8.5),
         // unless we are in a construct header (no-trailing-block mode, S-4),
         // where the `do` opens the construct's body instead.
@@ -109,6 +115,7 @@ impl super::Parser<'_> {
     /// (§6.4/§8.5); the cursor is at `do`. Returns the block and the offset just
     /// past its closing `end`.
     fn block_arg(&mut self) -> (BlockArg, u32) {
+        let open = self.peek_span();
         self.advance(); // `do`
         let params = if matches!(self.peek_kind(), Some(TokenKind::LParen)) {
             self.block_params()
@@ -116,13 +123,14 @@ impl super::Parser<'_> {
             Vec::new()
         };
         let body = self.block(is_end_terminator);
-        let end = self.expect_end_span("do");
+        let end = self.expect_end_span("do", open);
         (BlockArg { params, body }, end)
     }
 
     /// Parses a block parameter list `'(' ( IDENT ( ',' IDENT )* )? ')'` (§8.5) —
     /// plain names, no defaults; the cursor is at `(`.
     fn block_params(&mut self) -> Vec<Box<str>> {
+        let open = self.peek_span();
         self.advance(); // `(`
         let mut params = Vec::new();
         loop {
@@ -140,6 +148,7 @@ impl super::Parser<'_> {
         self.expect_close(
             TokenKind::RParen,
             "expected `)` to close the block parameters",
+            open,
         );
         params
     }
@@ -175,15 +184,17 @@ impl super::Parser<'_> {
         }
     }
 
-    /// Consumes a `kind` token, returning its end offset; or reports `message`
-    /// and returns the current start offset.
-    pub(super) fn expect_close(&mut self, kind: TokenKind, message: &str) -> u32 {
+    /// Consumes the closing delimiter `kind` of a bracketed form opened at `open`,
+    /// returning its end offset; on a missing closer reports `message` at `open` —
+    /// the opening delimiter, so the caret lands on the unclosed bracket rather
+    /// than the blank line at the unexpected token — and returns its start offset.
+    pub(super) fn expect_close(&mut self, kind: TokenKind, message: &str, open: Span) -> u32 {
         let span = self.peek_span();
         if self.peek_kind() == Some(kind) {
             self.advance();
             span.end
         } else {
-            self.error(span, message);
+            self.error(open, message);
             span.start
         }
     }

@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[malformed-escape]: `\x` needs exactly two hex digits, like `\x1B`
+  --> 45-short-hex-escape-string.doodle:1:7
+1 | show("\xA")
+  |       ^^^

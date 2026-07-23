@@ -6,3 +6,7 @@ error[duplicate-declaration]: `a` is already declared in this scope
   --> 26-duplicate-declaration.doodle:2:1
 2 | let a = 2
   | ^^^^^^^^^
+note: the first `a` is declared here
+  --> 26-duplicate-declaration.doodle:1:1
+1 | let a = 1
+  | ---------

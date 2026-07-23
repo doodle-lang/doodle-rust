@@ -3,6 +3,6 @@ source: crates/doodle-core/tests/broken_syntax.rs
 expression: "render_diagnostics(&diagnostics, &view)"
 ---
 error[syntax-error]: expected `)` to close this call
-  --> 16-unbalanced-paren.doodle:2:1
-2 | 
-  | ^
+  --> 16-unbalanced-paren.doodle:1:5
+1 | show((1 + 2)
+  |     ^

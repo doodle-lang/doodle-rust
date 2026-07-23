@@ -17,7 +17,8 @@ impl super::Parser<'_> {
     /// A named declaration `to name(params) body end` or `fn name(params) body
     /// end` (L§8.1). The docstring is captured in M1.8c.
     pub(super) fn callable_decl(&mut self, kind: CallableKind) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `to` / `fn`
         let (name, _) = self.expect_name(match kind {
             CallableKind::Proc => "expected a name after `to`",
@@ -25,7 +26,7 @@ impl super::Parser<'_> {
         });
         let params = self.param_list();
         let (body, doc) = self.body_with_doc(is_end_terminator, kind == CallableKind::Func);
-        let end = self.expect_end_span(kind_word(kind));
+        let end = self.expect_end_span(kind_word(kind), open);
         self.push(
             Node::Callable {
                 kind,
@@ -41,13 +42,14 @@ impl super::Parser<'_> {
     /// An anonymous function `fn(params) body end` (L§6.10) — a first-class
     /// function value in expression position.
     pub(super) fn anon_fn(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `fn`
         let params = self.param_list();
         // An anonymous function is value-producing (L§6.10), so a lone leading
         // string is its result, not a docstring (S-27).
         let (body, doc) = self.body_with_doc(is_end_terminator, true);
-        let end = self.expect_end_span("fn");
+        let end = self.expect_end_span("fn", open);
         self.push(
             Node::Callable {
                 kind: CallableKind::Func,
@@ -69,6 +71,7 @@ impl super::Parser<'_> {
             self.error(span, "expected `(` to begin the parameter list");
             return Vec::new();
         }
+        let open = self.peek_span();
         self.advance(); // `(`
         let mut params = Vec::new();
         let mut saw_block = false;
@@ -95,6 +98,7 @@ impl super::Parser<'_> {
         self.expect_close(
             TokenKind::RParen,
             "expected `)` to close the parameter list",
+            open,
         );
         params
     }

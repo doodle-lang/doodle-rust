@@ -127,12 +127,24 @@ impl Resolver<'_> {
         );
     }
 
-    /// A duplicate binding in one scope (L§5.2).
-    pub(super) fn duplicate_error(&mut self, node: NodeId, name: &str) {
-        self.error(
+    /// A duplicate binding in one scope (L§5.2), with a note pointing at the
+    /// original declaration (`first`) when it is known (rubric (b): "the original
+    /// is here"). A same-scope *local* duplicate has no recorded decl node yet, so
+    /// `first` is `None` there.
+    pub(super) fn duplicate_error(&mut self, node: NodeId, name: &str, first: Option<NodeId>) {
+        let span = self.ast.span(node);
+        let mut diag = crate::diag::Diagnostic::error(
             DiagnosticCode::DuplicateDeclaration,
-            node,
-            &format!("`{name}` is already declared in this scope"),
+            self.module,
+            span,
+            format!("`{name}` is already declared in this scope"),
         );
+        if let Some(first) = first {
+            diag = diag.with_note(crate::diag::Note {
+                message: format!("the first `{name}` is declared here"),
+                span: Some(self.ast.span(first)),
+            });
+        }
+        self.diagnostics.push(diag);
     }
 }

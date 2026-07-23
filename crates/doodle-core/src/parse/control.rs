@@ -20,7 +20,8 @@ impl super::Parser<'_> {
     /// An `if` (L§6.8/§7.5): `if cond then body (else if cond then body)*
     /// (else body)? end`, with `else if` flattened into the arm list.
     pub(super) fn if_expr(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `if`
         let mut arms = Vec::new();
         let else_body = loop {
@@ -42,20 +43,21 @@ impl super::Parser<'_> {
             }
             break Some(self.block(is_end_terminator));
         };
-        let end = self.expect_end_span("if");
+        let end = self.expect_end_span("if", open);
         self.push(Node::If { arms, else_body }, Span::new(start, end))
     }
 
     /// A `try` (L§6.9/§12.2): `try body rescue name handler end`.
     pub(super) fn try_expr(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `try`
         let body = self.block(is_rescue);
         self.expect_rescue();
         let (rescue_name, _) =
             self.expect_name("expected a name for the caught error after `rescue`");
         let rescue_body = self.block(is_end_terminator);
-        let end = self.expect_end_span("try");
+        let end = self.expect_end_span("try", open);
         self.push(
             Node::Try {
                 body,
@@ -68,35 +70,38 @@ impl super::Parser<'_> {
 
     /// A `while` loop (L§7.6): `while cond do body end`.
     pub(super) fn while_stmt(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `while`
         let cond = self.header_expr();
         self.expect_do("while");
         let body = self.block(is_end_terminator);
-        let end = self.expect_end_span("while");
+        let end = self.expect_end_span("while", open);
         self.push(Node::While { cond, body }, Span::new(start, end))
     }
 
     /// A `loop` (L§7.7): `loop do body end`.
     pub(super) fn loop_stmt(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `loop`
         self.expect_do("loop");
         let body = self.block(is_end_terminator);
-        let end = self.expect_end_span("loop");
+        let end = self.expect_end_span("loop", open);
         self.push(Node::Loop { body }, Span::new(start, end))
     }
 
     /// A `with` (L§5.5): `with name = value do body end`.
     pub(super) fn with_stmt(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `with`
         let (name, _) = self.expect_name("expected a dynamic-parameter name after `with`");
         self.expect_eq("with");
         let value = self.header_expr();
         self.expect_do("with");
         let body = self.block(is_end_terminator);
-        let end = self.expect_end_span("with");
+        let end = self.expect_end_span("with", open);
         self.push(Node::With { name, value, body }, Span::new(start, end))
     }
 

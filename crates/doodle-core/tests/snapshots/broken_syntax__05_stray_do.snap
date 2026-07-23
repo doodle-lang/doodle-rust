@@ -3,6 +3,6 @@ source: crates/doodle-core/tests/broken_syntax.rs
 expression: "render_diagnostics(&diagnostics, &view)"
 ---
 error[syntax-error]: expected `end` to close this `to`
-  --> 05-stray-do.doodle:4:1
-4 | 
-  | ^
+  --> 05-stray-do.doodle:1:1
+1 | to main()
+  | ^^

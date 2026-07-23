@@ -327,7 +327,7 @@ impl super::Parser<'_> {
         );
         self.advance(); // `do`
         self.block(is_end_terminator);
-        let end = self.expect_end_span("do");
+        let end = self.expect_end_span("do", span);
         self.push(Node::Error, Span::new(span.start, end))
     }
 
@@ -417,15 +417,17 @@ impl super::Parser<'_> {
         }
     }
 
-    /// Consumes the closing `end` of a construct, returning its end offset; on a
-    /// missing `end` reports against `what` and returns the current start offset.
-    pub(super) fn expect_end_span(&mut self, what: &str) -> u32 {
+    /// Consumes the closing `end` of a construct opened at `open`, returning its
+    /// end offset; on a missing `end` reports at `open` — the construct's opener,
+    /// so the caret lands on the thing that needs closing rather than the blank
+    /// line at the unexpected token — and returns the current start offset.
+    pub(super) fn expect_end_span(&mut self, what: &str, open: Span) -> u32 {
         let span = self.peek_span();
         if matches!(self.peek_kind(), Some(TokenKind::Keyword(Keyword::End))) {
             self.advance();
             span.end
         } else {
-            self.error(span, &format!("expected `end` to close this `{what}`"));
+            self.error(open, &format!("expected `end` to close this `{what}`"));
             span.start
         }
     }

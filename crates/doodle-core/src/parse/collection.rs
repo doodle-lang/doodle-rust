@@ -10,7 +10,8 @@ use crate::span::Span;
 impl super::Parser<'_> {
     /// A list literal `[ … ]` — the cursor is at `[`.
     pub(super) fn list_lit(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `[`
         // The `]` delimits any inner block, so elements parse with block
         // arguments enabled even inside a construct header (S-4, §6.4).
@@ -24,13 +25,14 @@ impl super::Parser<'_> {
             }
             elems
         });
-        let end = self.expect_close(TokenKind::RBracket, "expected `]` to close this list");
+        let end = self.expect_close(TokenKind::RBracket, "expected `]` to close this list", open);
         self.push(Node::List(elems), Span::new(start, end))
     }
 
     /// A dict literal `{ … }` — the cursor is at `{`.
     pub(super) fn dict_lit(&mut self) -> NodeId {
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `{`
         // The `}` delimits any inner block, so entries parse with block
         // arguments enabled even inside a construct header (S-4, §6.4).
@@ -47,7 +49,7 @@ impl super::Parser<'_> {
             }
             entries
         });
-        let end = self.expect_close(TokenKind::RBrace, "expected `}` to close this dict");
+        let end = self.expect_close(TokenKind::RBrace, "expected `}` to close this dict", open);
         self.push(Node::Dict(entries), Span::new(start, end))
     }
 

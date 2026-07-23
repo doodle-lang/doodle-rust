@@ -316,14 +316,16 @@ impl<'a> Parser<'a> {
 
     /// Parenthesized grouping (transparent — the parens only set precedence).
     fn grouping(&mut self) -> NodeId {
+        let open = self.peek_span();
         self.advance(); // `(`
         let inner = self.delimited(|p| p.expr(0));
-        if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
-            self.advance();
-        } else {
-            let span = self.peek_span();
-            self.error(span, "expected a `)` to close this group");
-        }
+        // Via the shared closer helper so a missing `)` points at the opening `(`
+        // (the caret lands on the unclosed group, not the unexpected token).
+        self.expect_close(
+            TokenKind::RParen,
+            "expected a `)` to close this group",
+            open,
+        );
         inner
     }
 

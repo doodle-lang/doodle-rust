@@ -47,6 +47,7 @@ impl super::Parser<'_> {
                 }
                 Some(TokenKind::InterpStart) => {
                     flush_text(&mut parts, &mut acc);
+                    let open = self.peek_span();
                     self.advance();
                     // An empty interpolation was already diagnosed by the lexer;
                     // skip it rather than pile on an "expected expression".
@@ -57,8 +58,8 @@ impl super::Parser<'_> {
                         if matches!(self.peek_kind(), Some(TokenKind::InterpEnd)) {
                             self.advance();
                         } else {
-                            let sp = self.peek_span();
-                            self.error(sp, "expected `}` to close this interpolation");
+                            // Point at the opening `{`, not the unexpected token.
+                            self.error(open, "expected `}` to close this interpolation");
                         }
                         parts.push(StrPart::Interp(expr));
                     }

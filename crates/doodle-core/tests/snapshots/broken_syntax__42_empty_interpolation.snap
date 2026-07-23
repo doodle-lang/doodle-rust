@@ -1,0 +1,8 @@
+---
+source: crates/doodle-core/tests/broken_syntax.rs
+expression: "render_diagnostics(&diagnostics, &view)"
+---
+error[empty-interpolation]: this interpolation is empty — put an expression here, or `{{` for a literal brace
+  --> 42-empty-interpolation.doodle:1:14
+1 | show("score: {}")
+  |              ^^

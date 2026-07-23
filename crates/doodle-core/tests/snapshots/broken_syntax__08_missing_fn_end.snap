@@ -3,6 +3,6 @@ source: crates/doodle-core/tests/broken_syntax.rs
 expression: "render_diagnostics(&diagnostics, &view)"
 ---
 error[syntax-error]: expected `end` to close this `fn`
-  --> 08-missing-fn-end.doodle:3:1
-3 | 
-  | ^
+  --> 08-missing-fn-end.doodle:1:1
+1 | fn double(n)
+  | ^^

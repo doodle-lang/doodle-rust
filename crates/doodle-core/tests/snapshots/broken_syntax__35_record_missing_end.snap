@@ -3,6 +3,6 @@ source: crates/doodle-core/tests/broken_syntax.rs
 expression: "render_diagnostics(&diagnostics, &view)"
 ---
 error[syntax-error]: expected `end` to close this `record`
-  --> 35-record-missing-end.doodle:2:1
-2 | 
-  | ^
+  --> 35-record-missing-end.doodle:1:1
+1 | record Point with x, y
+  | ^^^^^^

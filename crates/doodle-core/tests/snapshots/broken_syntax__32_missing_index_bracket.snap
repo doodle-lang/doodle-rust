@@ -3,6 +3,6 @@ source: crates/doodle-core/tests/broken_syntax.rs
 expression: "render_diagnostics(&diagnostics, &view)"
 ---
 error[syntax-error]: expected `]` to close this index
-  --> 32-missing-index-bracket.doodle:2:1
-2 | 
-  | ^
+  --> 32-missing-index-bracket.doodle:1:11
+1 | let y = xs[0
+  |           ^

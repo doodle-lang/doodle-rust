@@ -14,11 +14,12 @@ impl super::Parser<'_> {
     /// module-level (nested modules' contents are still module-level).
     pub(super) fn module_decl(&mut self) -> NodeId {
         self.require_module_level("module");
-        let start = self.peek_span().start;
+        let open = self.peek_span();
+        let start = open.start;
         self.advance(); // `module`
         let (name, _) = self.expect_name("expected a module name after `module`");
         let (body, doc) = self.module_body(is_end_terminator);
-        let end = self.expect_end_span("module");
+        let end = self.expect_end_span("module", open);
         self.push(Node::ModuleDecl { name, body, doc }, Span::new(start, end))
     }
 

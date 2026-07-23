@@ -95,8 +95,13 @@ impl super::Resolver<'_> {
     /// are not checked here — params have no node span; deferred.)
     pub(super) fn declare_binding(&mut self, decl: NodeId, name: &str, kind: GlobalKind) {
         if self.module_direct {
-            if self.globals.iter().any(|g| &*g.name == name) {
-                self.duplicate_error(decl, name);
+            let first = self
+                .globals
+                .iter()
+                .find(|g| &*g.name == name)
+                .map(|g| g.decl);
+            if first.is_some() {
+                self.duplicate_error(decl, name, first);
             }
             self.globals.push(GlobalDecl {
                 name: name.into(),
@@ -105,7 +110,7 @@ impl super::Resolver<'_> {
             });
         } else {
             if self.scope_has(name) {
-                self.duplicate_error(decl, name);
+                self.duplicate_error(decl, name, None);
             } else {
                 self.check_shadowing(decl, name);
             }
