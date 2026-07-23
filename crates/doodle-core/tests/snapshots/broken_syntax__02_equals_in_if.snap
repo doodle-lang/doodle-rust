@@ -6,23 +6,3 @@ error[syntax-error]: expected `then` after the `if` condition
   --> 02-equals-in-if.doodle:2:8
 2 |   if x = 3 then
   |        ^
-
-error[syntax-error]: expected an expression
-  --> 02-equals-in-if.doodle:2:8
-2 |   if x = 3 then
-  |        ^
-
-error[syntax-error]: expected a statement separator
-  --> 02-equals-in-if.doodle:2:10
-2 |   if x = 3 then
-  |          ^
-
-error[syntax-error]: expected a statement separator
-  --> 02-equals-in-if.doodle:2:12
-2 |   if x = 3 then
-  |            ^^^^
-
-error[syntax-error]: expected an expression
-  --> 02-equals-in-if.doodle:2:12
-2 |   if x = 3 then
-  |            ^^^^

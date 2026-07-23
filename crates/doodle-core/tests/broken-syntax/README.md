@@ -32,11 +32,26 @@ opening token; the duplicate-declaration note points at the first declaration),
 moving `01`/`08`/`16`/`32`/`35` to PASS; rows 42–45 joined the table (**45
 programs**). Every diagnostic now points at the correct span.
 
-Distribution: **30 PASS · 7 NEEDS-WORK · 8 FAIL** (45 programs, post-span-fix).
-The recently-written resolver diagnostics are largely rubric-quality; the
-remaining gaps/failures cluster in the parser's token-level error paths (cascades,
-jargon — spun off). Two adversarial read-only reviews hardened this table (see
-"Review folds").
+Distribution: **30 PASS · 13 NEEDS-WORK · 2 FAIL** (45 programs, after the span
+fixes AND cascade suppression — see "Post-sign-off improvements"). The remaining
+two FAILs are `05` (stray-`do` misdiagnosis → M1.9b) and `15` (misplaced `else`);
+the NEEDS-WORK rows are mostly "single clear message, but a sharper `did you
+mean …?` is still spun off." Two adversarial read-only reviews hardened this table
+(see "Review folds").
+
+## Post-sign-off improvements (spun-off items, since landed)
+
+- **Cascade suppression (parser panic-mode recovery).** After the first syntax
+  error in a statement, follow-on *parser* errors are suppressed until the next
+  separator, so one mistake yields one message (lexer/resolver diagnostics are
+  unaffected). Collapsed the same-statement cascades to a single diagnostic
+  (`02` 5→1, `04` 4→1, `11` 5→1, `13` 6→1, `36` 2→1) and reduced the cross-line/
+  cross-construct ones (`19` 9→4, `44` 4→3), moving six rows FAIL→NEEDS-WORK. The
+  suppression window is one logical line / one bracketed expression (the lexer
+  emits no newline inside brackets), so per-line follow-ons past a line break still
+  surface and an unterminated bracket suppresses to EOF — the shown message is
+  always the correct primary. A read-only review confirmed no primary is ever
+  lost, scope is parser-only, and it is deterministic.
 
 ## Rubric-pass table
 
@@ -47,24 +62,24 @@ span) · **(c)** suggest the fix · **(d)** kid-readable (no jargon; `to`=proced
 | Program | # | Code | Verdict | Gap → intended fix | Sign-off |
 |---|---|---|---|---|---|
 | `01-missing-end` | 1 | `syntax-error` | PASS | (b) fixed — caret now on the opening `to` | ok |
-| `02-equals-in-if` | 5 | `syntax-error` | FAIL | (a)(c)(d) 5-error cascade + jargon; never diagnoses `=` vs `==` — want `did you mean x == 3?` | ok |
+| `02-equals-in-if` | 1 | `syntax-error` | NEEDS-WORK | cascade suppressed (5→1); single `expected `then`…`, but no `=`→`==` `did you mean x == 3?` (spun off) | ok |
 | `03-unclosed-string` | 2 | `unterminated-string` | NEEDS-WORK | primary is great; suppress the cascaded `expected )` | ok |
-| `04-missing-comma` | 4 | `syntax-error` | FAIL | (a)(c)(d) 4-error cascade + jargon; want `arguments are separated by commas — did you mean show(1, 2)?` | ok |
+| `04-missing-comma` | 1 | `syntax-error` | NEEDS-WORK | cascade suppressed (4→1); the comma `did you mean show(1, 2)?` suggestion still spun off | ok |
 | `05-stray-do` | 1 | `syntax-error` | FAIL | (a)(b) misdiagnosis: EOF span, blames the `to`; point at the `do` (opens an unclosed block) | ok |
 | `06-chained-comparison` | 1 | `chained-comparison` | PASS | — the bar | ok |
 | `07-missing-then` | 1 | `syntax-error` | PASS | span at the insertion point (after `if x`), not EOF — ok | ok |
 | `08-missing-fn-end` | 1 | `syntax-error` | PASS | (b) fixed — caret now on the opening `fn` | ok |
 | `09-unclosed-triple-string` | 1 | `unterminated-string` | PASS |  | ok |
 | `10-unclosed-bytes` | 1 | `unterminated-string` | PASS |  | ok |
-| `11-missing-comma-list` | 4 | `syntax-error` | FAIL | 4-error cascade; want a single `commas separate list items` with a fix | ok |
+| `11-missing-comma-list` | 1 | `syntax-error` | NEEDS-WORK | cascade suppressed (4→1); comma suggestion spun off | ok |
 | `12-bad-escape` | 1 | `unknown-escape` | PASS | — names it + suggests `\\` | ok |
-| `13-keyword-as-name` | 6 | `syntax-error` | FAIL | 6-error cascade for `let end = 3`; want `end is a keyword, not a name` | ok |
+| `13-keyword-as-name` | 1 | `syntax-error` | NEEDS-WORK | cascade suppressed (6→1); `expected a name after `let``, could sharpen to `end is a keyword` | ok |
 | `14-double-underscore-number` | 1 | `malformed-number` | PASS |  | ok |
 | `15-else-without-if` | 2 | `syntax-error` | FAIL | (a)(d) jargon `expected an expression`; want `this else has no matching if` | ok |
 | `16-unbalanced-paren` | 1 | `syntax-error` | PASS | (b) fixed — caret now on the call `(` | ok |
 | `17-let-missing-value` | 1 | `syntax-error` | NEEDS-WORK | (d) `expected an expression` is jargon; want `this let needs a value after =` | ok |
 | `18-missing-while-do` | 1 | `syntax-error` | PASS | span at the insertion point (after `while x`) — ok | ok |
-| `19-keyword-as-param` | 9 | `syntax-error` | FAIL | 9-error cascade for `to f(fn)`; want `fn is a keyword and can't be a parameter name` | ok |
+| `19-keyword-as-param` | 4 | `syntax-error` | NEEDS-WORK | cascade reduced (9→4, cross-construct residue); primary `expected a parameter name` is fine | ok |
 | `20-chained-equality` | 1 | `chained-comparison` | PASS | `==`-chaining is a distinct kid intuition from `<`-chaining; both kept deliberately | ok |
 | `21-return-outside-callable` | 1 | `misplaced-exit` | PASS |  | ok |
 | `22-break-outside-loop` | 1 | `misplaced-exit` | PASS |  | ok |
@@ -81,7 +96,7 @@ span) · **(c)** suggest the fix · **(d)** kid-readable (no jargon; `to`=proced
 | `33-with-missing-do` | 1 | `syntax-error` | PASS | span at the insertion point (after the `with` header) — ok | ok |
 | `34-positional-after-keyword` | 1 | `syntax-error` | NEEDS-WORK | (c)(d) two terms of art in one sentence + no fix; want `did you mean move(5, steps: 10)?` | ok |
 | `35-record-missing-end` | 1 | `syntax-error` | PASS | (b) fixed — caret now on the opening `record` | ok |
-| `36-stray-close-paren` | 2 | `syntax-error` | FAIL | (d) jargon `expected a statement separator` for a stray `)`; want `this ) has no opening (` | ok |
+| `36-stray-close-paren` | 1 | `syntax-error` | NEEDS-WORK | cascade suppressed (2→1); `expected a statement separator` de-jargon still spun off | ok |
 | `37-extra-decimal-point` | 1 | `syntax-error` | NEEDS-WORK | (a) `1.2.3` is read as field access → misleading `expected a field name after .`; want `a number can have only one . point` | ok |
 | `38-margin-under-indent` | 1 | `margin-mismatch` | PASS |  | ok |
 | `39-tab-margin-mix` | 1 | `margin-mismatch` | PASS | — names the tab/space margin mismatch | ok |
@@ -89,7 +104,7 @@ span) · **(c)** suggest the fix · **(d)** kid-readable (no jargon; `to`=proced
 | `41-unicode-escape-in-bytes` | 1 | `malformed-escape` | PASS | — names it + suggests `\xHH` | ok |
 | `42-empty-interpolation` | 1 | `empty-interpolation` | PASS | — names it + suggests `{{` (S-48) | ok |
 | `43-comment-in-interpolation` | 1 | `comment-in-interpolation` | PASS | — names it + suggests moving it out (S-50) | ok |
-| `44-newline-in-interpolation` | 4 | `unterminated-interpolation` | NEEDS-WORK | primary is good (S-47); the open interpolation cascades to 4 diagnostics | ok |
+| `44-newline-in-interpolation` | 3 | `unterminated-interpolation` | NEEDS-WORK | primary good (S-47); open interpolation still cascades (4→3) | ok |
 | `45-short-hex-escape-string` | 1 | `malformed-escape` | PASS | — names it + suggests `\x1B` (S-49) | ok |
 
 ## Systemic findings
@@ -103,9 +118,12 @@ span) · **(c)** suggest the fix · **(d)** kid-readable (no jargon; `to`=proced
    there, so the caret lands on the `to`/`fn`/`record`/`(`/`[` that needs closing.
    (`05`'s span is now on its `to`, but its deeper *misdiagnosis* — it should point
    at the stray `do` — folds into the M1.9b `stray_do` enrichment, spun off.)
-2. **Cascades.** One mistake yields 2–9 diagnostics (`to f(fn)`: 9; `let end = 3`:
-   6; `=`/`==`: 5). For a beginner this is a wall of noise. Parser error-recovery/
-   suppression — a design-level change, spun off.
+2. **Cascades — LARGELY RESOLVED.** One mistake used to yield 2–9 diagnostics
+   (`to f(fn)`: 9; `let end = 3`: 6; `=`/`==`: 5). **Fixed** with parser panic-mode
+   recovery (see "Post-sign-off improvements"): same-statement cascades now yield a
+   single message. A little cross-line/cross-construct residue remains (`19`: 4,
+   `44`: 3) — the recovery re-syncs at separators, so genuinely per-line follow-ons
+   still surface; tightening that further is a larger recovery change, not pursued.
 3. **Jargon + no diagnosis.** `expected a statement separator` / `expected an
    expression` break the no-jargon rule; classic kid mistakes (`=`→`==`, missing
    comma, stray `do`, keyword-as-name, extra `.`) get a generic `expected …`
@@ -143,7 +161,8 @@ the diagnostics already existed from M1.4):
 
 ## Follow-up items (spun off; see `claude-todo.md`)
 
-- **Parser error-recovery / cascade suppression** — one mistake → one message.
+- **Parser error-recovery / cascade suppression** — DONE (panic-mode recovery; see
+  "Post-sign-off improvements").
 - **Pattern diagnostics + de-jargon** — `=`/`==`, missing comma, misplaced
   `else`, keyword-as-name, extra `.`; replace `expected a statement
   separator`/`expected an expression`. The **stray-`do`** case (`05`) folds

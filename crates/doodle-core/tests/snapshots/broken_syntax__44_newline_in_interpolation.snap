@@ -16,8 +16,3 @@ error[syntax-error]: expected `)` to close this call
   --> 44-newline-in-interpolation.doodle:1:5
 1 | show("{score
   |     ^
-
-error[syntax-error]: expected a statement separator
-  --> 44-newline-in-interpolation.doodle:2:1
-2 | ")
-  | ^

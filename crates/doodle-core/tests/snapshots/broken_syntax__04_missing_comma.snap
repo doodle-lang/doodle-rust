@@ -6,18 +6,3 @@ error[syntax-error]: expected `)` to close this call
   --> 04-missing-comma.doodle:1:5
 1 | show(1 2)
   |     ^
-
-error[syntax-error]: expected a statement separator
-  --> 04-missing-comma.doodle:1:8
-1 | show(1 2)
-  |        ^
-
-error[syntax-error]: expected a statement separator
-  --> 04-missing-comma.doodle:1:9
-1 | show(1 2)
-  |         ^
-
-error[syntax-error]: expected an expression
-  --> 04-missing-comma.doodle:1:9
-1 | show(1 2)
-  |         ^

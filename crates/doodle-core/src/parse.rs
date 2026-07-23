@@ -126,6 +126,13 @@ struct Parser<'a> {
     /// argument list, or interpolation), whose closer already delimits an inner
     /// block. Off (block arguments attach) everywhere else.
     no_block_arg: bool,
+    /// Panic-mode recovery: set when a syntax error is reported, and cleared at the
+    /// next statement separator ([`advance`](Self::advance) past a newline/`;`).
+    /// While set, further *parser* errors are suppressed, so one mistake yields one
+    /// message instead of a cascade as the parser stumbles to the next statement
+    /// (a beginner should not face a wall of follow-on "expected …" noise). Lexer
+    /// and resolver diagnostics are emitted separately and are unaffected.
+    recovering: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -146,6 +153,7 @@ impl<'a> Parser<'a> {
             bailed: false,
             nested: false,
             no_block_arg: false,
+            recovering: false,
         }
     }
 
@@ -341,6 +349,15 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) {
+        // A statement separator is the re-sync point for panic-mode recovery:
+        // crossing one clears `recovering` so the next statement reports its own
+        // first error rather than staying silent.
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Newline | TokenKind::Semicolon)
+        ) {
+            self.recovering = false;
+        }
         self.pos += 1;
     }
 
@@ -360,12 +377,15 @@ impl<'a> Parser<'a> {
 
     fn error_code(&mut self, code: DiagnosticCode, span: Span, message: &str) {
         // Once bailed (depth limit), stay silent so one over-deep expression
-        // yields one diagnostic, not one per unwinding frame.
-        if self.bailed {
+        // yields one diagnostic, not one per unwinding frame. In panic-mode
+        // recovery (a syntax error already reported for this statement), likewise
+        // suppress the follow-on cascade until the next separator resets it.
+        if self.bailed || self.recovering {
             return;
         }
         self.diagnostics
             .push(Diagnostic::error(code, self.module, span, message));
+        self.recovering = true;
     }
 }
 

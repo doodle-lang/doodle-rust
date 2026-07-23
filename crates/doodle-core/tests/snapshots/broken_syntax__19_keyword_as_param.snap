@@ -7,27 +7,7 @@ error[syntax-error]: expected a parameter name
 1 | to f(fn)
   |      ^^
 
-error[syntax-error]: expected `)` to close the parameter list
-  --> 19-keyword-as-param.doodle:1:5
-1 | to f(fn)
-  |     ^
-
 error[syntax-error]: expected `(` to begin the parameter list
-  --> 19-keyword-as-param.doodle:1:8
-1 | to f(fn)
-  |        ^
-
-error[syntax-error]: expected an expression
-  --> 19-keyword-as-param.doodle:1:8
-1 | to f(fn)
-  |        ^
-
-error[syntax-error]: expected `(` to begin the parameter list
-  --> 19-keyword-as-param.doodle:2:10
-2 |   show(fn)
-  |          ^
-
-error[syntax-error]: expected an expression
   --> 19-keyword-as-param.doodle:2:10
 2 |   show(fn)
   |          ^
@@ -41,8 +21,3 @@ error[syntax-error]: expected `end` to close this `fn`
   --> 19-keyword-as-param.doodle:1:6
 1 | to f(fn)
   |      ^^
-
-error[syntax-error]: expected `end` to close this `to`
-  --> 19-keyword-as-param.doodle:1:1
-1 | to f(fn)
-  | ^^
