@@ -30,7 +30,13 @@ jobs:
       - name: Install the pinned nightly + rust-src
         run: rustup toolchain install ${{ steps.pin.outputs.channel }} --component rust-src
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        # Pass the tool via `with:`, not the `@cargo-fuzz` ref shorthand: that
+        # shorthand fails to pass the tool name through (the action warns "no
+        # tool specified") and silently installs nothing, so `cargo fuzz` is
+        # then missing. The explicit form is unambiguous.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Fuzz-smoke ${{ matrix.target }}
         run: >
           cargo +${{ steps.pin.outputs.channel }} fuzz run ${{ matrix.target }}
