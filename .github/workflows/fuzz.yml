@@ -1,0 +1,37 @@
+name: Fuzz smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A short fuzz-smoke run of each front-end target (M1.14): over arbitrary input,
+# no lexer/parser/resolver path may panic, hang, or OOM. The fuzz crate is a
+# separate workspace on nightly (cargo-fuzz needs -Zbuild-std + AddressSanitizer),
+# so the pinned-stable main build is untouched. The nightly channel is pinned in
+# fuzz/rust-toolchain.toml (single source of truth, read below) and fuzz/Cargo.lock
+# is committed, so these builds are reproducible. This is a smoke run (60 s/target),
+# not the 1 h exit-criterion soak (run at release).
+
+jobs:
+  fuzz-smoke:
+    name: fuzz-smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [lex, parse, full]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read the pinned fuzz nightly
+        id: pin
+        run: echo "channel=$(grep -oE 'nightly-[0-9-]+' fuzz/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Install the pinned nightly + rust-src
+        run: rustup toolchain install ${{ steps.pin.outputs.channel }} --component rust-src
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+      - name: Fuzz-smoke ${{ matrix.target }}
+        run: >
+          cargo +${{ steps.pin.outputs.channel }} fuzz run ${{ matrix.target }}
+          -- -max_total_time=60 -rss_limit_mb=2048

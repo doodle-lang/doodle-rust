@@ -1,0 +1,7 @@
+# Fuzzing needs nightly (cargo-fuzz uses -Zbuild-std + AddressSanitizer); the main
+# engine stays on the pinned stable in the parent rust-toolchain.toml. Pinned to a
+# dated nightly (with the committed fuzz/Cargo.lock) so fuzz-smoke CI builds are
+# reproducible. Bump deliberately (and re-run `cargo +nightly-<date> fuzz build`).
+[toolchain]
+channel = "nightly-2026-07-09"
+components = ["rust-src"]

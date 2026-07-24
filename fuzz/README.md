@@ -32,9 +32,10 @@ a `Vec<Diagnostic>`):
 Smoke soak (60 s each, this machine): lex 3.8M / parse 1.4M / full 2.0M runs, zero
 crashes. The M1 exit criterion is a **1 h soak** with zero panics/hangs/OOMs.
 
-Not wired into CI yet — the fuzz-smoke CI job is a separate (user) decision. The
-nightly toolchain date and the fuzz dependency versions get pinned (a dated
-`nightly-YYYY-MM-DD` and a committed `Cargo.lock`) when fuzz enters CI, so fuzz
-builds become reproducible then.
+Wired into CI (`.github/workflows/fuzz.yml`): a 60 s smoke run of each target on
+push/PR. The nightly channel is pinned in `fuzz/rust-toolchain.toml` (single source
+of truth) and `fuzz/Cargo.lock` is committed, so fuzz builds are reproducible. The
+1 h exit-criterion soak is run at release (or in chunks — libFuzzer resumes from
+the corpus), not in CI.
 
 [cargo-fuzz]: https://github.com/rust-fuzz/cargo-fuzz
