@@ -1,0 +1,223 @@
+---
+source: crates/doodle-core/tests/lang_corpus.rs
+expression: parsed.ast
+---
+Ast {
+    nodes: [
+        List(
+            [],
+        ),
+        Let {
+            name: "fns",
+            value: NodeId(
+                0,
+            ),
+        },
+        Ident(
+            "each",
+        ),
+        IntLit(
+            1,
+        ),
+        IntLit(
+            2,
+        ),
+        IntLit(
+            3,
+        ),
+        List(
+            [
+                NodeId(
+                    3,
+                ),
+                NodeId(
+                    4,
+                ),
+                NodeId(
+                    5,
+                ),
+            ],
+        ),
+        Ident(
+            "append",
+        ),
+        Ident(
+            "fns",
+        ),
+        Ident(
+            "x",
+        ),
+        ExprStmt(
+            NodeId(
+                9,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    10,
+                ),
+            ],
+        ),
+        Callable {
+            kind: Func,
+            name: None,
+            params: [],
+            body: NodeId(
+                11,
+            ),
+            doc: None,
+        },
+        Call {
+            callee: NodeId(
+                7,
+            ),
+            args: [
+                Positional(
+                    NodeId(
+                        8,
+                    ),
+                ),
+                Positional(
+                    NodeId(
+                        12,
+                    ),
+                ),
+            ],
+            block: None,
+        },
+        ExprStmt(
+            NodeId(
+                13,
+            ),
+        ),
+        Block(
+            [
+                NodeId(
+                    14,
+                ),
+            ],
+        ),
+        Call {
+            callee: NodeId(
+                2,
+            ),
+            args: [
+                Positional(
+                    NodeId(
+                        6,
+                    ),
+                ),
+            ],
+            block: Some(
+                BlockArg {
+                    params: [
+                        "x",
+                    ],
+                    body: NodeId(
+                        15,
+                    ),
+                },
+            ),
+        },
+        ExprStmt(
+            NodeId(
+                16,
+            ),
+        ),
+        Module {
+            stmts: [
+                NodeId(
+                    1,
+                ),
+                NodeId(
+                    17,
+                ),
+            ],
+            doc: None,
+        },
+    ],
+    spans: [
+        Span {
+            start: 10,
+            end: 12,
+        },
+        Span {
+            start: 0,
+            end: 12,
+        },
+        Span {
+            start: 13,
+            end: 17,
+        },
+        Span {
+            start: 19,
+            end: 20,
+        },
+        Span {
+            start: 22,
+            end: 23,
+        },
+        Span {
+            start: 25,
+            end: 26,
+        },
+        Span {
+            start: 18,
+            end: 27,
+        },
+        Span {
+            start: 38,
+            end: 44,
+        },
+        Span {
+            start: 45,
+            end: 48,
+        },
+        Span {
+            start: 55,
+            end: 56,
+        },
+        Span {
+            start: 55,
+            end: 56,
+        },
+        Span {
+            start: 55,
+            end: 56,
+        },
+        Span {
+            start: 50,
+            end: 60,
+        },
+        Span {
+            start: 38,
+            end: 61,
+        },
+        Span {
+            start: 38,
+            end: 61,
+        },
+        Span {
+            start: 35,
+            end: 61,
+        },
+        Span {
+            start: 13,
+            end: 65,
+        },
+        Span {
+            start: 13,
+            end: 65,
+        },
+        Span {
+            start: 0,
+            end: 65,
+        },
+    ],
+    root: Some(
+        NodeId(
+            18,
+        ),
+    ),
+}

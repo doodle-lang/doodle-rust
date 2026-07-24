@@ -1,0 +1,8 @@
+#! clause: L6.10
+#! mode: static
+#! stage: full
+let fns = []
+each([1, 2, 3]) do (x)
+  append(fns, fn() x end)
+end
+# each function captured its own x: calling them yields 1, 2, 3
