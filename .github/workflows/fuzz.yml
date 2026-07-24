@@ -38,6 +38,13 @@ jobs:
         with:
           tool: cargo-fuzz
       - name: Fuzz-smoke ${{ matrix.target }}
+        # Pin --target to the gnu host. cargo-fuzz defaults the fuzz target to
+        # the triple it was itself built for, and the prebuilt cargo-fuzz that
+        # taiki-e/install-action ships is a static-musl binary — so the default
+        # would build for musl, whose statically-linked libc is incompatible
+        # with AddressSanitizer ("sanitizer is incompatible with statically
+        # linked libc"). gnu is ASan-compatible and is the runner's host triple.
         run: >
           cargo +${{ steps.pin.outputs.channel }} fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu
           -- -max_total_time=60 -rss_limit_mb=2048
