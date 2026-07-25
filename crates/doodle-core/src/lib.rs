@@ -17,6 +17,7 @@
 pub mod ast;
 pub mod diag;
 pub mod drive;
+pub mod heap;
 pub mod lex;
 pub mod machine;
 pub mod parse;

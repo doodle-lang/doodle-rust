@@ -1,0 +1,267 @@
+//! The instance heap: per-kind index slabs, allocation accounting, and object
+//! identity (machine-design §4).
+//!
+//! One [`Slab`] per heap kind holds that kind's objects; a heap value (the
+//! `Copy` [`Value`] representation) carries only the `u32` slab index, so object
+//! identity is the index (MD §4) and the machine state stays snapshot-friendly.
+//!
+//! **Scope (M2a.1).** The foundation: the slab mechanism, allocation accounting,
+//! and slot identity — **no GC yet** (mark/sweep is M2a.10; allocation only
+//! grows the heap until then). The slab set is the demo subset's *value-bearing*
+//! kinds that are ready to build and test now — strings, byte strings, lists;
+//! the remaining kinds (bignums, callables, cells, types) get their slabs in the
+//! chunks that first construct them (M2a.3/M2a.5/M2a.8), each a one-line
+//! addition on the generic [`Slab`].
+//!
+//! **Determinism (MD §4/§15).** [`Heap::bytes_allocated`] — which drives GC
+//! triggers and the heap limit (E§7.7) — counts *logical* payload bytes (a
+//! string's byte length, a list's element count × value width), **never** a
+//! `Vec`'s capacity, whose growth policy is an allocator detail and would leak
+//! nondeterminism into GC trigger points. Pure caches (the §5 grapheme memo) are
+//! excluded when they arrive.
+//!
+//! **Accounting integrity.** Payload bytes are charged at allocation, so any
+//! *in-place growth* of a variable-size payload (e.g. pushing to a list) must
+//! also adjust `bytes_allocated` — otherwise a growing object escapes the heap
+//! limit. That is why there is deliberately **no raw mutable payload accessor**
+//! (`&mut ListObj` etc.): mutation goes through accounting-aware `Heap` methods,
+//! which land with the list/string operations that first need them.
+
+mod slab;
+
+pub use slab::Slab;
+
+use crate::machine::{BytesIdx, ListIdx, StrIdx, Value};
+
+/// The byte width charged to [`Heap::bytes_allocated`] per list element. A fixed
+/// per-build constant (not a `Vec` capacity), so accounting is deterministic.
+const VALUE_BYTES: u64 = size_of::<Value>() as u64;
+
+/// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
+/// construction path (literal decode, concat seam pass, `make_string`) produces
+/// NFC, so consumers never re-normalize. The lazy grapheme memo (MD §5) joins
+/// with the M4 grapheme operations.
+#[derive(Clone, Debug)]
+pub struct StrObj {
+    /// The NFC UTF-8 bytes.
+    pub utf8: Box<str>,
+}
+
+/// A byte-string object (L§4.5): an immutable sequence of bytes, distinct from a
+/// text string (no encoding, O(1) indexing).
+#[derive(Clone, Debug)]
+pub struct BytesObj {
+    /// The raw bytes.
+    pub bytes: Box<[u8]>,
+}
+
+/// A list object (L§4.6): an ordered, growable sequence of values.
+#[derive(Clone, Debug)]
+pub struct ListObj {
+    /// The elements, in order.
+    pub items: Vec<Value>,
+}
+
+/// The per-instance heap (machine-design §4): the object slabs plus the
+/// allocation accounting the GC and heap limit read.
+pub struct Heap {
+    strings: Slab<StrObj>,
+    bytes: Slab<BytesObj>,
+    lists: Slab<ListObj>,
+    /// Program-driven payload bytes (MD §4); see the module-level determinism
+    /// note. Monotonic under M2a.1 (no reclamation); GC decreases it at M2a.10.
+    bytes_allocated: u64,
+    /// Monotonic allocation counter; stamped into each object's slot as its
+    /// identity serial (MD §4).
+    alloc_serial: u64,
+}
+
+impl Heap {
+    /// Creates an empty heap.
+    pub fn new() -> Self {
+        Heap {
+            strings: Slab::new(),
+            bytes: Slab::new(),
+            lists: Slab::new(),
+            bytes_allocated: 0,
+            alloc_serial: 0,
+        }
+    }
+
+    /// The next allocation serial (post-increment): a fresh, monotonic stamp.
+    fn next_serial(&mut self) -> u64 {
+        let serial = self.alloc_serial;
+        self.alloc_serial += 1;
+        serial
+    }
+
+    /// Allocates a string (its `utf8` must already be NFC — see [`StrObj`]).
+    pub fn alloc_string(&mut self, utf8: Box<str>) -> StrIdx {
+        debug_assert!(
+            unicode_normalization::is_nfc(&utf8),
+            "alloc_string requires NFC input (machine-design §5)"
+        );
+        self.bytes_allocated += utf8.len() as u64;
+        let serial = self.next_serial();
+        StrIdx(self.strings.alloc(StrObj { utf8 }, serial))
+    }
+
+    /// Allocates a byte string.
+    pub fn alloc_bytes(&mut self, bytes: Box<[u8]>) -> BytesIdx {
+        self.bytes_allocated += bytes.len() as u64;
+        let serial = self.next_serial();
+        BytesIdx(self.bytes.alloc(BytesObj { bytes }, serial))
+    }
+
+    /// Allocates a list from its initial elements.
+    pub fn alloc_list(&mut self, items: Vec<Value>) -> ListIdx {
+        self.bytes_allocated += items.len() as u64 * VALUE_BYTES;
+        let serial = self.next_serial();
+        ListIdx(self.lists.alloc(ListObj { items }, serial))
+    }
+
+    /// Borrows the string at `idx`.
+    pub fn string(&self, idx: StrIdx) -> &StrObj {
+        self.strings.get(idx.0)
+    }
+
+    /// Borrows the byte string at `idx`.
+    pub fn byte_string(&self, idx: BytesIdx) -> &BytesObj {
+        self.bytes.get(idx.0)
+    }
+
+    /// Borrows the list at `idx`.
+    pub fn list(&self, idx: ListIdx) -> &ListObj {
+        self.lists.get(idx.0)
+    }
+
+    /// Total program-driven payload bytes currently accounted (MD §4). Drives GC
+    /// triggering and the heap limit (M2a.9/M2a.10).
+    pub fn bytes_allocated(&self) -> u64 {
+        self.bytes_allocated
+    }
+
+    /// The number of live objects across all slabs (for tests and, later, GC
+    /// assertions).
+    pub fn live_objects(&self) -> u32 {
+        self.strings.live_count() + self.bytes.live_count() + self.lists.live_count()
+    }
+}
+
+impl Default for Heap {
+    fn default() -> Self {
+        Heap::new()
+    }
+}
+
+/// Whether `a` and `b` reference the **same heap slot** (machine-design §4
+/// identity): the same index-carrying [`Value`] variant with equal indices.
+///
+/// This is the representation-level identity primitive — "these two values name
+/// one heap object." Immediate values (`nil`/bools/ints/floats) carry no slot,
+/// so they are never the-same-reference here; whether Doodle *exposes* slot
+/// identity for a given type (the `same?`/`is` surface, L§4.9) is layered on per
+/// type by later milestones and does not change this mechanical answer.
+pub fn same_ref(a: Value, b: Value) -> bool {
+    // Match `a` exhaustively (no wildcard) so a heap-backed variant added later
+    // forces a new arm here at compile time, rather than silently defaulting to
+    // "never the same object" — the reason `Value` omits `derive(PartialEq)`.
+    // Each arm compares `b` for the *same* variant, so a cross-variant pair (or
+    // an immediate) is never the-same-reference.
+    match a {
+        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) => false,
+        Value::Str(x) => matches!(b, Value::Str(y) if x == y),
+        Value::Bytes(x) => matches!(b, Value::Bytes(y) if x == y),
+        Value::List(x) => matches!(b, Value::List(y) if x == y),
+        Value::BigInt(x) => matches!(b, Value::BigInt(y) if x == y),
+        Value::Dict(x) => matches!(b, Value::Dict(y) if x == y),
+        Value::Record(x) => matches!(b, Value::Record(y) if x == y),
+        Value::Callable(x) => matches!(b, Value::Callable(y) if x == y),
+        Value::Type(x) => matches!(b, Value::Type(y) if x == y),
+        Value::Foreign(x) => matches!(b, Value::Foreign(y) if x == y),
+        Value::Module(x) => matches!(b, Value::Module(y) if x == y),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocations_get_distinct_indices_and_round_trip() {
+        let mut heap = Heap::new();
+        let a = heap.alloc_string("hi".into());
+        let b = heap.alloc_string("yo".into());
+        assert_ne!(a.0, b.0);
+        assert_eq!(&*heap.string(a).utf8, "hi");
+        assert_eq!(&*heap.string(b).utf8, "yo");
+        assert_eq!(heap.live_objects(), 2);
+    }
+
+    #[test]
+    fn bytes_allocated_counts_logical_payloads_across_kinds() {
+        let mut heap = Heap::new();
+        heap.alloc_string("abcd".into()); // 4 payload bytes
+        heap.alloc_bytes(vec![0u8; 3].into()); // 3 payload bytes
+        heap.alloc_list(vec![Value::Int(1), Value::Int(2)]); // 2 * VALUE_BYTES
+        assert_eq!(heap.bytes_allocated(), 4 + 3 + 2 * VALUE_BYTES);
+    }
+
+    #[test]
+    fn serials_are_monotonic_across_kinds_in_allocation_order() {
+        // One shared counter stamps every kind, so identity serials never collide.
+        let mut heap = Heap::new();
+        let s = heap.alloc_string("x".into());
+        let by = heap.alloc_bytes(vec![1].into());
+        let l = heap.alloc_list(vec![]);
+        // Reach into the slabs by index to read the stamped serial.
+        assert_eq!(heap.strings.serial(s.0), 0);
+        assert_eq!(heap.bytes.serial(by.0), 1);
+        assert_eq!(heap.lists.serial(l.0), 2);
+    }
+
+    #[test]
+    fn same_ref_matches_slot_identity_per_reference_variant() {
+        use crate::machine::{CalIdx, RecIdx};
+        use crate::span::ModuleId;
+
+        // Same variant, same index — the same object.
+        assert!(same_ref(Value::Str(StrIdx(3)), Value::Str(StrIdx(3))));
+        assert!(same_ref(Value::List(ListIdx(0)), Value::List(ListIdx(0))));
+        assert!(same_ref(
+            Value::Callable(CalIdx(9)),
+            Value::Callable(CalIdx(9))
+        ));
+        assert!(same_ref(
+            Value::Module(ModuleId(2)),
+            Value::Module(ModuleId(2))
+        ));
+
+        // Same variant, different index — different objects.
+        assert!(!same_ref(Value::Str(StrIdx(3)), Value::Str(StrIdx(4))));
+        assert!(!same_ref(
+            Value::Record(RecIdx(0)),
+            Value::Record(RecIdx(1))
+        ));
+    }
+
+    #[test]
+    fn same_ref_rejects_cross_variant_and_immediates() {
+        use crate::machine::{CalIdx, DictIdx, TypeIdx};
+
+        // Same underlying index, different variant — not the same slot.
+        assert!(!same_ref(Value::Str(StrIdx(0)), Value::Bytes(BytesIdx(0))));
+        assert!(!same_ref(Value::List(ListIdx(0)), Value::Dict(DictIdx(0))));
+        assert!(!same_ref(
+            Value::Type(TypeIdx(1)),
+            Value::Callable(CalIdx(1))
+        ));
+
+        // Immediates carry no slot identity, even value-equal ones.
+        assert!(!same_ref(Value::Int(5), Value::Int(5)));
+        assert!(!same_ref(Value::Bool(true), Value::Bool(true)));
+        assert!(!same_ref(Value::Nil, Value::Nil));
+        // A heap value is never the same reference as an immediate.
+        assert!(!same_ref(Value::Str(StrIdx(0)), Value::Nil));
+    }
+}
