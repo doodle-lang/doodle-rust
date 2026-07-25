@@ -1,12 +1,11 @@
 //! The drive loop: [`Outcome`]s and the [`run`] entry point (engine spec E§7).
 //!
-//! Shell for M0: the [`Outcome`] enum (E§7.2) and a [`run`] that walks a
-//! hand-built program's top-level statements to completion. The M0 skeleton
-//! has no capabilities, breakpoints, or safe points, so it produces only
-//! `Completed`; the other outcomes' payloads are shells the machine core
-//! (M2a/M2b) fills in.
+//! M2a.2: [`run`] advances the real machine one [`step`](Instance::step) at a
+//! time to completion. The demo subset has no capabilities, breakpoints, or safe
+//! points yet, so every directive runs straight to `Completed`; the other
+//! outcomes' payloads (suspension, raise, fault) are shells the later M2a/M2b
+//! chunks fill in.
 
-use crate::ast::{Ast, Node, NodeId};
 use crate::machine::{Instance, InstanceState, Value};
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
@@ -104,48 +103,20 @@ pub struct Trace;
 
 /// Drives `instance` under `directive`, returning an [`Outcome`] (E§7.3).
 ///
-/// The M0 skeleton has no stop conditions, so every directive runs the
-/// hand-built program straight to `Completed`; the `Step*` directives gain
-/// meaning once safe points land (E§7.4, M2a).
+/// M2a.2 runs the machine to completion. The `Step*`/`Continue` directives gain
+/// meaning once safe points, breakpoints, and the fused counter land (E§7.4,
+/// M2a.9); until then every directive runs straight through.
 pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
     let _ = directive;
     instance.set_state(InstanceState::Running);
-    while let Some(stmt) = instance.next_statement() {
-        let value = eval_stmt(instance.program(), stmt);
-        instance.set_result(value);
+    while !instance.is_halted() {
+        instance.step();
     }
     instance.set_state(InstanceState::Completed);
-    // E§7.2 pins `Completed`'s value only for a returning `fn`; what a
-    // *top-level* drive carries is unspecified. The skeleton provisionally
-    // returns the result register's last value so the acceptance test can
-    // observe it; real top-level completion is expected to be Void (`None`).
-    // To be pinned in E§7.2 by M2a (see claude-todo spec-delta queue).
-    Outcome::Completed(instance.result())
-}
-
-/// Evaluates one top-level statement, returning its value (or `None` = Void).
-///
-/// The M0 skeleton stores an expression statement's value in the result
-/// register so the driver can observe it; real statement semantics (values are
-/// discarded, only `fn` bodies yield, L§6.11) arrive with the machine core.
-fn eval_stmt(program: &Ast, id: NodeId) -> Option<Value> {
-    match program.node(id) {
-        Node::ExprStmt(expr) => Some(eval_expr(program, *expr)),
-        // The M0 driver only builds expression statements; anything else in
-        // statement position is Void here (real statement semantics arrive with
-        // the machine core, M2a).
-        _ => None,
-    }
-}
-
-/// Evaluates one expression node to a [`Value`].
-fn eval_expr(program: &Ast, id: NodeId) -> Value {
-    match program.node(id) {
-        Node::IntLit(n) => Value::Int(*n),
-        // Only literals appear in expression position in the M0 grammar; a
-        // node reaching here is a front-end bug, so fail loudly rather than
-        // silently yielding a value that could mask it. The front end grows
-        // the real expression kinds at M1+.
-        other => unreachable!("non-expression node in expression position: {other:?}"),
-    }
+    // E§7.2: a top-level module drive completes with **no value** (Void). A
+    // module runs for effect (L§6.11 — statements yield no value); `Completed`'s
+    // value is present only for a returning `fn` (a reentrant callable return,
+    // E§7.6), which arrives at M2a.5. This replaces the M0.3 provisional (which
+    // returned the last expression's value).
+    Outcome::Completed(None)
 }

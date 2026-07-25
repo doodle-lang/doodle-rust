@@ -1,14 +1,28 @@
 //! The resumable machine: the value representation and the instance that holds
-//! execution state.
+//! and drives execution state.
 //!
-//! Shell for M0: the [`Value`] representation (machine-design §3) and an
-//! [`Instance`] holding the lifecycle state and the result register. The heap
-//! slabs, frames, continuation stack, and GC (machine-design §4+) are the M2a
-//! machine core and are deliberately absent — the M2a gate covers those
-//! *mechanisms*, not this `Value` enum, which is usable now.
+//! [`Value`] is the `Copy` value representation (machine-design §3). [`Instance`]
+//! is a running program (engine spec E§3): it owns the resolved module, the
+//! [`Heap`], and the [`Machine`] state (the frame stack + result register), and
+//! the drive loop ([`crate::drive`]) advances it one [`step`](Instance::step) at a
+//! time.
+//!
+//! **Scope (M2a.2).** The CESK skeleton: frames, a continuation stack, `step`,
+//! and module-top-level execution over the demo subset's literals. Operators,
+//! calls, binding, control flow, PTC, safe points/limits, and GC join in later
+//! M2a chunks (`plan/plan-m2a.md`); the additional `Machine` state they need
+//! (ring buffer, fuel, unwind record, dynamic stack, drive stack) is added then.
 
-use crate::ast::{Ast, Node, NodeId};
+mod cont;
+mod frame;
+mod step;
+
+use crate::heap::Heap;
+use crate::resolve::ResolvedModule;
 use crate::span::ModuleId;
+use cont::Cont;
+use frame::Frame;
+use std::sync::Arc;
 
 macro_rules! heap_index {
     ($($name:ident: $doc:literal,)+) => {
@@ -122,27 +136,56 @@ pub enum InstanceState {
     Faulted,
 }
 
+/// The core execution state (machine-design §8): the walkable frame stack and the
+/// result register. The additional state pinned in §8 — ring buffer, fuel,
+/// in-flight unwind, dynamic-parameter stack, drive stack — is added in the
+/// chunks that first need it.
+pub(crate) struct Machine {
+    /// The frame stack (E§8.2); top = innermost active body. Empty once halted.
+    frames: Vec<Frame>,
+    /// The result register (L§6.11): `None` = Void.
+    reg: Option<Value>,
+}
+
 /// A running program: the machine state the host drives (engine spec E§3).
 ///
-/// Shell for M0: holds the program arena, the lifecycle [`InstanceState`], the
-/// **result register** (`Option<Value>`, `None` = the L§6.11 Void), and a
-/// step cursor over the top-level statements. The heap, frames, and drive
-/// stack arrive with the M2a machine core.
+/// Owns the immutable resolved module (shareable with tooling, machine-design §2),
+/// the [`Heap`], the [`Machine`] state, and the lifecycle [`InstanceState`]. The
+/// drive loop advances it via [`step`](Self::step); the module table for multiple
+/// modules is M5, so an instance holds a single module at M1/M2a.
 pub struct Instance {
-    program: Ast,
+    resolved: Arc<ResolvedModule>,
+    heap: Heap,
+    machine: Machine,
     state: InstanceState,
-    result: Option<Value>,
-    next_stmt: usize,
 }
 
 impl Instance {
-    /// Creates a `Ready` instance over the given (already-built) program.
-    pub fn new(program: Ast) -> Self {
+    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18).
+    /// The module top level becomes an ordinary frame whose pending work is
+    /// sequencing its statements (an observable, drivable `ModuleTopLevel` frame).
+    pub fn load(module: ResolvedModule) -> Self {
+        debug_assert!(
+            matches!(
+                module.ast.node(module.root),
+                crate::ast::Node::Module { .. }
+            ),
+            "load: a resolved module's root must be the `Module` node"
+        );
+        let root = module.root;
+        let resolved = Arc::new(module);
+        let frame = Frame::module_top_level(Cont::Seq {
+            block: root,
+            next: 0,
+        });
         Instance {
-            program,
+            resolved,
+            heap: Heap::new(),
+            machine: Machine {
+                frames: vec![frame],
+                reg: None,
+            },
             state: InstanceState::Ready,
-            result: None,
-            next_stmt: 0,
         }
     }
 
@@ -152,47 +195,80 @@ impl Instance {
     }
 
     /// The result register: the last value produced, or `None` for Void
-    /// (L§6.11). Meaningful once the instance reaches `Completed`.
+    /// (L§6.11). After a top-level drive completes this is `None` — a module runs
+    /// for effect and yields Void.
     pub fn result(&self) -> Option<Value> {
-        self.result
+        self.machine.reg
     }
 
-    /// The program being run.
-    pub(crate) fn program(&self) -> &Ast {
-        &self.program
-    }
-
-    /// Advances the step cursor, returning the next top-level statement to run,
-    /// or `None` when the module body is exhausted. This is a placeholder walk
-    /// over the top-level statements; genuine resumability (a heap-resident
-    /// continuation stack, machine-design §8/§14) arrives with the machine
-    /// core. Today nothing interrupts the walk.
-    pub(crate) fn next_statement(&mut self) -> Option<NodeId> {
-        let root = self.program.root()?;
-        let Node::Module { stmts, .. } = self.program.node(root) else {
-            return None;
-        };
-        let stmt = stmts.get(self.next_stmt).copied();
-        if stmt.is_some() {
-            self.next_stmt += 1;
-        }
-        stmt
-    }
-
-    /// Sets the lifecycle state.
+    /// Sets the lifecycle state (the drive loop drives the transitions).
     pub(crate) fn set_state(&mut self, state: InstanceState) {
         self.state = state;
     }
 
-    /// Sets the result register.
-    pub(crate) fn set_result(&mut self, result: Option<Value>) {
-        self.result = result;
+    /// Whether the machine has halted — no frames remain to run.
+    pub(crate) fn is_halted(&self) -> bool {
+        self.machine.frames.is_empty()
+    }
+
+    /// Performs one machine transition (machine-design §8). Precondition:
+    /// `!self.is_halted()`.
+    pub(crate) fn step(&mut self) {
+        step::step(&self.resolved, &mut self.heap, &mut self.machine);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an instance from Doodle source through the real front end, asserting
+    /// the program loads clean (no lex/parse/resolve diagnostics).
+    fn load_source(src: &str) -> Instance {
+        use crate::diag::Severity;
+        let nfc = crate::source::normalize(src);
+        let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+        assert!(
+            !parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error),
+            "unexpected parse error(s): {:?}",
+            parsed.diagnostics
+        );
+        let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "unexpected resolve diagnostic(s): {:?}",
+            resolved.diagnostics
+        );
+        Instance::load(resolved.module)
+    }
+
+    /// Advances until a value lands in the register or the machine halts.
+    fn step_to_first_value(inst: &mut Instance) {
+        let mut steps = 0;
+        while inst.result().is_none() && !inst.is_halted() {
+            inst.step();
+            steps += 1;
+            assert!(steps < 1000, "machine failed to produce a value");
+        }
+    }
+
+    /// Advances until the register holds `Int(want)`, failing if the machine
+    /// halts first (or runs away).
+    fn step_until_int(inst: &mut Instance, want: i64) {
+        let mut steps = 0;
+        while inst.result().and_then(Value::as_int) != Some(want) {
+            assert!(
+                !inst.is_halted(),
+                "halted before the register reached {want}"
+            );
+            inst.step();
+            steps += 1;
+            assert!(steps < 1000, "register never reached {want}");
+        }
+    }
 
     #[test]
     fn value_readers_match_only_their_own_variant() {
@@ -206,5 +282,51 @@ mod tests {
         assert!(Value::Nil.as_float().is_none());
         assert!(Value::Nil.is_nil());
         assert!(!Value::Int(0).is_nil());
+    }
+
+    #[test]
+    fn a_fresh_instance_is_ready_and_not_halted() {
+        let inst = load_source("1\n");
+        assert_eq!(inst.state(), InstanceState::Ready);
+        assert!(!inst.is_halted());
+    }
+
+    #[test]
+    fn evaluates_an_int_literal_into_the_register() {
+        let mut inst = load_source("42\n");
+        step_to_first_value(&mut inst);
+        assert_eq!(inst.result().and_then(Value::as_int), Some(42));
+    }
+
+    #[test]
+    fn a_bytes_literal_allocates_on_the_heap() {
+        let mut inst = load_source("b\"hi\"\n");
+        step_to_first_value(&mut inst);
+        assert!(matches!(inst.result(), Some(Value::Bytes(_))));
+    }
+
+    #[test]
+    fn sequencing_runs_statements_in_order() {
+        // Each statement's value lands in the register in turn: `1` then `2`.
+        // A skip/miscount bug (e.g. advancing the sequence index by two) would
+        // halt before the register ever reaches `2`, failing the second wait —
+        // catching what the Void-completion tests alone cannot.
+        let mut inst = load_source("1\n2\n");
+        step_until_int(&mut inst, 1);
+        step_until_int(&mut inst, 2);
+    }
+
+    #[test]
+    fn a_module_halts_and_completes_void() {
+        // Several literal statements: sequencing runs each, and the top-level
+        // return discards the final value (a module yields Void, L§6.11).
+        let mut inst = load_source("1\ntrue\nnil\n");
+        let mut steps = 0;
+        while !inst.is_halted() {
+            inst.step();
+            steps += 1;
+            assert!(steps < 1000, "machine failed to halt");
+        }
+        assert!(inst.result().is_none());
     }
 }

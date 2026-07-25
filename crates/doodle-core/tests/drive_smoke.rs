@@ -1,61 +1,75 @@
-//! M0.3 acceptance: hand-build a one-statement AST, drive it to `Completed`,
-//! and observe the result value through the public API.
+//! Drive-loop smoke tests: load real Doodle source through the front end, drive
+//! the machine to completion, and check the outcome through the public API.
+//!
+//! A top-level module runs for effect, so it completes **Void** (`Completed(None)`)
+//! regardless of its final statement's value (L§6.11; E§7.2 — the value is present
+//! only for a returning `fn`). This is the resolution of the M0.3 provisional,
+//! which returned the last expression's value.
 
-use doodle_core::ast::{Ast, Node};
+use doodle_core::diag::Severity;
 use doodle_core::drive::{Directive, Outcome, run};
-use doodle_core::machine::{Instance, InstanceState, Value};
-use doodle_core::span::Span;
+use doodle_core::machine::{Instance, InstanceState};
+use doodle_core::parse::parse_program;
+use doodle_core::resolve::resolve;
+use doodle_core::source::normalize;
+use doodle_core::span::ModuleId;
 
-/// The program `42` (a single integer-literal expression statement) drives to
-/// `Completed` carrying `Int(42)`, and the same value is readable from the
-/// instance's result register.
-#[test]
-fn drives_integer_literal_statement_to_completed() {
-    let mut ast = Ast::new();
-    let lit = ast.push(Node::IntLit(42), Span::new(0, 2));
-    let stmt = ast.push(Node::ExprStmt(lit), Span::new(0, 2));
-    let root = ast.push(
-        Node::Module {
-            stmts: vec![stmt],
-            doc: None,
-        },
-        Span::new(0, 2),
+/// Loads Doodle `src` into an instance through the real pipeline (normalize →
+/// parse → resolve), asserting it loads clean.
+fn instance(src: &str) -> Instance {
+    let nfc = normalize(src);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "unexpected parse error(s): {:?}",
+        parsed.diagnostics
     );
-    ast.set_root(root);
-
-    let mut instance = Instance::new(ast);
-    assert_eq!(instance.state(), InstanceState::Ready);
-
-    let outcome = run(&mut instance, Directive::RunToCompletion);
-
-    assert_eq!(instance.state(), InstanceState::Completed);
-    match outcome {
-        Outcome::Completed(Some(value)) => assert_eq!(value.as_int(), Some(42)),
-        other => panic!("expected Completed(Some(Int(42))), got {other:?}"),
-    }
-    assert_eq!(instance.result().and_then(Value::as_int), Some(42));
+    let resolved = resolve(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "unexpected resolve diagnostic(s): {:?}",
+        resolved.diagnostics
+    );
+    Instance::load(resolved.module)
 }
 
-/// An empty module body (no statements) drives to `Completed` with a Void
-/// (`None`) result register.
+/// A single literal expression statement drives to `Completed(None)` — the
+/// top-level module yields Void, and the result register reads Void.
 #[test]
-fn drives_empty_module_to_void_completion() {
-    let mut ast = Ast::new();
-    let root = ast.push(
-        Node::Module {
-            stmts: vec![],
-            doc: None,
-        },
-        Span::DUMMY,
-    );
-    ast.set_root(root);
+fn drives_a_literal_statement_to_void_completion() {
+    let mut inst = instance("42\n");
+    assert_eq!(inst.state(), InstanceState::Ready);
 
-    let mut instance = Instance::new(ast);
-    let outcome = run(&mut instance, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion);
 
-    assert_eq!(instance.state(), InstanceState::Completed);
+    assert_eq!(inst.state(), InstanceState::Completed);
     assert!(matches!(outcome, Outcome::Completed(None)));
-    // `Value` has no `PartialEq` (machine-design §3), so inspect the option
-    // directly rather than comparing to `None`.
-    assert!(instance.result().is_none());
+    // `Value` has no `PartialEq` (machine-design §3); inspect the option directly.
+    assert!(inst.result().is_none());
+}
+
+/// An empty module body drives to `Completed(None)`.
+#[test]
+fn drives_an_empty_module_to_void_completion() {
+    let mut inst = instance("");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+
+    assert_eq!(inst.state(), InstanceState::Completed);
+    assert!(matches!(outcome, Outcome::Completed(None)));
+    assert!(inst.result().is_none());
+}
+
+/// Several statements of different literal kinds (including a heap-allocated
+/// bytes literal) sequence and drive to Void completion.
+#[test]
+fn drives_a_multi_statement_program_to_void_completion() {
+    let mut inst = instance("nil\ntrue\nb\"hi\"\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+
+    assert_eq!(inst.state(), InstanceState::Completed);
+    assert!(matches!(outcome, Outcome::Completed(None)));
+    assert!(inst.result().is_none());
 }
