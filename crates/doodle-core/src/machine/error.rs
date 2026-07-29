@@ -38,6 +38,12 @@ pub enum ExceptionKind {
     /// `**` with an exponent too large to compute — the S-12 resource half,
     /// provisional until the M2a.9 heap/step limits bound it deterministically.
     ExponentTooLarge,
+    /// A call whose callee is not a callable value (L§6.4/§8).
+    NotCallable,
+    /// A call's arguments do not match the callee's parameters (L§8.3): a missing
+    /// required argument, an unknown keyword, a duplicate binding, or too many
+    /// positional arguments.
+    ArgumentError,
 }
 
 /// A Doodle exception reaching a drive boundary (E§9).

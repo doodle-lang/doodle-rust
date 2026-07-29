@@ -62,8 +62,23 @@ pub(crate) fn bind_let(
     decl: NodeId,
 ) -> Result<(), Raise> {
     let value = take_value(machine, resolved.ast.span(decl))?;
+    bind_decl(resolved, heap, machine, namespace, decl, value);
+    Ok(())
+}
+
+/// Binds `value` to a declaration's target — a module cell (a global) or a frame
+/// slot (a construct-body local) — per the resolver's decision. Shared by
+/// `let`/`const` binding and `to`/`fn` definition (`call::define_callable`).
+pub(crate) fn bind_decl(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    namespace: &Namespace,
+    decl: NodeId,
+    value: Value,
+) {
     match resolved.resolutions[decl.0 as usize] {
-        // A construct-body local (M2a.4b): a frame slot.
+        // A construct-body / nested local: a frame slot.
         Some(Resolution::LocalSlot(slot)) => set_slot(machine, slot, value),
         // A module global: the declaration's name binds its cell (created at load).
         None => {
@@ -71,9 +86,8 @@ pub(crate) fn bind_let(
             let cell = find_cell(namespace, name).expect("a module global's cell exists");
             heap.cell_mut(cell).value = Some(value);
         }
-        Some(other) => unreachable!("unexpected resolution on a let/const decl: {other:?}"),
+        Some(other) => unreachable!("unexpected resolution on a decl: {other:?}"),
     }
-    Ok(())
 }
 
 /// Writes an assignment's value (now in the register) to its target lvalue. At
@@ -244,7 +258,10 @@ fn ident_name(resolved: &ResolvedModule, node: NodeId) -> &str {
 fn decl_name(resolved: &ResolvedModule, decl: NodeId) -> &str {
     match resolved.ast.node(decl) {
         Node::Let { name, .. } | Node::Const { name, .. } => name,
-        _ => unreachable!("bind_let over a non-let/const node"),
+        Node::Callable {
+            name: Some(name), ..
+        } => name,
+        _ => unreachable!("bind_decl over a node with no binding name"),
     }
 }
 

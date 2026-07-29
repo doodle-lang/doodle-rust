@@ -1,18 +1,19 @@
 //! The machine's single transition, `step` (machine-design §8): pop the top
 //! frame's top continuation and perform one step of work.
 //!
-//! **Scope (M2a.3a).** Statement sequencing, literal + arithmetic evaluation
-//! (`+ - * / // % **`, unary `- +`), module-top-level return (Void), and the
-//! **raise** path — a failing operation returns `Err(Raise)`, which the drive
-//! loop turns into `Raised` (there are no handlers yet; `try`/`rescue` is M4, and
-//! the §12 unwind mechanism arrives at M2a.6). Comparison/equality/logical
-//! operators and `not` are M2a.3b; other node kinds reach an `unimplemented!`.
+//! **Scope (M2a.5).** Statement sequencing; literal, arithmetic, comparison, and
+//! boolean evaluation; `let`/`const`/assignment; `if`/`while`/`loop`; calls of
+//! `to`/`fn`/anonymous-`fn` values with keyword arguments and defaults; `is`; and
+//! the **raise** path — a failing operation returns `Err(Raise)`, which the drive
+//! loop turns into `Raised` (no handlers yet; `try`/`rescue` is M4, the §12 unwind
+//! mechanism M2a.6). Blocks, `return`/`break`/`continue`, and PTC are M2a.6/M2a.7;
+//! other node kinds reach an `unimplemented!`.
 
 use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Machine, Value, arith, compare};
+use super::{Machine, Value, arith, call, compare, types};
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -44,11 +45,12 @@ pub(crate) fn step(
         Some(Cont::BinRhs { op, rhs, span }) => bin_rhs(machine, op, rhs, span),
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;
-            let result = if is_arithmetic(op) {
-                arith::binary(op, lhs, rhs, heap, span)?
-            } else {
+            let result = match op {
+                // `x is T`: the right operand is a type value (L§6.5).
+                BinaryOp::Is => types::is_op(lhs, rhs, heap, span)?,
+                _ if is_arithmetic(op) => arith::binary(op, lhs, rhs, heap, span)?,
                 // A comparison or equality operator (`== != < > <= >=`).
-                compare::binary(op, lhs, rhs, heap, span)?
+                _ => compare::binary(op, lhs, rhs, heap, span)?,
             };
             machine.reg = Some(result);
             Ok(())
@@ -77,6 +79,24 @@ pub(crate) fn step(
         Some(Cont::WhileCheck { node }) => control::while_check(resolved, machine, node),
         Some(Cont::LoopReloop { node }) => {
             control::loop_reloop(resolved, machine, node);
+            Ok(())
+        }
+        Some(Cont::CallGotCallee { call }) => call::got_callee(resolved, heap, machine, call),
+        Some(Cont::CallGotArg {
+            call,
+            callee,
+            values,
+            index,
+        }) => call::got_arg(resolved, heap, machine, call, callee, values, index),
+        Some(Cont::BindDefault { slot, default }) => {
+            call::bind_default(resolved, machine, slot, default)
+        }
+        Some(Cont::DefineCallable { decl }) => {
+            call::define_callable(resolved, heap, machine, namespace, decl);
+            Ok(())
+        }
+        Some(Cont::ReturnBarrier) => {
+            call::return_from_callable(resolved, heap, machine);
             Ok(())
         }
         // The frame's work is drained: return from it.
@@ -157,7 +177,11 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
                 next: 0,
             });
         }
-        other => unimplemented!("statement not yet in the machine (M2a.5+): {other:?}"),
+        // A named `to`/`fn` declaration: intern and bind its callable value when
+        // the statement runs (call.rs). Anonymous `fn` never reaches here — it is
+        // an expression, wrapped in an `ExprStmt`.
+        Node::Callable { .. } => frame.conts.push(Cont::DefineCallable { decl: stmt }),
+        other => unimplemented!("statement not yet in the machine (M2a.6+): {other:?}"),
     }
 }
 
@@ -199,9 +223,8 @@ fn eval(
                 // `and`/`or` short-circuit: after lhs, decide whether to run rhs.
                 BinaryOp::And => frame.conts.push(Cont::AndRhs { rhs, span }),
                 BinaryOp::Or => frame.conts.push(Cont::OrRhs { rhs, span }),
-                // `is` (a type test) needs type values — M2a.5.
-                BinaryOp::Is => unimplemented!("`is` not yet in the machine (M2a.5)"),
-                // Arithmetic and comparison/equality strict-evaluate both operands.
+                // Arithmetic, comparison/equality, and `is` strict-evaluate both
+                // operands, then apply at `BinApply`.
                 _ => frame.conts.push(Cont::BinRhs { op, rhs, span }),
             }
             // Evaluate lhs first (top of the LIFO stack); the pushed cont resumes.
@@ -217,19 +240,30 @@ fn eval(
             frame.conts.push(Cont::Eval { node: operand });
             return Ok(());
         }
-        other => unimplemented!("expression not yet in the machine (M2a.4b+): {other:?}"),
+        // A call schedules callee/argument evaluation, then `Apply` (call.rs).
+        Node::Call { .. } => {
+            call::eval_call(resolved, machine, node);
+            return Ok(());
+        }
+        // An anonymous `fn` expression interns its own callable value (L§6.10).
+        Node::Callable { .. } => call::make_callable(resolved, heap, node),
+        other => unimplemented!("expression not yet in the machine (M2a.5+): {other:?}"),
     };
     machine.reg = Some(value);
     Ok(())
 }
 
-/// After the top frame returns, delivering its result. A module completes Void
-/// (L§6.11) — its final statement's transient value is discarded. Callable-frame
-/// returns (which deliver `reg` to the caller) arrive at M2a.5.
+/// The top frame's work is drained with no `ReturnBarrier` beneath it: only the
+/// module top level ends this way, completing Void (L§6.11) — its final
+/// statement's transient value is discarded. A callable frame instead returns
+/// through its [`Cont::ReturnBarrier`] ([`call::return_from_callable`]).
 fn return_from_top_frame(machine: &mut Machine) {
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
         FrameKind::ModuleTopLevel => machine.reg = None,
+        FrameKind::Callable { .. } => {
+            unreachable!("a callable frame returns via its ReturnBarrier, not an empty cont stack")
+        }
     }
 }
 

@@ -151,3 +151,83 @@ fn a_non_bool_condition_raises() {
     assert_raises("if 1 then 2 else 3 end\n", ExceptionKind::TypeMismatch);
     assert_raises("while 1 do nil end\n", ExceptionKind::TypeMismatch);
 }
+
+/// A `to`/`fn` call tree drives to Void completion — a top-level module always
+/// yields Void (L§6.11), even when it defines and calls procedures/functions.
+#[test]
+fn a_call_tree_drives_to_void_completion() {
+    let mut inst = instance("fn add(a, b) a + b end\nto shout() add(1, 2) end\nshout()\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+}
+
+/// Calling something that is not a callable raises (L§6.4).
+#[test]
+fn calling_a_non_callable_raises() {
+    assert_raises("let x = 5\nx()\n", ExceptionKind::NotCallable);
+}
+
+/// Using a procedure result where a value is required raises — a `to` yields Void
+/// (L§6.11/§8.4). A *direct* call to a known `to` is a static error (S-6); here
+/// the proc is reached through a `let`, whose kind the resolver cannot pin, so it
+/// is the machine's runtime backstop (`take_value` on a Void register) that fires.
+#[test]
+fn a_procedure_result_used_as_a_value_raises() {
+    assert_raises(
+        "to p() 1 end\nlet g = p\nlet x = g()\n",
+        ExceptionKind::ProcedureInExpression,
+    );
+}
+
+/// Each L§8.3 argument-binding mismatch raises an argument error.
+#[test]
+fn argument_mismatches_raise() {
+    // Missing a required argument.
+    assert_raises("fn f(a, b) a + b end\nf(1)\n", ExceptionKind::ArgumentError);
+    // Too many positional arguments.
+    assert_raises("fn f(a) a end\nf(1, 2)\n", ExceptionKind::ArgumentError);
+    // An unknown keyword.
+    assert_raises("fn f(a) a end\nf(z: 1)\n", ExceptionKind::ArgumentError);
+    // The same parameter bound twice (positional then keyword).
+    assert_raises("fn f(a) a end\nf(1, a: 2)\n", ExceptionKind::ArgumentError);
+}
+
+/// Calling a `to`/`fn` before its declaration statement has executed raises —
+/// the temporal dead zone extends to callables (they bind in execution order,
+/// M2a.4a); here `f` is called before `to f` runs.
+#[test]
+fn calling_a_callable_before_its_declaration_raises() {
+    assert_raises("f()\nto f() nil end\n", ExceptionKind::UsedBeforeDefined);
+}
+
+/// The right operand of `is` must be a type value; a non-type raises (L§6.5).
+#[test]
+fn is_with_a_non_type_right_operand_raises() {
+    assert_raises("5 is 5\n", ExceptionKind::TypeMismatch);
+}
+
+/// A `fn` that dynamically falls off the end without a value must raise at its
+/// **own** completion (L§8.4/§8.7), independent of whether the caller uses the
+/// value. This is the `fn`-tail-`to` case: `f`'s tail call `g()` has a runtime-
+/// indeterminate kind (g is a parameter), so the resolver defers the judgment;
+/// when `g` is a `to`, `f` reaches its `ReturnBarrier` with a Void register.
+/// Because `f(noop)` here is a bare statement, nothing consumes the result, so
+/// the machine currently completes Void **silently** — `return_from_callable`
+/// leaves a `fn`'s register unchanged and does not check for Void. Enforcement is
+/// entangled with the M2a.7 apply-time kind gate (plan-m2a.md, S-55 follow-up);
+/// this is the expected-fail tripwire until then. (When the caller *does* consume
+/// the value — `let x = f(noop)` — the `take_value` backstop already raises.)
+#[test]
+#[ignore = "fn-falls-off-end enforcement lands with the M2a.7 kind gate"]
+fn a_function_that_falls_off_the_end_raises() {
+    let mut inst = instance("to noop() end\nfn f(g) g() end\nf(noop)\n");
+    assert!(
+        matches!(
+            run(&mut inst, Directive::RunToCompletion),
+            Outcome::Raised(..)
+        ),
+        "a fn falling off the end should raise at its own completion (L§8.7)"
+    );
+}

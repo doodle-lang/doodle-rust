@@ -31,12 +31,19 @@ mod slab;
 
 pub use slab::Slab;
 
-use crate::machine::{BigIntIdx, BytesIdx, CellIdx, ListIdx, StrIdx, Value};
+use crate::machine::{
+    BigIntIdx, BuiltinType, BytesIdx, CalIdx, CellIdx, ListIdx, StrIdx, TypeIdx, Value,
+};
+use crate::span::ModuleId;
 use num_bigint::BigInt;
 
 /// The byte width charged to [`Heap::bytes_allocated`] per list element. A fixed
 /// per-build constant (not a `Vec` capacity), so accounting is deterministic.
 const VALUE_BYTES: u64 = size_of::<Value>() as u64;
+
+/// The byte width charged to [`Heap::bytes_allocated`] per captured cell of a
+/// callable. A fixed per-build constant (not a `Vec` capacity), for determinism.
+const CELLIDX_BYTES: u64 = size_of::<CellIdx>() as u64;
 
 /// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
 /// construction path (literal decode, concat seam pass, `make_string`) produces
@@ -86,6 +93,32 @@ pub struct CellObj {
     pub value: Option<Value>,
 }
 
+/// A callable object (machine-design §4/§8): a `to`/`fn`/lambda value. Its
+/// **identity is the slab index** — callable equality is identity (L§4.9), so a
+/// plain module-level `to`/`fn` is interned to **one** `CalObj` (its declaration
+/// runs once, MD §8) and every call site reads that same index.
+#[derive(Clone, Debug)]
+pub struct CalObj {
+    /// The module the callable was declared in (single module at M2a).
+    pub module: ModuleId,
+    /// The declaring body's `CallableId` — an index into
+    /// [`ResolvedModule::callables`](crate::resolve::ResolvedModule::callables),
+    /// which supplies the params, slot count, body, and kind on invocation.
+    pub callable: u32,
+    /// The cells this closure captured at creation (capture representation B, MD
+    /// §7/§10). Empty for a plain `to`/`fn`; populated for closures at M2a.8.
+    pub captures: Vec<CellIdx>,
+}
+
+/// A type value (L§4.12): a built-in type denoted for use with `is` (L§6.5) and
+/// reflection (L§13). Record types and protocol values join at M4/M5.
+#[derive(Clone, Debug)]
+pub struct TypeObj {
+    /// Which built-in type this value denotes. Crate-internal: `BuiltinType` is a
+    /// machine detail, not part of the heap's public surface.
+    pub(crate) builtin: BuiltinType,
+}
+
 /// The per-instance heap (machine-design §4): the object slabs plus the
 /// allocation accounting the GC and heap limit read.
 pub struct Heap {
@@ -94,6 +127,8 @@ pub struct Heap {
     lists: Slab<ListObj>,
     bigints: Slab<BigIntObj>,
     cells: Slab<CellObj>,
+    callables: Slab<CalObj>,
+    types: Slab<TypeObj>,
     /// Program-driven payload bytes (MD §4); see the module-level determinism
     /// note. Monotonic under M2a.1 (no reclamation); GC decreases it at M2a.10.
     bytes_allocated: u64,
@@ -111,6 +146,8 @@ impl Heap {
             lists: Slab::new(),
             bigints: Slab::new(),
             cells: Slab::new(),
+            callables: Slab::new(),
+            types: Slab::new(),
             bytes_allocated: 0,
             alloc_serial: 0,
         }
@@ -196,6 +233,32 @@ impl Heap {
         self.cells.get_mut(idx.0)
     }
 
+    /// Allocates a callable. Payload is a fixed header plus one width per captured
+    /// cell (MD §4; the object-count accounting model is pending an MD §4/§15
+    /// ruling — see claude-todo).
+    pub fn alloc_callable(&mut self, obj: CalObj) -> CalIdx {
+        self.bytes_allocated += VALUE_BYTES + obj.captures.len() as u64 * CELLIDX_BYTES;
+        let serial = self.next_serial();
+        CalIdx(self.callables.alloc(obj, serial))
+    }
+
+    /// Borrows the callable at `idx`.
+    pub fn callable(&self, idx: CalIdx) -> &CalObj {
+        self.callables.get(idx.0)
+    }
+
+    /// Allocates a type value. Payload is one fixed header width (MD §4).
+    pub fn alloc_type(&mut self, obj: TypeObj) -> TypeIdx {
+        self.bytes_allocated += VALUE_BYTES;
+        let serial = self.next_serial();
+        TypeIdx(self.types.alloc(obj, serial))
+    }
+
+    /// Borrows the type value at `idx`.
+    pub fn type_value(&self, idx: TypeIdx) -> &TypeObj {
+        self.types.get(idx.0)
+    }
+
     /// Total program-driven payload bytes currently accounted (MD §4). Drives GC
     /// triggering and the heap limit (M2a.9/M2a.10).
     pub fn bytes_allocated(&self) -> u64 {
@@ -210,6 +273,8 @@ impl Heap {
             + self.lists.live_count()
             + self.bigints.live_count()
             + self.cells.live_count()
+            + self.callables.live_count()
+            + self.types.live_count()
     }
 }
 

@@ -1,10 +1,12 @@
 //! Continuations (machine-design §8): defunctionalized pending work on a frame's
 //! LIFO stack. `step` pops the top continuation and performs one transition.
 //!
-//! **Scope (M2a.2).** Statement sequencing (`Seq`) and expression evaluation
-//! (`Eval`) for literals. The expression-plumbing, call, binding, control, and
-//! cleanup continuation categories (machine-design §8) join in their chunks
-//! (M2a.3+); each new variant falls into one of those pinned categories.
+//! Every variant falls into one of the machine-design §8 categories: sequencing
+//! (`Seq`), expression plumbing (`BinRhs`/`BinApply`/`UnaryApply`/`AndRhs`/…),
+//! calls (`CallGotCallee`/`CallGotArg`/`BindDefault`), binding/assignment
+//! (`BindLet`/`AssignTo`/`DefineCallable`), control (`IfChoose`/`WhileCheck`/
+//! `LoopReloop`), and markers (`ReturnBarrier`). The cleanup category
+//! (`WithRestore`/`TryHandler`) and the block/unwind machinery join at M2a.6.
 
 use crate::ast::{BinaryOp, NodeId, UnaryOp};
 use crate::machine::Value;
@@ -115,4 +117,45 @@ pub(crate) enum Cont {
         /// The `Loop` node.
         node: NodeId,
     },
+    /// A call's callee is now in the register: begin evaluating its arguments
+    /// left to right (L§8.3, L§14), or, with no arguments, apply immediately
+    /// (machine-design §8/§10, calls).
+    CallGotCallee {
+        /// The `Call` node (its `args`/`block` drive binding).
+        call: NodeId,
+    },
+    /// A call's argument at `index` is now in the register: stash it and evaluate
+    /// the next argument, or, when the last argument is in, apply. Holds the
+    /// already-evaluated callee and prior argument values, so it is a GC root
+    /// (machine-design §8).
+    CallGotArg {
+        /// The `Call` node.
+        call: NodeId,
+        /// The already-evaluated callee (a `Callable`).
+        callee: Value,
+        /// The argument values evaluated so far, in source order.
+        values: Vec<Value>,
+        /// The index of the argument now in the register.
+        index: u32,
+    },
+    /// A parameter default's value is now in the register: write it into the
+    /// callee frame's slot (defaults are evaluated in the callee activation, L§8.2).
+    BindDefault {
+        /// The frame slot the default fills.
+        slot: u16,
+        /// The default expression (for its span, if it yields Void).
+        default: NodeId,
+    },
+    /// Intern and bind a named `to`/`fn` declaration (machine-design §8): allocate
+    /// its one canonical callable value and write it to the declaration's target
+    /// (a module cell or a frame slot). The statement yields Void.
+    DefineCallable {
+        /// The `Callable` declaration node.
+        decl: NodeId,
+    },
+    /// The root of a callable body's continuation stack (machine-design §8/§10):
+    /// when it is reached the body is done, so the frame returns, delivering its
+    /// result (a `fn`'s value; Void for a `to`). Also the target a `return` unwinds
+    /// to (M2a.6).
+    ReturnBarrier,
 }
