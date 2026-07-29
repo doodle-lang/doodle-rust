@@ -14,6 +14,7 @@
 //! (ring buffer, fuel, unwind record, dynamic stack, drive stack) is added then.
 
 mod arith;
+mod compare;
 mod cont;
 mod error;
 mod frame;
@@ -369,5 +370,25 @@ mod tests {
             drive_capturing_last_value(&mut inst),
             Some(Value::BigInt(_))
         ));
+    }
+
+    #[test]
+    fn comparison_and_boolean_ops_evaluate_through_the_machine() {
+        for (src, expected) in [
+            ("3 < 5\n", true),
+            ("5 <= 5\n", true),
+            ("2 != 2\n", false),
+            ("1 == 1.0\n", true),
+            ("true and false\n", false),
+            ("false or true\n", true),
+            ("not false\n", true),
+        ] {
+            let mut inst = load_source(src);
+            let got = drive_capturing_last_value(&mut inst);
+            assert!(
+                matches!(got, Some(Value::Bool(b)) if b == expected),
+                "{src:?} should evaluate to {expected}, got {got:?}"
+            );
+        }
     }
 }

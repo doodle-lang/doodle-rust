@@ -101,3 +101,32 @@ fn division_by_zero_surfaces_as_an_uncaught_raise() {
 fn a_nonfinite_float_result_surfaces_as_an_uncaught_raise() {
     assert_raises("1e308 * 10.0\n", ExceptionKind::NonFiniteFloat);
 }
+
+/// `and`/`or` short-circuit: a `false and (…)` / `true or (…)` must not evaluate
+/// the right operand, so a failing right operand never raises.
+#[test]
+fn and_or_short_circuit_past_a_failing_right_operand() {
+    for src in ["false and (1 / 0)\n", "true or (1 / 0)\n"] {
+        let mut inst = instance(src);
+        assert!(
+            matches!(
+                run(&mut inst, Directive::RunToCompletion),
+                Outcome::Completed(None)
+            ),
+            "{src:?} should short-circuit and complete Void"
+        );
+    }
+}
+
+/// A non-`Bool` operand to a logical operator raises (strict booleans, L§4.3).
+#[test]
+fn a_non_bool_logical_operand_raises() {
+    assert_raises("1 and true\n", ExceptionKind::TypeMismatch);
+    assert_raises("not 1\n", ExceptionKind::TypeMismatch);
+}
+
+/// Ordering values for which it is undefined raises (L§6.6).
+#[test]
+fn ordering_an_undefined_type_raises() {
+    assert_raises("1 < true\n", ExceptionKind::UndefinedOrdering);
+}

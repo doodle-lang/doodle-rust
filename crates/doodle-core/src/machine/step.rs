@@ -11,7 +11,7 @@
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Machine, Value, arith};
+use super::{Machine, Value, arith, compare};
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -45,12 +45,29 @@ pub(crate) fn step(
         Some(Cont::BinRhs { op, rhs, span }) => bin_rhs(machine, op, rhs, span),
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;
-            machine.reg = Some(arith::binary(op, lhs, rhs, heap, span)?);
+            let result = if is_arithmetic(op) {
+                arith::binary(op, lhs, rhs, heap, span)?
+            } else {
+                // A comparison or equality operator (`== != < > <= >=`).
+                compare::binary(op, lhs, rhs, heap, span)?
+            };
+            machine.reg = Some(result);
             Ok(())
         }
         Some(Cont::UnaryApply { op, span }) => {
             let operand = take_value(machine, span)?;
-            machine.reg = Some(arith::unary(op, operand, heap, span)?);
+            let result = match op {
+                UnaryOp::Not => compare::not(operand, span)?,
+                UnaryOp::Neg | UnaryOp::Pos => arith::unary(op, operand, heap, span)?,
+            };
+            machine.reg = Some(result);
+            Ok(())
+        }
+        Some(Cont::AndRhs { rhs, span }) => logical_rhs(machine, rhs, span, true),
+        Some(Cont::OrRhs { rhs, span }) => logical_rhs(machine, rhs, span, false),
+        Some(Cont::AssertBool { span }) => {
+            let v = take_value(machine, span)?;
+            machine.reg = Some(Value::Bool(compare::as_bool(v, "and/or", span)?));
             Ok(())
         }
         // The frame's work is drained: return from it.
@@ -59,6 +76,33 @@ pub(crate) fn step(
             Ok(())
         }
     }
+}
+
+/// The `and`/`or` short-circuit transition, with the left operand in the register.
+/// `and` (is_and) short-circuits to `false` when the left is `false`; `or`
+/// short-circuits to `true` when the left is `true`. Otherwise the right operand
+/// is evaluated and must itself be a `Bool` (L§6.6), enforced by `AssertBool`.
+fn logical_rhs(
+    machine: &mut Machine,
+    rhs: NodeId,
+    span: crate::span::Span,
+    is_and: bool,
+) -> Result<(), Raise> {
+    let op = if is_and { "and" } else { "or" };
+    let lhs = compare::as_bool(take_value(machine, span)?, op, span)?;
+    if lhs == is_and {
+        // `and` with a true left, or `or` with a false left: the result is rhs.
+        let frame = machine
+            .frames
+            .last_mut()
+            .expect("logical_rhs with no frame");
+        frame.conts.push(Cont::AssertBool { span });
+        frame.conts.push(Cont::Eval { node: rhs });
+    } else {
+        // Short-circuit: `and` false → false; `or` true → true.
+        machine.reg = Some(Value::Bool(!is_and));
+    }
+    Ok(())
 }
 
 /// Runs the statement at `next` in `block`, and re-arms the sequence for the
@@ -103,22 +147,24 @@ fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node:
         }
         Node::Binary { op, lhs, rhs } => {
             let op = *op;
-            if !is_arithmetic(op) {
-                unimplemented!("operator not yet in the machine (M2a.3b): {op:?}");
-            }
             let (lhs, rhs) = (*lhs, *rhs);
             let span = resolved.ast.span(node);
             let frame = machine.frames.last_mut().expect("eval with no frame");
-            // Evaluate lhs first (top of the LIFO stack), then BinRhs takes over.
-            frame.conts.push(Cont::BinRhs { op, rhs, span });
+            match op {
+                // `and`/`or` short-circuit: after lhs, decide whether to run rhs.
+                BinaryOp::And => frame.conts.push(Cont::AndRhs { rhs, span }),
+                BinaryOp::Or => frame.conts.push(Cont::OrRhs { rhs, span }),
+                // `is` (a type test) needs type values — M2a.5.
+                BinaryOp::Is => unimplemented!("`is` not yet in the machine (M2a.5)"),
+                // Arithmetic and comparison/equality strict-evaluate both operands.
+                _ => frame.conts.push(Cont::BinRhs { op, rhs, span }),
+            }
+            // Evaluate lhs first (top of the LIFO stack); the pushed cont resumes.
             frame.conts.push(Cont::Eval { node: lhs });
             return;
         }
         Node::Unary { op, operand } => {
             let op = *op;
-            if matches!(op, UnaryOp::Not) {
-                unimplemented!("`not` not yet in the machine (M2a.3b)");
-            }
             let operand = *operand;
             let span = resolved.ast.span(node);
             let frame = machine.frames.last_mut().expect("eval with no frame");

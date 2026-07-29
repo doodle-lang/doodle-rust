@@ -55,4 +55,28 @@ pub(crate) enum Cont {
         /// The operator's span, for a raise's position.
         span: Span,
     },
+    /// `and` whose left operand is now in the register: it must be a `Bool`; if
+    /// `false`, short-circuit to `false`, else evaluate the right operand
+    /// (L§6.6). The right operand's result becomes the `and`'s value, checked by
+    /// [`Cont::AssertBool`].
+    AndRhs {
+        /// The right-operand expression.
+        rhs: NodeId,
+        /// The operator's span, for a raise's position.
+        span: Span,
+    },
+    /// `or` whose left operand is now in the register: it must be a `Bool`; if
+    /// `true`, short-circuit to `true`, else evaluate the right operand.
+    OrRhs {
+        /// The right-operand expression.
+        rhs: NodeId,
+        /// The operator's span, for a raise's position.
+        span: Span,
+    },
+    /// The right operand of an `and`/`or` is now in the register: it must be a
+    /// `Bool`, and it is the operator's result (strict booleans, L§4.3).
+    AssertBool {
+        /// The operator's span, for a raise's position.
+        span: Span,
+    },
 }

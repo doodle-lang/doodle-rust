@@ -22,7 +22,8 @@ use num_integer::Integer;
 use num_traits::{Pow, Signed, ToPrimitive, Zero};
 
 /// A numeric operand resolved for computation: an exact integer or a float.
-enum Num {
+/// Shared with [`super::compare`] (the comparison/equality operators).
+pub(crate) enum Num {
     Int(BigInt),
     Float(f64),
 }
@@ -77,7 +78,7 @@ pub(crate) fn int_value(n: BigInt, heap: &mut Heap) -> Value {
 
 /// Reads a value as a numeric operand, cloning a bignum's magnitude; non-numbers
 /// return `None` (the caller raises a type error).
-fn as_num(v: Value, heap: &Heap) -> Option<Num> {
+pub(crate) fn as_num(v: Value, heap: &Heap) -> Option<Num> {
     match v {
         Value::Int(n) => Some(Num::Int(BigInt::from(n))),
         Value::BigInt(idx) => Some(Num::Int(heap.bigint(idx).value.clone())),
