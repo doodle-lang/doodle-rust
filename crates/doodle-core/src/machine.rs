@@ -448,4 +448,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn control_flow_evaluates_through_the_machine() {
+        for (src, want) in [
+            ("let x = if 3 > 2 then 10 else 20 end\nx\n", 10), // if-expr, true arm
+            ("let x = if 2 > 3 then 10 else 20 end\nx\n", 20), // if-expr, else
+            (
+                "let s = if 5 < 0 then 1 else if 5 > 0 then 2 else 3 end\ns\n",
+                2,
+            ), // else-if
+            ("let x = 0\nif 3 > 2 then x = 5 end\nx\n", 5),    // statement if mutates a global
+            ("let n = 0\nwhile n < 3 do n = n + 1 end\nn\n", 3), // while counter
+            // A construct-body local (`step`, a frame slot) summed across the loop.
+            (
+                "let t = 0\nlet i = 0\nwhile i < 3 do\n\
+                 let step = i + 1\nt = t + step\ni = i + 1\nend\nt\n",
+                6,
+            ),
+        ] {
+            let mut inst = load_source(src);
+            assert_eq!(
+                drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+                Some(want),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loop_keeps_running_until_something_stops_it() {
+        // `break`/`return`/limits arrive later (M2a.5/M2a.6/M2a.9); the reloop
+        // mechanism itself just cycles the body forever.
+        let mut inst = load_source("loop do 1 end\n");
+        for _ in 0..500 {
+            assert!(!inst.is_halted());
+            inst.step().expect("unexpected raise");
+        }
+        assert!(!inst.is_halted());
+    }
 }

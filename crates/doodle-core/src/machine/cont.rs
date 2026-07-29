@@ -92,4 +92,27 @@ pub(crate) enum Cont {
         /// The `Assign` node (its `target` is the lvalue).
         assign: NodeId,
     },
+    /// An `if` arm's condition is now in the register: it must be a `Bool`; if
+    /// true run that arm's body, else advance to the next arm / `else` / nothing
+    /// (L§6.8/§7.5). Carries the `If` node + the arm being tested.
+    IfChoose {
+        /// The `If` node.
+        node: NodeId,
+        /// The arm index whose condition is in the register.
+        index: u32,
+    },
+    /// A `while` condition is now in the register: it must be a `Bool`; if true
+    /// run the body then re-check, else the loop is done (L§7.6). Carries the
+    /// `While` node (so a `break`/`continue` can target it, M2a.6).
+    WhileCheck {
+        /// The `While` node.
+        node: NodeId,
+    },
+    /// Re-enter a `loop` body (L§7.7): run the body, then loop again. Carries the
+    /// `Loop` node (a `break`/`continue` target, M2a.6). Unbounded until a
+    /// `break`/`return` (M2a.5/M2a.6) or a limit (M2a.9).
+    LoopReloop {
+        /// The `Loop` node.
+        node: NodeId,
+    },
 }

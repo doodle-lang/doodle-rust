@@ -143,3 +143,11 @@ fn a_use_before_definition_raises() {
 fn an_undefined_name_raises() {
     assert_raises("nope\n", ExceptionKind::NameNotDefined);
 }
+
+/// A non-`Bool` `if`/`while` condition raises (strict booleans, L§4.3) — no
+/// truthiness. (The `while` raises on the first check, so it never loops.)
+#[test]
+fn a_non_bool_condition_raises() {
+    assert_raises("if 1 then 2 else 3 end\n", ExceptionKind::TypeMismatch);
+    assert_raises("while 1 do nil end\n", ExceptionKind::TypeMismatch);
+}

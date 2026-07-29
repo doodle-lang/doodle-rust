@@ -1,6 +1,5 @@
-//! Statement transitions: name reads/writes, `let`/`const` binding, and
-//! assignment (machine-design §6/§7). `if`/`while`/`loop` control flow joins at
-//! M2a.4b.
+//! Statement and control-flow transitions: name reads/writes, `let`/`const`
+//! binding, assignment, and `if`/`while`/`loop` (machine-design §6/§7).
 //!
 //! Module-level bindings live in **cells** (MD §6); a construct-body local lives
 //! in a frame **slot** (MD §7). The resolver already decided which: a `let`/
@@ -9,10 +8,18 @@
 //! or `ModuleName`. A binding read before its declaration executes (an
 //! uninitialized cell/slot) is a **use-before-defined** error (the temporal dead
 //! zone); a name with no binding at all is **not defined**.
+//!
+//! Control constructs run their bodies in the **enclosing frame** (the resolver
+//! models this — only callable/block bodies open a frame), so a construct-body
+//! body is just a `Seq` over its statements. Their conditions are strict `Bool`s
+//! (no truthiness, L§4.3). `break`/`continue` (which target the loop conts) are
+//! M2a.6.
 
+use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
+use super::frame::Frame;
 use super::step::take_value;
-use super::{Machine, Value};
+use super::{Machine, Value, compare};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::CellIdx;
@@ -97,6 +104,96 @@ pub(crate) fn assign_to(
         Resolution::BlockOuter { .. } => unimplemented!("block outer assignment is M2a.6"),
     }
     Ok(())
+}
+
+/// Schedules an `if`: evaluate the first arm's condition, then choose. Shared by
+/// statement- and expression-position `if`.
+pub(crate) fn schedule_if(frame: &mut Frame, resolved: &ResolvedModule, node: NodeId) {
+    let first_cond = match resolved.ast.node(node) {
+        Node::If { arms, .. } => arms[0].cond, // the parser guarantees ≥ 1 arm
+        _ => unreachable!("schedule_if over a non-If node"),
+    };
+    frame.conts.push(Cont::IfChoose { node, index: 0 });
+    frame.conts.push(Cont::Eval { node: first_cond });
+}
+
+/// The `if` choice, with arm `index`'s condition in the register: if true, run
+/// that arm's body; else advance to the next arm, the `else`, or nothing (a
+/// statement `if` with no match yields Void — the register is already `None`).
+pub(crate) fn if_choose(
+    resolved: &ResolvedModule,
+    machine: &mut Machine,
+    node: NodeId,
+    index: u32,
+) -> Result<(), Raise> {
+    let (body, cond_span, next_cond, else_body) = {
+        let Node::If { arms, else_body } = resolved.ast.node(node) else {
+            unreachable!("IfChoose over a non-If node");
+        };
+        let arm = &arms[index as usize];
+        let next = index as usize + 1;
+        let next_cond = arms.get(next).map(|a| a.cond);
+        (arm.body, resolved.ast.span(arm.cond), next_cond, *else_body)
+    };
+    let cond = take_value(machine, cond_span)?;
+    let frame = machine.frames.last_mut().expect("a frame is active");
+    if compare::as_bool(cond, "if", cond_span)? {
+        frame.conts.push(Cont::Seq {
+            block: body,
+            next: 0,
+        });
+    } else if let Some(next_cond) = next_cond {
+        frame.conts.push(Cont::IfChoose {
+            node,
+            index: index + 1,
+        });
+        frame.conts.push(Cont::Eval { node: next_cond });
+    } else if let Some(else_body) = else_body {
+        frame.conts.push(Cont::Seq {
+            block: else_body,
+            next: 0,
+        });
+    }
+    Ok(())
+}
+
+/// A `while` step, with the condition in the register: if true, run the body then
+/// re-check; else the loop is done (yields Void — the register is already `None`).
+pub(crate) fn while_check(
+    resolved: &ResolvedModule,
+    machine: &mut Machine,
+    node: NodeId,
+) -> Result<(), Raise> {
+    let (cond, cond_span, body) = match resolved.ast.node(node) {
+        Node::While { cond, body } => (*cond, resolved.ast.span(*cond), *body),
+        _ => unreachable!("WhileCheck over a non-While node"),
+    };
+    let value = take_value(machine, cond_span)?;
+    if compare::as_bool(value, "while", cond_span)? {
+        let frame = machine.frames.last_mut().expect("a frame is active");
+        // LIFO: run the body, then re-evaluate the condition, then re-check.
+        frame.conts.push(Cont::WhileCheck { node });
+        frame.conts.push(Cont::Eval { node: cond });
+        frame.conts.push(Cont::Seq {
+            block: body,
+            next: 0,
+        });
+    }
+    Ok(())
+}
+
+/// Re-enters a `loop` body: run the body, then loop again.
+pub(crate) fn loop_reloop(resolved: &ResolvedModule, machine: &mut Machine, node: NodeId) {
+    let body = match resolved.ast.node(node) {
+        Node::Loop { body } => *body,
+        _ => unreachable!("LoopReloop over a non-Loop node"),
+    };
+    let frame = machine.frames.last_mut().expect("a frame is active");
+    frame.conts.push(Cont::LoopReloop { node });
+    frame.conts.push(Cont::Seq {
+        block: body,
+        next: 0,
+    });
 }
 
 fn read_slot(machine: &Machine, slot: u16, name: &str, span: Span) -> Result<Value, Raise> {

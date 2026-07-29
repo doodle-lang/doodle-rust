@@ -73,6 +73,12 @@ pub(crate) fn step(
         Some(Cont::AssignTo { assign }) => {
             control::assign_to(resolved, heap, machine, namespace, assign)
         }
+        Some(Cont::IfChoose { node, index }) => control::if_choose(resolved, machine, node, index),
+        Some(Cont::WhileCheck { node }) => control::while_check(resolved, machine, node),
+        Some(Cont::LoopReloop { node }) => {
+            control::loop_reloop(resolved, machine, node);
+            Ok(())
+        }
         // The frame's work is drained: return from it.
         None => {
             return_from_top_frame(machine);
@@ -139,7 +145,19 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
             frame.conts.push(Cont::AssignTo { assign: stmt });
             frame.conts.push(Cont::Eval { node: *value });
         }
-        other => unimplemented!("statement not yet in the machine (M2a.4b+): {other:?}"),
+        Node::If { .. } => control::schedule_if(frame, resolved, stmt),
+        Node::While { cond, .. } => {
+            frame.conts.push(Cont::WhileCheck { node: stmt });
+            frame.conts.push(Cont::Eval { node: *cond });
+        }
+        Node::Loop { body } => {
+            frame.conts.push(Cont::LoopReloop { node: stmt });
+            frame.conts.push(Cont::Seq {
+                block: *body,
+                next: 0,
+            });
+        }
+        other => unimplemented!("statement not yet in the machine (M2a.5+): {other:?}"),
     }
 }
 
@@ -165,6 +183,13 @@ fn eval(
             arith::int_value(n, heap)
         }
         Node::Ident(_) => control::read_ref(resolved, heap, machine, namespace, node)?,
+        // `if` in expression position: same machinery as the statement form; the
+        // selected branch's value stays in the register for the consumer (L§6.8).
+        Node::If { .. } => {
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            control::schedule_if(frame, resolved, node);
+            return Ok(());
+        }
         Node::Binary { op, lhs, rhs } => {
             let op = *op;
             let (lhs, rhs) = (*lhs, *rhs);
