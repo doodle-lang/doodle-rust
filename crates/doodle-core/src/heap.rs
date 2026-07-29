@@ -31,7 +31,7 @@ mod slab;
 
 pub use slab::Slab;
 
-use crate::machine::{BigIntIdx, BytesIdx, ListIdx, StrIdx, Value};
+use crate::machine::{BigIntIdx, BytesIdx, CellIdx, ListIdx, StrIdx, Value};
 use num_bigint::BigInt;
 
 /// The byte width charged to [`Heap::bytes_allocated`] per list element. A fixed
@@ -73,6 +73,19 @@ pub struct BigIntObj {
     pub value: BigInt,
 }
 
+/// A binding **cell** (machine-design §6/§7): a mutable box holding one value —
+/// a module-level binding, and later a closure upvalue. `value` is `None` while
+/// the binding is **uninitialized** (declared but its `let`/`const` has not yet
+/// executed): reading it then is a use-before-defined error. The cell `kind`
+/// (mutable/const/parameter/dispatcher, MD §6) joins when it is first needed
+/// (dynamic parameters at M4, dispatch at M5); at M2a assignability is already a
+/// static check (S-6 rule 2a), so the machine does not re-check it here.
+#[derive(Clone, Debug)]
+pub struct CellObj {
+    /// The bound value, or `None` if not yet initialized.
+    pub value: Option<Value>,
+}
+
 /// The per-instance heap (machine-design §4): the object slabs plus the
 /// allocation accounting the GC and heap limit read.
 pub struct Heap {
@@ -80,6 +93,7 @@ pub struct Heap {
     bytes: Slab<BytesObj>,
     lists: Slab<ListObj>,
     bigints: Slab<BigIntObj>,
+    cells: Slab<CellObj>,
     /// Program-driven payload bytes (MD §4); see the module-level determinism
     /// note. Monotonic under M2a.1 (no reclamation); GC decreases it at M2a.10.
     bytes_allocated: u64,
@@ -96,6 +110,7 @@ impl Heap {
             bytes: Slab::new(),
             lists: Slab::new(),
             bigints: Slab::new(),
+            cells: Slab::new(),
             bytes_allocated: 0,
             alloc_serial: 0,
         }
@@ -163,6 +178,24 @@ impl Heap {
         self.bigints.get(idx.0)
     }
 
+    /// Allocates a binding cell with the given initial `value` (`None` =
+    /// uninitialized). Its payload is one value width (MD §6/§7).
+    pub fn alloc_cell(&mut self, value: Option<Value>) -> CellIdx {
+        self.bytes_allocated += VALUE_BYTES;
+        let serial = self.next_serial();
+        CellIdx(self.cells.alloc(CellObj { value }, serial))
+    }
+
+    /// Borrows the cell at `idx`.
+    pub fn cell(&self, idx: CellIdx) -> &CellObj {
+        self.cells.get(idx.0)
+    }
+
+    /// Mutably borrows the cell at `idx` (a binding write; MD §6/§7).
+    pub fn cell_mut(&mut self, idx: CellIdx) -> &mut CellObj {
+        self.cells.get_mut(idx.0)
+    }
+
     /// Total program-driven payload bytes currently accounted (MD §4). Drives GC
     /// triggering and the heap limit (M2a.9/M2a.10).
     pub fn bytes_allocated(&self) -> u64 {
@@ -176,6 +209,7 @@ impl Heap {
             + self.bytes.live_count()
             + self.lists.live_count()
             + self.bigints.live_count()
+            + self.cells.live_count()
     }
 }
 

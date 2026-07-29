@@ -16,6 +16,7 @@
 mod arith;
 mod compare;
 mod cont;
+mod control;
 mod error;
 mod frame;
 mod step;
@@ -51,6 +52,13 @@ heap_index! {
     TypeIdx: "Index of a type value in the type slab (machine-design §4).",
     FrnIdx: "Index of a foreign value in the foreign slab (machine-design §4).",
 }
+
+/// Index of a binding **cell** in the shared cells slab (machine-design §6/§7).
+/// A cell is a machine-internal box — a module binding or (later) a closure
+/// upvalue — **not** a `Value` variant, so it has no place in the `Value`-oriented
+/// index macro above.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct CellIdx(pub u32);
 
 /// A Doodle value (language spec L§4) in the machine's `Copy` representation
 /// (machine-design §3).
@@ -163,13 +171,19 @@ pub struct Instance {
     resolved: Arc<ResolvedModule>,
     heap: Heap,
     machine: Machine,
+    /// The module namespace (machine-design §6/§18): each module-level name bound
+    /// to its binding cell. A small ordered list (single module at M1/M2a);
+    /// scanned linearly, so lookup is deterministic and hashing-free.
+    namespace: Vec<(Box<str>, CellIdx)>,
     state: InstanceState,
 }
 
 impl Instance {
     /// Loads a resolved module into a fresh `Ready` instance (machine-design §18).
-    /// The module top level becomes an ordinary frame whose pending work is
-    /// sequencing its statements (an observable, drivable `ModuleTopLevel` frame).
+    /// Each module-level name gets an **uninitialized** binding cell (its
+    /// `let`/`const` fills it when it executes; a read before then is a
+    /// use-before-defined error). The module top level becomes an ordinary,
+    /// drivable `ModuleTopLevel` frame whose pending work sequences its statements.
     pub fn load(module: ResolvedModule) -> Self {
         debug_assert!(
             matches!(
@@ -178,19 +192,30 @@ impl Instance {
             ),
             "load: a resolved module's root must be the `Module` node"
         );
+        let mut heap = Heap::new();
+        let namespace = module
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), heap.alloc_cell(None)))
+            .collect();
+        let slot_count = module_top_level_slots(&module);
         let root = module.root;
         let resolved = Arc::new(module);
-        let frame = Frame::module_top_level(Cont::Seq {
-            block: root,
-            next: 0,
-        });
+        let frame = Frame::module_top_level(
+            slot_count,
+            Cont::Seq {
+                block: root,
+                next: 0,
+            },
+        );
         Instance {
             resolved,
-            heap: Heap::new(),
+            heap,
             machine: Machine {
                 frames: vec![frame],
                 reg: None,
             },
+            namespace,
             state: InstanceState::Ready,
         }
     }
@@ -221,8 +246,24 @@ impl Instance {
     /// `!self.is_halted()`. Returns `Err` if the transition raised a runtime
     /// error (the drive loop turns it into `Raised`).
     pub(crate) fn step(&mut self) -> Result<(), Raise> {
-        step::step(&self.resolved, &mut self.heap, &mut self.machine)
+        step::step(
+            &self.resolved,
+            &mut self.heap,
+            &mut self.machine,
+            &self.namespace,
+        )
     }
+}
+
+/// The module top level's local-slot count (its construct-body locals) — the
+/// size of its frame's `locals`. Zero when the module has no `if`/`while`/`loop`
+/// bodies with their own bindings.
+fn module_top_level_slots(module: &ResolvedModule) -> u16 {
+    module
+        .callables
+        .iter()
+        .find(|c| matches!(c.kind, crate::resolve::BodyKind::ModuleTopLevel))
+        .map_or(0, |c| c.slot_count)
 }
 
 #[cfg(test)]
@@ -388,6 +429,22 @@ mod tests {
             assert!(
                 matches!(got, Some(Value::Bool(b)) if b == expected),
                 "{src:?} should evaluate to {expected}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_bindings_read_and_write_through_the_machine() {
+        for (src, want) in [
+            ("let x = 1\nx + 1\n", 2),        // read a `let`
+            ("let x = 1\nx = x + 1\nx\n", 2), // reassign a `let`
+            ("const c = 5\nc * 2\n", 10),     // read a `const`
+        ] {
+            let mut inst = load_source(src);
+            assert_eq!(
+                drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+                Some(want),
+                "{src:?}"
             );
         }
     }

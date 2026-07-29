@@ -1,0 +1,168 @@
+//! Statement transitions: name reads/writes, `let`/`const` binding, and
+//! assignment (machine-design §6/§7). `if`/`while`/`loop` control flow joins at
+//! M2a.4b.
+//!
+//! Module-level bindings live in **cells** (MD §6); a construct-body local lives
+//! in a frame **slot** (MD §7). The resolver already decided which: a `let`/
+//! `const` decl node carries a `LocalSlot` resolution when it is a frame local,
+//! and none when it is a module global; a name *reference* carries `LocalSlot`
+//! or `ModuleName`. A binding read before its declaration executes (an
+//! uninitialized cell/slot) is a **use-before-defined** error (the temporal dead
+//! zone); a name with no binding at all is **not defined**.
+
+use super::error::{ExceptionKind, Raise};
+use super::step::take_value;
+use super::{Machine, Value};
+use crate::ast::{Node, NodeId};
+use crate::heap::Heap;
+use crate::machine::CellIdx;
+use crate::resolve::{Resolution, ResolvedModule};
+use crate::span::Span;
+
+/// The per-instance module namespace (`name → cell`) at M2a — a small ordered
+/// list scanned linearly (deterministic; no hashing on a Doodle-observable path).
+pub(crate) type Namespace = [(Box<str>, CellIdx)];
+
+/// Reads the value of a name reference (`Node::Ident`) — a frame local or a
+/// module cell — raising if it is undefined or used before it was defined.
+pub(crate) fn read_ref(
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    machine: &Machine,
+    namespace: &Namespace,
+    node: NodeId,
+) -> Result<Value, Raise> {
+    let span = resolved.ast.span(node);
+    let name = ident_name(resolved, node);
+    match resolution(resolved, node) {
+        Resolution::LocalSlot(slot) => read_slot(machine, slot, name, span),
+        Resolution::ModuleName(idx) => {
+            let name = &resolved.name_refs[idx as usize].name;
+            read_cell(heap, find_cell(namespace, name), name, span)
+        }
+        Resolution::BlockOuter { .. } => unimplemented!("block outer-local access is M2a.6"),
+    }
+}
+
+/// Binds a `let`/`const` initializer (now in the register) to its target — a
+/// module cell (a global) or a frame slot (a construct-body local). The
+/// statement yields Void.
+pub(crate) fn bind_let(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    namespace: &Namespace,
+    decl: NodeId,
+) -> Result<(), Raise> {
+    let value = take_value(machine, resolved.ast.span(decl))?;
+    match resolved.resolutions[decl.0 as usize] {
+        // A construct-body local (M2a.4b): a frame slot.
+        Some(Resolution::LocalSlot(slot)) => set_slot(machine, slot, value),
+        // A module global: the declaration's name binds its cell (created at load).
+        None => {
+            let name = decl_name(resolved, decl);
+            let cell = find_cell(namespace, name).expect("a module global's cell exists");
+            heap.cell_mut(cell).value = Some(value);
+        }
+        Some(other) => unreachable!("unexpected resolution on a let/const decl: {other:?}"),
+    }
+    Ok(())
+}
+
+/// Writes an assignment's value (now in the register) to its target lvalue. At
+/// M2a.4a the target is a simple name; field/index place chains are M4 (S-38).
+pub(crate) fn assign_to(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    namespace: &Namespace,
+    assign: NodeId,
+) -> Result<(), Raise> {
+    let Node::Assign { target, .. } = resolved.ast.node(assign) else {
+        unreachable!("AssignTo over a non-Assign node");
+    };
+    let target = *target;
+    let span = resolved.ast.span(assign);
+    let value = take_value(machine, span)?;
+    if !matches!(resolved.ast.node(target), Node::Ident(_)) {
+        unimplemented!("assignment to a field/index place is M4 (S-38)");
+    }
+    match resolution(resolved, target) {
+        Resolution::LocalSlot(slot) => set_slot(machine, slot, value),
+        Resolution::ModuleName(idx) => {
+            let name = &resolved.name_refs[idx as usize].name;
+            let cell = find_cell(namespace, name).ok_or_else(|| name_not_defined(name, span))?;
+            heap.cell_mut(cell).value = Some(value);
+        }
+        Resolution::BlockOuter { .. } => unimplemented!("block outer assignment is M2a.6"),
+    }
+    Ok(())
+}
+
+fn read_slot(machine: &Machine, slot: u16, name: &str, span: Span) -> Result<Value, Raise> {
+    match machine.frames.last().expect("a frame is active").locals[slot as usize] {
+        Some(v) => Ok(v),
+        None => Err(used_before_defined(name, span)),
+    }
+}
+
+fn set_slot(machine: &mut Machine, slot: u16, value: Value) {
+    machine.frames.last_mut().expect("a frame is active").locals[slot as usize] = Some(value);
+}
+
+fn read_cell(heap: &Heap, cell: Option<CellIdx>, name: &str, span: Span) -> Result<Value, Raise> {
+    match cell {
+        Some(c) => match heap.cell(c).value {
+            Some(v) => Ok(v),
+            None => Err(used_before_defined(name, span)),
+        },
+        None => Err(name_not_defined(name, span)),
+    }
+}
+
+/// Finds a module cell by name (linear scan — the namespace is small and this
+/// keeps lookup deterministic and hashing-free).
+fn find_cell(namespace: &Namespace, name: &str) -> Option<CellIdx> {
+    for (n, cell) in namespace {
+        if n.as_ref() == name {
+            return Some(*cell);
+        }
+    }
+    None
+}
+
+/// The resolver's resolution for `node` (an `Ident` reference, or an lvalue
+/// target — always resolved).
+fn resolution(resolved: &ResolvedModule, node: NodeId) -> Resolution {
+    resolved.resolutions[node.0 as usize].expect("a reference/lvalue is always resolved")
+}
+
+fn ident_name(resolved: &ResolvedModule, node: NodeId) -> &str {
+    match resolved.ast.node(node) {
+        Node::Ident(name) => name,
+        _ => "the name", // read_ref is only ever called on an Ident
+    }
+}
+
+fn decl_name(resolved: &ResolvedModule, decl: NodeId) -> &str {
+    match resolved.ast.node(decl) {
+        Node::Let { name, .. } | Node::Const { name, .. } => name,
+        _ => unreachable!("bind_let over a non-let/const node"),
+    }
+}
+
+fn name_not_defined(name: &str, span: Span) -> Raise {
+    Raise::new(
+        ExceptionKind::NameNotDefined,
+        format!("`{name}` isn't defined"),
+        span,
+    )
+}
+
+fn used_before_defined(name: &str, span: Span) -> Raise {
+    Raise::new(
+        ExceptionKind::UsedBeforeDefined,
+        format!("`{name}` is used here before it's defined"),
+        span,
+    )
+}

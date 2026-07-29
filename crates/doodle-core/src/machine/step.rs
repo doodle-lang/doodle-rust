@@ -9,6 +9,7 @@
 //! operators and `not` are M2a.3b; other node kinds reach an `unimplemented!`.
 
 use super::cont::Cont;
+use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::{Machine, Value, arith, compare};
@@ -24,6 +25,7 @@ pub(crate) fn step(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
+    namespace: &Namespace,
 ) -> Result<(), Raise> {
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
@@ -38,10 +40,7 @@ pub(crate) fn step(
             seq_step(resolved, machine, block, next);
             Ok(())
         }
-        Some(Cont::Eval { node }) => {
-            eval(resolved, heap, machine, node);
-            Ok(())
-        }
+        Some(Cont::Eval { node }) => eval(resolved, heap, machine, namespace, node),
         Some(Cont::BinRhs { op, rhs, span }) => bin_rhs(machine, op, rhs, span),
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;
@@ -69,6 +68,10 @@ pub(crate) fn step(
             let v = take_value(machine, span)?;
             machine.reg = Some(Value::Bool(compare::as_bool(v, "and/or", span)?));
             Ok(())
+        }
+        Some(Cont::BindLet { decl }) => control::bind_let(resolved, heap, machine, namespace, decl),
+        Some(Cont::AssignTo { assign }) => {
+            control::assign_to(resolved, heap, machine, namespace, assign)
         }
         // The frame's work is drained: return from it.
         None => {
@@ -127,13 +130,29 @@ fn seq_step(resolved: &ResolvedModule, machine: &mut Machine, block: NodeId, nex
 fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
     match resolved.ast.node(stmt) {
         Node::ExprStmt(expr) => frame.conts.push(Cont::Eval { node: *expr }),
-        other => unimplemented!("statement not yet in the machine (M2a.4+): {other:?}"),
+        // Evaluate the initializer, then bind it (LIFO: the `Eval` runs first).
+        Node::Let { value, .. } | Node::Const { value, .. } => {
+            frame.conts.push(Cont::BindLet { decl: stmt });
+            frame.conts.push(Cont::Eval { node: *value });
+        }
+        Node::Assign { value, .. } => {
+            frame.conts.push(Cont::AssignTo { assign: stmt });
+            frame.conts.push(Cont::Eval { node: *value });
+        }
+        other => unimplemented!("statement not yet in the machine (M2a.4b+): {other:?}"),
     }
 }
 
 /// Evaluates one expression, either producing a value into the register (a leaf)
-/// or scheduling continuations that will (a compound operator).
-fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node: NodeId) {
+/// or scheduling continuations that will (a compound operator). Returns `Err` if
+/// reading a name raised.
+fn eval(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    namespace: &Namespace,
+    node: NodeId,
+) -> Result<(), Raise> {
     let value = match resolved.ast.node(node) {
         Node::IntLit(n) => Value::Int(*n),
         Node::FloatLit(x) => Value::Float(*x),
@@ -145,6 +164,7 @@ fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node:
                 .expect("lexer-validated bignum digits");
             arith::int_value(n, heap)
         }
+        Node::Ident(_) => control::read_ref(resolved, heap, machine, namespace, node)?,
         Node::Binary { op, lhs, rhs } => {
             let op = *op;
             let (lhs, rhs) = (*lhs, *rhs);
@@ -161,7 +181,7 @@ fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node:
             }
             // Evaluate lhs first (top of the LIFO stack); the pushed cont resumes.
             frame.conts.push(Cont::Eval { node: lhs });
-            return;
+            return Ok(());
         }
         Node::Unary { op, operand } => {
             let op = *op;
@@ -170,11 +190,12 @@ fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node:
             let frame = machine.frames.last_mut().expect("eval with no frame");
             frame.conts.push(Cont::UnaryApply { op, span });
             frame.conts.push(Cont::Eval { node: operand });
-            return;
+            return Ok(());
         }
-        other => unimplemented!("expression not yet in the machine (M2a.3b+): {other:?}"),
+        other => unimplemented!("expression not yet in the machine (M2a.4b+): {other:?}"),
     };
     machine.reg = Some(value);
+    Ok(())
 }
 
 /// After the top frame returns, delivering its result. A module completes Void
@@ -189,8 +210,9 @@ fn return_from_top_frame(machine: &mut Machine) {
 
 /// Takes the register's value, raising if it is Void (L§6.11): a procedure result
 /// used where a value is required. (Structural backstop for the resolver's static
-/// S-6 check; reachable dynamically once calls can return Void, M2a.5.)
-fn take_value(machine: &mut Machine, span: crate::span::Span) -> Result<Value, Raise> {
+/// S-6 check; reachable dynamically once calls can return Void, M2a.5.) Shared
+/// with [`super::control`].
+pub(crate) fn take_value(machine: &mut Machine, span: crate::span::Span) -> Result<Value, Raise> {
     machine.reg.take().ok_or_else(|| {
         Raise::new(
             ExceptionKind::ProcedureInExpression,

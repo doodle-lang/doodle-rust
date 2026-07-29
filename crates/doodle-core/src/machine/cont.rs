@@ -79,4 +79,17 @@ pub(crate) enum Cont {
         /// The operator's span, for a raise's position.
         span: Span,
     },
+    /// A `let`/`const` initializer is now in the register: bind it to the
+    /// declaration's target (a module cell or a frame slot, per the resolver).
+    /// The statement yields Void.
+    BindLet {
+        /// The `Let`/`Const` declaration node.
+        decl: NodeId,
+    },
+    /// An assignment's right-hand value is now in the register: write it to the
+    /// target lvalue (a module cell or a frame slot). The statement yields Void.
+    AssignTo {
+        /// The `Assign` node (its `target` is the lvalue).
+        assign: NodeId,
+    },
 }

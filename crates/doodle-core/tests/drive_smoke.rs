@@ -130,3 +130,16 @@ fn a_non_bool_logical_operand_raises() {
 fn ordering_an_undefined_type_raises() {
     assert_raises("1 < true\n", ExceptionKind::UndefinedOrdering);
 }
+
+/// Reading a module binding before its declaration executes raises (the temporal
+/// dead zone) — here `a`'s initializer reads `b`, declared later.
+#[test]
+fn a_use_before_definition_raises() {
+    assert_raises("let a = b\nconst b = 2\n", ExceptionKind::UsedBeforeDefined);
+}
+
+/// A reference to a name with no binding at all raises.
+#[test]
+fn an_undefined_name_raises() {
+    assert_raises("nope\n", ExceptionKind::NameNotDefined);
+}

@@ -29,6 +29,12 @@ pub enum ExceptionKind {
     UndefinedOrdering,
     /// A procedure result (Void) was used where a value is required (L§6.11).
     ProcedureInExpression,
+    /// A name was used that is not defined (no such binding). At M2a this is a
+    /// runtime error; the linter's undeclared-read diagnostic is separate (AD5).
+    NameNotDefined,
+    /// A binding was used before its declaration executed — the temporal dead
+    /// zone (cell present but uninitialized).
+    UsedBeforeDefined,
     /// `**` with an exponent too large to compute — the S-12 resource half,
     /// provisional until the M2a.9 heap/step limits bound it deterministically.
     ExponentTooLarge,
