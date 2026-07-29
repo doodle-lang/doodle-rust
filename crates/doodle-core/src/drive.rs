@@ -6,7 +6,7 @@
 //! outcomes' payloads (suspension, raise, fault) are shells the later M2a/M2b
 //! chunks fill in.
 
-use crate::machine::{Instance, InstanceState, Value};
+use crate::machine::{Exception, Instance, InstanceState, Trace, Value};
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -89,28 +89,32 @@ pub enum LimitKind {
 #[derive(Clone, Copy, Debug)]
 pub struct CapabilityRequest;
 
-/// An exception value reaching the boundary (engine spec E§9).
-///
-/// Shell for M0: filled in when the machine can raise (M2a).
-#[derive(Clone, Copy, Debug)]
-pub struct Exception;
-
-/// A stack trace accompanying a [`Outcome::Raised`] (engine spec E§8.2).
-///
-/// Shell for M0: filled in when the call stack exists (M2a).
-#[derive(Clone, Copy, Debug)]
-pub struct Trace;
-
 /// Drives `instance` under `directive`, returning an [`Outcome`] (E§7.3).
 ///
-/// M2a.2 runs the machine to completion. The `Step*`/`Continue` directives gain
-/// meaning once safe points, breakpoints, and the fused counter land (E§7.4,
-/// M2a.9); until then every directive runs straight through.
+/// M2a.3a runs the machine to completion or to an **uncaught raise** — a runtime
+/// error (type mismatch, division by zero, a nonfinite float result, …) has no
+/// handler yet (`try`/`rescue` is M4), so it surfaces as [`Outcome::Raised`]. The
+/// `Step*`/`Continue` directives gain meaning once safe points, breakpoints, and
+/// the fused counter land (E§7.4, M2a.9); until then every directive runs through.
 pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
     let _ = directive;
+    // A terminal instance is not re-drivable at M2a.3a: after a raise, frames are
+    // left on the stack, so re-driving would resume them. The full drive-state
+    // machine — resuming Paused/Suspended, rejecting terminal states per E§7 — is
+    // M2b; until then, guard the single-drive contract.
+    debug_assert!(
+        matches!(instance.state(), InstanceState::Ready),
+        "re-driving a non-Ready instance is not yet supported (M2b)"
+    );
     instance.set_state(InstanceState::Running);
     while !instance.is_halted() {
-        instance.step();
+        if let Err(raise) = instance.step() {
+            // Uncaught (no handlers at M2a.3a). The post-raise instance state
+            // (E§3.3 has no distinct "raised" state) is provisionally `Faulted` —
+            // tracked as a discovered delta; the outcome carries the real result.
+            instance.set_state(InstanceState::Faulted);
+            return Outcome::Raised(raise.exception, raise.trace);
+        }
     }
     instance.set_state(InstanceState::Completed);
     // E§7.2: a top-level module drive completes with **no value** (Void). A

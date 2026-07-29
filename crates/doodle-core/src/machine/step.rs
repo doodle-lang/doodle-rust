@@ -1,23 +1,30 @@
 //! The machine's single transition, `step` (machine-design §8): pop the top
 //! frame's top continuation and perform one step of work.
 //!
-//! **Scope (M2a.2).** Statement sequencing, literal evaluation, and
-//! module-top-level return (Void). Operators, calls, binding, control flow, and
-//! unwinding are added in later chunks (each new [`Cont`] variant gets an arm
-//! here). Nodes the machine cannot yet run reach an `unimplemented!` — no
-//! production path drives such a program at M2a.2 (`mode: run` conformance still
-//! skips), and the message names the chunk that lands the behavior.
+//! **Scope (M2a.3a).** Statement sequencing, literal + arithmetic evaluation
+//! (`+ - * / // % **`, unary `- +`), module-top-level return (Void), and the
+//! **raise** path — a failing operation returns `Err(Raise)`, which the drive
+//! loop turns into `Raised` (there are no handlers yet; `try`/`rescue` is M4, and
+//! the §12 unwind mechanism arrives at M2a.6). Comparison/equality/logical
+//! operators and `not` are M2a.3b; other node kinds reach an `unimplemented!`.
 
 use super::cont::Cont;
+use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Machine, Value};
-use crate::ast::{Node, NodeId};
+use super::{Machine, Value, arith};
+use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
+use num_bigint::BigInt;
 
 /// Performs one machine transition. Precondition: `machine` has at least one
-/// frame (the caller checks `is_halted` first).
-pub(crate) fn step(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine) {
+/// frame (the caller checks `is_halted` first). Returns `Err` if the transition
+/// raised a runtime error.
+pub(crate) fn step(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+) -> Result<(), Raise> {
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
     let cont = machine
@@ -27,10 +34,30 @@ pub(crate) fn step(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Mac
         .conts
         .pop();
     match cont {
-        Some(Cont::Seq { block, next }) => seq_step(resolved, machine, block, next),
-        Some(Cont::Eval { node }) => eval(resolved, heap, machine, node),
+        Some(Cont::Seq { block, next }) => {
+            seq_step(resolved, machine, block, next);
+            Ok(())
+        }
+        Some(Cont::Eval { node }) => {
+            eval(resolved, heap, machine, node);
+            Ok(())
+        }
+        Some(Cont::BinRhs { op, rhs, span }) => bin_rhs(machine, op, rhs, span),
+        Some(Cont::BinApply { op, lhs, span }) => {
+            let rhs = take_value(machine, span)?;
+            machine.reg = Some(arith::binary(op, lhs, rhs, heap, span)?);
+            Ok(())
+        }
+        Some(Cont::UnaryApply { op, span }) => {
+            let operand = take_value(machine, span)?;
+            machine.reg = Some(arith::unary(op, operand, heap, span)?);
+            Ok(())
+        }
         // The frame's work is drained: return from it.
-        None => return_from_top_frame(machine),
+        None => {
+            return_from_top_frame(machine);
+            Ok(())
+        }
     }
 }
 
@@ -60,8 +87,8 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
     }
 }
 
-/// Evaluates one expression into the result register. Only literals at M2a.2;
-/// operators, names, calls, etc. join at M2a.3+.
+/// Evaluates one expression, either producing a value into the register (a leaf)
+/// or scheduling continuations that will (a compound operator).
 fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node: NodeId) {
     let value = match resolved.ast.node(node) {
         Node::IntLit(n) => Value::Int(*n),
@@ -69,20 +96,88 @@ fn eval(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, node:
         Node::BoolLit(b) => Value::Bool(*b),
         Node::NilLit => Value::Nil,
         Node::BytesLit(bytes) => Value::Bytes(heap.alloc_bytes(bytes.as_slice().into())),
-        other => unimplemented!("expression not yet in the machine (M2a.3+): {other:?}"),
+        Node::BigIntLit { radix, digits } => {
+            let n = BigInt::parse_bytes(digits.as_bytes(), u32::from(*radix))
+                .expect("lexer-validated bignum digits");
+            arith::int_value(n, heap)
+        }
+        Node::Binary { op, lhs, rhs } => {
+            let op = *op;
+            if !is_arithmetic(op) {
+                unimplemented!("operator not yet in the machine (M2a.3b): {op:?}");
+            }
+            let (lhs, rhs) = (*lhs, *rhs);
+            let span = resolved.ast.span(node);
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            // Evaluate lhs first (top of the LIFO stack), then BinRhs takes over.
+            frame.conts.push(Cont::BinRhs { op, rhs, span });
+            frame.conts.push(Cont::Eval { node: lhs });
+            return;
+        }
+        Node::Unary { op, operand } => {
+            let op = *op;
+            if matches!(op, UnaryOp::Not) {
+                unimplemented!("`not` not yet in the machine (M2a.3b)");
+            }
+            let operand = *operand;
+            let span = resolved.ast.span(node);
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            frame.conts.push(Cont::UnaryApply { op, span });
+            frame.conts.push(Cont::Eval { node: operand });
+            return;
+        }
+        other => unimplemented!("expression not yet in the machine (M2a.3b+): {other:?}"),
     };
     machine.reg = Some(value);
 }
 
-/// Returns from the top frame (its continuations are drained), popping it and
-/// delivering its result. A module completes Void (L§6.11) — its final
-/// statement's transient value is discarded. Callable-frame returns (which
-/// deliver `reg` to the caller) arrive at M2a.5.
+/// After the top frame returns, delivering its result. A module completes Void
+/// (L§6.11) — its final statement's transient value is discarded. Callable-frame
+/// returns (which deliver `reg` to the caller) arrive at M2a.5.
 fn return_from_top_frame(machine: &mut Machine) {
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
         FrameKind::ModuleTopLevel => machine.reg = None,
     }
+}
+
+/// Takes the register's value, raising if it is Void (L§6.11): a procedure result
+/// used where a value is required. (Structural backstop for the resolver's static
+/// S-6 check; reachable dynamically once calls can return Void, M2a.5.)
+fn take_value(machine: &mut Machine, span: crate::span::Span) -> Result<Value, Raise> {
+    machine.reg.take().ok_or_else(|| {
+        Raise::new(
+            ExceptionKind::ProcedureInExpression,
+            "this spot needs a value, but a procedure gives none",
+            span,
+        )
+    })
+}
+
+fn bin_rhs(
+    machine: &mut Machine,
+    op: BinaryOp,
+    rhs: NodeId,
+    span: crate::span::Span,
+) -> Result<(), Raise> {
+    let lhs = take_value(machine, span)?;
+    let frame = machine.frames.last_mut().expect("bin_rhs with no frame");
+    frame.conts.push(Cont::BinApply { op, lhs, span });
+    frame.conts.push(Cont::Eval { node: rhs });
+    Ok(())
+}
+
+fn is_arithmetic(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::FloorDiv
+            | BinaryOp::Rem
+            | BinaryOp::Pow
+    )
 }
 
 /// The statement list of a body node (`Module` or `Block`).

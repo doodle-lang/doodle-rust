@@ -6,7 +6,9 @@
 //! cleanup continuation categories (machine-design §8) join in their chunks
 //! (M2a.3+); each new variant falls into one of those pinned categories.
 
-use crate::ast::NodeId;
+use crate::ast::{BinaryOp, NodeId, UnaryOp};
+use crate::machine::Value;
+use crate::span::Span;
 
 /// One unit of pending work on a frame's continuation stack (machine-design §8).
 pub(crate) enum Cont {
@@ -24,5 +26,33 @@ pub(crate) enum Cont {
     Eval {
         /// The expression node to evaluate.
         node: NodeId,
+    },
+    /// A binary operator whose left operand is now in the register: stash it and
+    /// evaluate the right operand (machine-design §8, expression plumbing).
+    BinRhs {
+        /// The operator.
+        op: BinaryOp,
+        /// The right-operand expression.
+        rhs: NodeId,
+        /// The operator's span, for a raise's position.
+        span: Span,
+    },
+    /// A binary operator whose right operand is now in the register, with the
+    /// left operand saved: apply the operator. Holds a `Value`, so it is a GC
+    /// root (machine-design §8).
+    BinApply {
+        /// The operator.
+        op: BinaryOp,
+        /// The already-evaluated left operand.
+        lhs: Value,
+        /// The operator's span, for a raise's position.
+        span: Span,
+    },
+    /// A unary operator whose operand is now in the register: apply the operator.
+    UnaryApply {
+        /// The operator.
+        op: UnaryOp,
+        /// The operator's span, for a raise's position.
+        span: Span,
     },
 }

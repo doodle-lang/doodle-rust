@@ -31,7 +31,8 @@ mod slab;
 
 pub use slab::Slab;
 
-use crate::machine::{BytesIdx, ListIdx, StrIdx, Value};
+use crate::machine::{BigIntIdx, BytesIdx, ListIdx, StrIdx, Value};
+use num_bigint::BigInt;
 
 /// The byte width charged to [`Heap::bytes_allocated`] per list element. A fixed
 /// per-build constant (not a `Vec` capacity), so accounting is deterministic.
@@ -62,12 +63,23 @@ pub struct ListObj {
     pub items: Vec<Value>,
 }
 
+/// A heap bignum (L§4.2): an integer outside `i64` range. The **canonical-int
+/// invariant** (MD §3) means any value fitting `i64` is a [`Value::Int`], never a
+/// `BigInt` — so a `BigIntObj`'s magnitude always exceeds `i64` range, and
+/// `Int`↔`BigInt` comparison never appears on the equality/hash paths.
+#[derive(Clone, Debug)]
+pub struct BigIntObj {
+    /// The arbitrary-precision value.
+    pub value: BigInt,
+}
+
 /// The per-instance heap (machine-design §4): the object slabs plus the
 /// allocation accounting the GC and heap limit read.
 pub struct Heap {
     strings: Slab<StrObj>,
     bytes: Slab<BytesObj>,
     lists: Slab<ListObj>,
+    bigints: Slab<BigIntObj>,
     /// Program-driven payload bytes (MD §4); see the module-level determinism
     /// note. Monotonic under M2a.1 (no reclamation); GC decreases it at M2a.10.
     bytes_allocated: u64,
@@ -83,6 +95,7 @@ impl Heap {
             strings: Slab::new(),
             bytes: Slab::new(),
             lists: Slab::new(),
+            bigints: Slab::new(),
             bytes_allocated: 0,
             alloc_serial: 0,
         }
@@ -120,6 +133,16 @@ impl Heap {
         ListIdx(self.lists.alloc(ListObj { items }, serial))
     }
 
+    /// Allocates a bignum. The caller must uphold the canonical-int invariant
+    /// (MD §3): `value` must not fit `i64` — a fitting value is a [`Value::Int`].
+    pub fn alloc_bigint(&mut self, value: BigInt) -> BigIntIdx {
+        // Payload is the magnitude size in bytes (bit length rounded up); `bits`
+        // is deterministic, so accounting stays replay-stable.
+        self.bytes_allocated += value.bits().div_ceil(8);
+        let serial = self.next_serial();
+        BigIntIdx(self.bigints.alloc(BigIntObj { value }, serial))
+    }
+
     /// Borrows the string at `idx`.
     pub fn string(&self, idx: StrIdx) -> &StrObj {
         self.strings.get(idx.0)
@@ -135,6 +158,11 @@ impl Heap {
         self.lists.get(idx.0)
     }
 
+    /// Borrows the bignum at `idx`.
+    pub fn bigint(&self, idx: BigIntIdx) -> &BigIntObj {
+        self.bigints.get(idx.0)
+    }
+
     /// Total program-driven payload bytes currently accounted (MD §4). Drives GC
     /// triggering and the heap limit (M2a.9/M2a.10).
     pub fn bytes_allocated(&self) -> u64 {
@@ -144,7 +172,10 @@ impl Heap {
     /// The number of live objects across all slabs (for tests and, later, GC
     /// assertions).
     pub fn live_objects(&self) -> u32 {
-        self.strings.live_count() + self.bytes.live_count() + self.lists.live_count()
+        self.strings.live_count()
+            + self.bytes.live_count()
+            + self.lists.live_count()
+            + self.bigints.live_count()
     }
 }
 

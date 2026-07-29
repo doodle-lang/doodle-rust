@@ -389,6 +389,24 @@ fn literals_lower_their_values() {
     );
 }
 
+/// Tripwire for the deferred S-56 front-end diagnostic. A float literal that
+/// rounds to ±∞ must be a **static error** (L§3.6.2), keeping the finite-float
+/// invariant true at the source boundary; underflow to 0.0 stays legal. Today
+/// `lower_float` silently lowers `1e999` to `Float(inf)`, so this is ignored —
+/// un-ignore it when the front-end session rejects an infinite parse result.
+#[test]
+#[ignore = "S-56: overflowing float literal must be a static error (front-end session)"]
+fn overflowing_float_literal_is_a_static_error() {
+    assert!(
+        !diags_of("1e999").is_empty(),
+        "1e999 rounds to +inf and must be a static error"
+    );
+    assert!(
+        diags_of("1e-999").is_empty(),
+        "1e-999 underflows to 0.0 and is legal"
+    );
+}
+
 #[test]
 fn precedence_and_associativity() {
     // Multiplicative binds tighter than additive.

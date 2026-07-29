@@ -8,7 +8,7 @@
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{Directive, Outcome, run};
-use doodle_core::machine::{Instance, InstanceState};
+use doodle_core::machine::{ExceptionKind, Instance, InstanceState};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::normalize;
@@ -72,4 +72,32 @@ fn drives_a_multi_statement_program_to_void_completion() {
     assert_eq!(inst.state(), InstanceState::Completed);
     assert!(matches!(outcome, Outcome::Completed(None)));
     assert!(inst.result().is_none());
+}
+
+/// Asserts driving `src` to completion raises an uncaught exception of `kind`.
+fn assert_raises(src: &str, kind: ExceptionKind) {
+    let mut inst = instance(src);
+    match run(&mut inst, Directive::RunToCompletion) {
+        Outcome::Raised(exception, _trace) => assert_eq!(exception.kind, kind),
+        other => panic!("expected Raised({kind:?}), got {other:?}"),
+    }
+}
+
+/// A runtime type mismatch (`1 + true`) has no handler yet, so it surfaces as
+/// `Raised`.
+#[test]
+fn a_type_error_surfaces_as_an_uncaught_raise() {
+    assert_raises("1 + true\n", ExceptionKind::TypeMismatch);
+}
+
+/// Division by zero raises (L§4.2).
+#[test]
+fn division_by_zero_surfaces_as_an_uncaught_raise() {
+    assert_raises("1 / 0\n", ExceptionKind::DivisionByZero);
+}
+
+/// A float operation whose result would be nonfinite raises (S-56).
+#[test]
+fn a_nonfinite_float_result_surfaces_as_an_uncaught_raise() {
+    assert_raises("1e308 * 10.0\n", ExceptionKind::NonFiniteFloat);
 }

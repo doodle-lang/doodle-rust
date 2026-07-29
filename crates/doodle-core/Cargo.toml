@@ -11,6 +11,9 @@ publish = false
 workspace = true
 
 [dependencies]
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
 unicode-ident = "1"
 unicode-normalization = "0.1"
 

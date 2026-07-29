@@ -13,14 +13,19 @@
 //! M2a chunks (`plan/plan-m2a.md`); the additional `Machine` state they need
 //! (ring buffer, fuel, unwind record, dynamic stack, drive stack) is added then.
 
+mod arith;
 mod cont;
+mod error;
 mod frame;
 mod step;
+
+pub use error::{Exception, ExceptionKind, Trace};
 
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::span::ModuleId;
 use cont::Cont;
+use error::Raise;
 use frame::Frame;
 use std::sync::Arc;
 
@@ -212,9 +217,10 @@ impl Instance {
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:
-    /// `!self.is_halted()`.
-    pub(crate) fn step(&mut self) {
-        step::step(&self.resolved, &mut self.heap, &mut self.machine);
+    /// `!self.is_halted()`. Returns `Err` if the transition raised a runtime
+    /// error (the drive loop turns it into `Raised`).
+    pub(crate) fn step(&mut self) -> Result<(), Raise> {
+        step::step(&self.resolved, &mut self.heap, &mut self.machine)
     }
 }
 
@@ -249,7 +255,7 @@ mod tests {
     fn step_to_first_value(inst: &mut Instance) {
         let mut steps = 0;
         while inst.result().is_none() && !inst.is_halted() {
-            inst.step();
+            inst.step().expect("unexpected raise");
             steps += 1;
             assert!(steps < 1000, "machine failed to produce a value");
         }
@@ -264,10 +270,26 @@ mod tests {
                 !inst.is_halted(),
                 "halted before the register reached {want}"
             );
-            inst.step();
+            inst.step().expect("unexpected raise");
             steps += 1;
             assert!(steps < 1000, "register never reached {want}");
         }
+    }
+
+    /// Drives to halt, returning the last value the register held before the
+    /// module returned Void — i.e. the final expression's value.
+    fn drive_capturing_last_value(inst: &mut Instance) -> Option<Value> {
+        let mut last = None;
+        let mut steps = 0;
+        while !inst.is_halted() {
+            if let Some(v) = inst.result() {
+                last = Some(v);
+            }
+            inst.step().expect("unexpected raise");
+            steps += 1;
+            assert!(steps < 10000, "machine failed to halt");
+        }
+        last
     }
 
     #[test]
@@ -323,10 +345,29 @@ mod tests {
         let mut inst = load_source("1\ntrue\nnil\n");
         let mut steps = 0;
         while !inst.is_halted() {
-            inst.step();
+            inst.step().expect("unexpected raise");
             steps += 1;
             assert!(steps < 1000, "machine failed to halt");
         }
         assert!(inst.result().is_none());
+    }
+
+    #[test]
+    fn arithmetic_evaluates_through_the_machine() {
+        // Precedence + associativity flow through the continuation stack.
+        let mut inst = load_source("2 * 3 + 4\n");
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn integer_overflow_promotes_to_bigint_through_the_machine() {
+        let mut inst = load_source("9223372036854775807 + 1\n");
+        assert!(matches!(
+            drive_capturing_last_value(&mut inst),
+            Some(Value::BigInt(_))
+        ));
     }
 }
