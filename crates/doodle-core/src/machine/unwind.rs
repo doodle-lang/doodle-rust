@@ -117,7 +117,11 @@ pub(crate) fn exit_apply(
 
 /// Performs one unwind transition (machine-design §12). Precondition:
 /// `machine.unwind` is `Some`.
-pub(crate) fn step(resolved: &ResolvedModule, machine: &mut Machine) -> Result<(), Raise> {
+pub(crate) fn step(
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    machine: &mut Machine,
+) -> Result<(), Raise> {
     match machine
         .unwind
         .expect("unwind::step with no in-flight unwind")
@@ -130,7 +134,9 @@ pub(crate) fn step(resolved: &ResolvedModule, machine: &mut Machine) -> Result<(
             consumer,
             consumer_serial,
         } => block_break(machine, value, consumer, consumer_serial),
-        Unwind::Return { value, home } => do_return(machine, value, home),
+        // A `return` can fall off the end of a `fn` (a bare `return`), so it alone
+        // may raise as it delivers.
+        Unwind::Return { value, home } => return do_return(resolved, heap, machine, value, home),
     }
     Ok(())
 }
@@ -210,16 +216,45 @@ fn block_break(machine: &mut Machine, value: Option<Value>, consumer: usize, ser
 }
 
 /// `return`: pop frames through the home callable inclusive (punching through any
-/// intervening blocks/consumers), delivering `value` as the callable's result.
-fn do_return(machine: &mut Machine, value: Option<Value>, home: usize) {
+/// intervening blocks/consumers), delivering `value` as the callable's result. A
+/// bare `return` in a `fn` delivers no value — the function fell off the end
+/// (L§8.4), the same rule the [`ReturnBarrier`](super::cont::Cont::ReturnBarrier)
+/// applies on fall-through — so this delivery raises `FunctionFellOffEnd`.
+fn do_return(
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    machine: &mut Machine,
+    value: Option<Value>,
+    home: usize,
+) -> Result<(), Raise> {
     let top = machine.frames.len() - 1;
-    if top == home {
+    if top != home {
+        // An intervening frame (a punched-through block/consumer); keep unwinding.
         machine.frames.pop();
-        machine.reg = value;
-        machine.unwind = None;
-    } else {
-        machine.frames.pop();
+        return Ok(());
     }
+    let fell_off = match machine.frames[home].kind {
+        FrameKind::Callable { cal } => {
+            let id = heap.callable(cal).callable as usize;
+            resolved.callables[id].kind == BodyKind::Func && value.is_none()
+        }
+        _ => false,
+    };
+    let home_frame = machine.frames.pop().expect("the home frame");
+    machine.unwind = None;
+    if fell_off {
+        let FrameKind::Callable { cal } = home_frame.kind else {
+            unreachable!("fell_off implies a callable home");
+        };
+        let id = heap.callable(cal).callable as usize;
+        return Err(Raise::new(
+            ExceptionKind::FunctionFellOffEnd,
+            "this function reached its end without producing a value",
+            resolved.ast.span(resolved.callables[id].decl),
+        ));
+    }
+    machine.reg = value;
+    Ok(())
 }
 
 /// The home callable frame for a `return` (machine-design §12): the current frame

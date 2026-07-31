@@ -49,6 +49,12 @@ pub enum ExceptionKind {
     /// the **open** S-10 to-consumer half; the machine raises **provisionally**
     /// (rather than silently discard the value) pending the user's ruling.
     NoValueDestination,
+    /// A function (`fn`) reached its completion without producing a value (L§8.4):
+    /// it fell off the end. The resolver catches this statically where it can
+    /// (`function-falls-off-end`, S-5); this is the runtime backstop for the cases
+    /// it cannot — an `fn` whose tail call turns out, at run time, to be a
+    /// procedure (the fn-tail-`to` case, S-55).
+    FunctionFellOffEnd,
 }
 
 /// A Doodle exception reaching a drive boundary (E§9).

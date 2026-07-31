@@ -346,6 +346,53 @@ fn blocks_pass_invoke_and_read_enclosing_locals() {
     }
 }
 
+/// Drives to halt, returning `(max frame-stack depth, max top-frame tail_count)`.
+fn drive_tracking(inst: &mut Instance) -> (usize, u64) {
+    let mut max_depth = 0;
+    let mut max_tail = 0;
+    let mut steps = 0u64;
+    while !inst.is_halted() {
+        max_depth = max_depth.max(inst.frame_depth());
+        if let Some(tc) = inst.top_frame_tail_count() {
+            max_tail = max_tail.max(tc);
+        }
+        inst.step().expect("unexpected raise");
+        steps += 1;
+        assert!(steps < 50_000_000, "machine failed to halt");
+    }
+    (max_depth, max_tail)
+}
+
+#[test]
+fn a_tail_recursive_loop_runs_in_constant_memory() {
+    // `count` tail-calls itself (kind-matched fn→fn), so its frame is REUSED each
+    // iteration: the stack stays a constant depth and the frame absorbs every
+    // iteration into its tail_count (exit criterion 1, MD §11).
+    const N: u64 = 100_000;
+    let src = format!("fn count(n)\nif n == 0 then 0 else count(n - 1) end\nend\ncount({N})\n");
+    let mut inst = load_source(&src);
+    let (max_depth, max_tail) = drive_tracking(&mut inst);
+    // The module frame plus the one reused `count` frame — never deeper.
+    assert!(max_depth <= 2, "tail loop grew the stack to {max_depth}");
+    assert_eq!(
+        max_tail, N,
+        "the tail counter should read the iteration count"
+    );
+}
+
+#[test]
+fn a_kind_matched_tail_call_reuses_a_procedure_frame_too() {
+    // Procedures have tail positions too (S-55): a `to` tail-calling a `to` reuses.
+    // `walk` recurses via a tail call to itself; the frame is reused, so the stack
+    // stays bounded and the tail counter reads the iteration count.
+    const N: u64 = 50_000;
+    let src = format!("to walk(n)\nif n == 0 then nil else walk(n - 1) end\nend\nwalk({N})\n");
+    let mut inst = load_source(&src);
+    let (max_depth, max_tail) = drive_tracking(&mut inst);
+    assert!(max_depth <= 2, "tail loop grew the stack to {max_depth}");
+    assert_eq!(max_tail, N);
+}
+
 #[test]
 fn a_block_param_invoked_from_a_nested_block_composes() {
     for (src, want) in [

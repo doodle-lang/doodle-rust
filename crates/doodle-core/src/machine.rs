@@ -21,6 +21,7 @@ mod cont;
 mod control;
 mod error;
 mod frame;
+mod ring;
 mod step;
 mod types;
 mod unwind;
@@ -173,6 +174,8 @@ pub(crate) struct Machine {
     /// continuations normally. `None` in normal execution. A GC root once it can
     /// carry an exception value (M4).
     unwind: Option<unwind::Unwind>,
+    /// Bounded history of frames elided by tail-call reuse (E§8.3, §11).
+    ring: ring::RingBuffer,
 }
 
 impl Machine {
@@ -181,6 +184,14 @@ impl Machine {
         let serial = self.frame_serial;
         self.frame_serial += 1;
         serial
+    }
+
+    /// Records a tail-elided frame in the ring (machine-design §11).
+    pub(crate) fn record_elided(&mut self, callable: CalIdx, consuming_serial: u64) {
+        self.ring.record(ring::ElidedFrame {
+            callable,
+            consuming_serial,
+        });
     }
 }
 
@@ -249,6 +260,7 @@ impl Instance {
                 reg: None,
                 frame_serial: 1,
                 unwind: None,
+                ring: ring::RingBuffer::new(),
             },
             namespace,
             state: InstanceState::Ready,
@@ -275,6 +287,19 @@ impl Instance {
     /// Whether the machine has halted — no frames remain to run.
     pub(crate) fn is_halted(&self) -> bool {
         self.machine.frames.is_empty()
+    }
+
+    /// The current frame-stack depth (for tail-call tests: a tail loop keeps this
+    /// bounded — constant memory).
+    #[cfg(test)]
+    pub(crate) fn frame_depth(&self) -> usize {
+        self.machine.frames.len()
+    }
+
+    /// The top frame's tail-iteration counter (E§8.3), or `None` when halted.
+    #[cfg(test)]
+    pub(crate) fn top_frame_tail_count(&self) -> Option<u64> {
+        self.machine.frames.last().map(|f| f.tail_count)
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:

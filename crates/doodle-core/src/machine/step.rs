@@ -31,7 +31,7 @@ pub(crate) fn step(
     // A non-local transfer in flight takes over the transition (§12): unwind toward
     // the exit's target instead of running continuations normally.
     if machine.unwind.is_some() {
-        return unwind::step(resolved, machine);
+        return unwind::step(resolved, heap, machine);
     }
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
@@ -105,10 +105,7 @@ pub(crate) fn step(
             call::define_callable(resolved, heap, machine, namespace, decl);
             Ok(())
         }
-        Some(Cont::ReturnBarrier) => {
-            call::return_from_callable(resolved, heap, machine);
-            Ok(())
-        }
+        Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
         // The frame's work is drained: return from it.
         None => {

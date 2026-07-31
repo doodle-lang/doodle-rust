@@ -1,14 +1,14 @@
 //! Execution frames (machine-design §8): one frame per active callable/block body
 //! plus the module top level, each carrying a LIFO continuation stack.
 //!
-//! **Scope (M2a.6).** The module-top-level, callable (`to`/`fn`/lambda), and
+//! **Scope (M2a.7).** The module-top-level, callable (`to`/`fn`/lambda), and
 //! block (`do … end`) frames. A block frame carries its **defining** link (the
 //! static-link parent whose locals it reads, §7) and its **consumer** (who
 //! invoked it, for `break`, §12); a callable frame carries the invoked callable
-//! value. Every frame carries a `serial` (frame identity, preserved across tail
-//! reuse at M2a.7) and, for a callee with a `do name` block parameter, the bound
-//! [`BlockDescriptor`]. The dynamic-parameter depth and tail counter join at
-//! M4/M2a.7.
+//! value. Every frame carries a `serial` (frame identity, **preserved** across a
+//! tail-reuse), a `tail_count` (tail iterations absorbed, E§8.3), and, for a
+//! callee with a `do name` block parameter, the bound [`BlockDescriptor`]. The
+//! dynamic-parameter depth joins at M4.
 
 use super::Value;
 use super::cont::Cont;
@@ -89,6 +89,11 @@ pub(crate) struct Frame {
     pub(crate) serial: u64,
     /// The bound `do name` block parameter, if this callee received one.
     pub(crate) block_param: Option<BlockDescriptor>,
+    /// Per-frame tail-iteration counter (E§8.3): the number of tail calls this
+    /// frame slot has absorbed by reuse. `0` for a fresh frame; `+= 1` on each
+    /// reuse (machine-design §11). A `10⁷`-iteration tail loop runs in this one
+    /// frame with `tail_count == 10⁷`.
+    pub(crate) tail_count: u64,
 }
 
 impl Frame {
@@ -102,6 +107,7 @@ impl Frame {
             conts: vec![body_seq],
             serial,
             block_param: None,
+            tail_count: 0,
         }
     }
 
@@ -120,16 +126,32 @@ impl Frame {
         Frame {
             kind: FrameKind::Callable { cal },
             locals,
-            conts: vec![
-                Cont::ReturnBarrier,
-                Cont::Seq {
-                    block: body,
-                    next: 0,
-                },
-            ],
+            conts: callable_conts(body),
             serial,
             block_param,
+            tail_count: 0,
         }
+    }
+
+    /// **Reuses** this frame in place for a tail call to `cal` (machine-design §11):
+    /// overwrites its kind, locals, block parameter, and continuations with the
+    /// callee's fresh activation, **preserving** the frame's `serial` and stack slot
+    /// (logical depth) and bumping `tail_count`. This is what makes a tail loop run
+    /// in constant memory. Only a kind-matched marked-tail call reaches here (S-55);
+    /// parameter defaults are pushed on top by the caller.
+    pub(crate) fn reuse_as_callable(
+        &mut self,
+        cal: CalIdx,
+        locals: Vec<Option<Value>>,
+        body: NodeId,
+        block_param: Option<BlockDescriptor>,
+    ) {
+        self.kind = FrameKind::Callable { cal };
+        self.locals = locals;
+        self.conts = callable_conts(body);
+        self.block_param = block_param;
+        self.tail_count += 1;
+        // `serial` and the stack slot are deliberately preserved (E§8.5).
     }
 
     /// A fresh block frame for one invocation of a `do … end` block, with `locals`
@@ -152,15 +174,22 @@ impl Frame {
                 consumer,
             },
             locals,
-            conts: vec![
-                Cont::ReturnBarrier,
-                Cont::Seq {
-                    block: body,
-                    next: 0,
-                },
-            ],
+            conts: callable_conts(body),
             serial,
             block_param: None,
+            tail_count: 0,
         }
     }
+}
+
+/// A body's pending work: run its statements (`Seq`) over a bottom
+/// [`ReturnBarrier`](Cont::ReturnBarrier) that delivers the result.
+fn callable_conts(body: NodeId) -> Vec<Cont> {
+    vec![
+        Cont::ReturnBarrier,
+        Cont::Seq {
+            block: body,
+            next: 0,
+        },
+    ]
 }

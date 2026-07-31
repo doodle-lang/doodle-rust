@@ -1,19 +1,18 @@
 //! Calls: callee/argument evaluation, argument binding, and callable-frame
-//! entry/return (machine-design §8/§10).
+//! entry/return (machine-design §8/§10/§11).
 //!
-//! **Scope (M2a.5).** Non-tail calls of `to`/`fn`/anonymous-`fn` values with
-//! positional + keyword arguments and parameter defaults (L§8.3), plus interning
-//! callable values. **Not here:** block arguments and the `return` unwind (M2a.6),
-//! closure captures (M2a.8), tail-call frame reuse (M2a.7). A call node carrying a
-//! block argument, or a callee declaring a block parameter, reaches an
-//! `unimplemented!` — no M2a.5 program exercises one.
+//! **Scope (M2a.7).** Calls of `to`/`fn`/anonymous-`fn` values with positional +
+//! keyword arguments and parameter defaults (L§8.3), interning callable values,
+//! and **proper tail calls** (the apply-time kind gate + frame reuse, S-55). Block
+//! arguments are bound here and invoked in `block.rs`; closure captures are M2a.8.
 //!
 //! A call runs as: evaluate the callee ([`Cont::CallGotCallee`]), evaluate each
 //! argument left to right ([`Cont::CallGotArg`]), then [`apply`] binds parameters
-//! and pushes a [`FrameKind::Callable`] frame whose bottom cont is a
-//! [`Cont::ReturnBarrier`]. When the body drains to the barrier,
-//! [`return_from_callable`] delivers the result — a `fn`'s value, or Void for a
-//! `to` (L§8.4).
+//! and either **pushes** a [`FrameKind::Callable`] frame or, for a kind-matched
+//! marked tail call, **reuses** the current frame in place (§11) — its bottom cont
+//! is a [`Cont::ReturnBarrier`]. When the body drains to the barrier,
+//! [`return_from_callable`] delivers the result — a `fn`'s value, Void for a `to`,
+//! or a raise if a `fn` fell off the end (L§8.4).
 
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
@@ -166,16 +165,36 @@ fn apply(
     // is pushed, so the descriptor's defining link names the caller frame.
     let block_param = block::bind_block_argument(resolved, machine, call, params, span)?;
 
-    let serial = machine.next_frame_serial();
-    machine
-        .frames
-        .push(Frame::callable(cal, slots, body, serial, block_param));
+    let callee_kind = info.kind;
+    // A marked tail call whose callee's kind matches the current frame's **reuses**
+    // that frame instead of growing the stack (proper tail calls, MD §11) — so a
+    // tail loop runs in constant memory. A kind mismatch (or a non-tail call) pushes
+    // an ordinary frame, giving exact non-tail semantics (S-55).
+    if resolved.tail_calls[call.0 as usize]
+        && reuses_current_frame(machine, resolved, heap, callee_kind)
+    {
+        let top = machine
+            .frames
+            .last()
+            .expect("a frame is active at a tail call");
+        let FrameKind::Callable { cal: elided } = top.kind else {
+            unreachable!("only a callable frame is reused (S-55 kind gate)");
+        };
+        machine.record_elided(elided, top.serial);
+        machine
+            .frames
+            .last_mut()
+            .expect("a frame is active")
+            .reuse_as_callable(cal, slots, body, block_param);
+    } else {
+        let serial = machine.next_frame_serial();
+        machine
+            .frames
+            .push(Frame::callable(cal, slots, body, serial, block_param));
+    }
     // Defaults are evaluated in the callee activation, before the body (LIFO: push
     // in reverse source order so earlier defaults run — and bind — first).
-    let frame = machine
-        .frames
-        .last_mut()
-        .expect("callable frame just pushed");
+    let frame = machine.frames.last_mut().expect("callable frame active");
     for &(slot, expr) in defaults.iter().rev() {
         frame.conts.push(Cont::BindDefault {
             slot,
@@ -184,6 +203,27 @@ fn apply(
         frame.conts.push(Cont::Eval { node: expr });
     }
     Ok(())
+}
+
+/// The S-55 apply-time kind gate: whether a marked tail call reuses the current
+/// frame. A callable frame is reused iff the callee's kind matches its own; a
+/// mismatch pushes an ordinary frame (exact non-tail parity — a `to` tail-calling
+/// an `fn` still discards the value; an `fn` tail-calling a `to` still falls off at
+/// its own barrier). (Block-frame tail reuse — MD §11's Block↔Callable case — is
+/// deferred, tracked in claude-todo; a block-body tail call falls back to an
+/// ordinary frame, which is correct, just not constant-memory.)
+fn reuses_current_frame(
+    machine: &Machine,
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    callee_kind: BodyKind,
+) -> bool {
+    match &machine.frames.last().expect("a frame is active").kind {
+        FrameKind::Callable { cal } => {
+            resolved.callables[heap.callable(*cal).callable as usize].kind == callee_kind
+        }
+        FrameKind::Block { .. } | FrameKind::ModuleTopLevel => false,
+    }
 }
 
 /// Binds positional + keyword arguments to `params` (L§8.3), returning the filled
@@ -297,17 +337,32 @@ pub(crate) fn make_callable(resolved: &ResolvedModule, heap: &mut Heap, decl: No
 /// Delivers a frame's result when its body drains to the [`Cont::ReturnBarrier`],
 /// then pops it. A `fn` leaves its value in the register; a `to` yields Void
 /// (L§8.4), so the register is cleared; a block yields its last expression's value
-/// to its invoker (§8.5), so the register is kept.
-pub(crate) fn return_from_callable(resolved: &ResolvedModule, heap: &Heap, machine: &mut Machine) {
+/// to its invoker (§8.5), so the register is kept. A `fn` reaching the barrier with
+/// a Void register **fell off the end** (L§8.4) and raises — the runtime backstop
+/// for the fn-tail-`to` case the resolver cannot catch statically (S-55).
+pub(crate) fn return_from_callable(
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    machine: &mut Machine,
+) -> Result<(), Raise> {
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
         FrameKind::Callable { cal } => {
-            match resolved.callables[heap.callable(cal).callable as usize].kind {
+            let id = heap.callable(cal).callable as usize;
+            match resolved.callables[id].kind {
                 // A procedure yields no value; discard the body's final transient value.
                 BodyKind::Proc => machine.reg = None,
                 // A function's value is the register's current contents (its final
-                // expression, or an executed `return expr`).
-                BodyKind::Func => {}
+                // expression, or an executed `return expr`) — Void means it fell off.
+                BodyKind::Func => {
+                    if machine.reg.is_none() {
+                        return Err(Raise::new(
+                            ExceptionKind::FunctionFellOffEnd,
+                            "this function reached its end without producing a value",
+                            resolved.ast.span(resolved.callables[id].decl),
+                        ));
+                    }
+                }
                 other => unreachable!("callable frame over a non-callable body: {other:?}"),
             }
         }
@@ -319,6 +374,7 @@ pub(crate) fn return_from_callable(resolved: &ResolvedModule, heap: &Heap, machi
             )
         }
     }
+    Ok(())
 }
 
 /// The expression a call argument evaluates (positional value or keyword value).

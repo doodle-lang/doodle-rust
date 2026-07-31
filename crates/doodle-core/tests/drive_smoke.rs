@@ -250,35 +250,59 @@ fn a_block_ending_in_a_loop_yields_void() {
 }
 
 /// An empty block yields Void; consuming that value raises (it does not leak a
-/// prior statement's transient value).
+/// prior statement's transient value). The value is consumed *inside* `m`
+/// (`let v = body()`), so it is a consuming-site error there — a bug that leaked
+/// the prior `99` would bind `v = 99` and complete.
 #[test]
 fn an_empty_block_yields_void() {
     assert_raises(
-        "fn m(do body)\n99\nbody()\nend\nto go()\nlet r = m() do end\nend\ngo()\n",
+        "fn m(do body)\n99\nlet v = body()\nv\nend\nto go()\nm() do end\nend\ngo()\n",
         ExceptionKind::ProcedureInExpression,
     );
 }
 
-/// A `fn` that dynamically falls off the end without a value must raise at its
-/// **own** completion (L§8.4/§8.7), independent of whether the caller uses the
-/// value. This is the `fn`-tail-`to` case: `f`'s tail call `g()` has a runtime-
-/// indeterminate kind (g is a parameter), so the resolver defers the judgment;
-/// when `g` is a `to`, `f` reaches its `ReturnBarrier` with a Void register.
-/// Because `f(noop)` here is a bare statement, nothing consumes the result, so
-/// the machine currently completes Void **silently** — `return_from_callable`
-/// leaves a `fn`'s register unchanged and does not check for Void. Enforcement is
-/// entangled with the M2a.7 apply-time kind gate (plan-m2a.md, S-55 follow-up);
-/// this is the expected-fail tripwire until then. (When the caller *does* consume
-/// the value — `let x = f(noop)` — the `take_value` backstop already raises.)
+/// A `fn` that dynamically falls off the end without a value raises at its **own**
+/// completion (L§8.4/§8.7), independent of whether the caller uses the value. This
+/// is the `fn`-tail-`to` case: `f`'s tail call `g()` has a runtime-indeterminate
+/// kind (`g` is a parameter), so the resolver defers the judgment; when `g` is a
+/// `to`, the S-55 kind gate runs the call as an ordinary frame (no reuse), the `to`
+/// completes Void, and `f` reaches its `ReturnBarrier` with a Void register — which
+/// now raises. Here `f(noop)` is a bare statement, so nothing consumes the result;
+/// the raise is the fn's own falls-off enforcement, not a consuming-site error.
 #[test]
-#[ignore = "fn-falls-off-end enforcement lands with the M2a.7 kind gate"]
 fn a_function_that_falls_off_the_end_raises() {
-    let mut inst = instance("to noop() end\nfn f(g) g() end\nf(noop)\n");
-    assert!(
-        matches!(
-            run(&mut inst, Directive::RunToCompletion),
-            Outcome::Raised(..)
-        ),
-        "a fn falling off the end should raise at its own completion (L§8.7)"
+    assert_raises(
+        "to noop() end\nfn f(g) g() end\nf(noop)\n",
+        ExceptionKind::FunctionFellOffEnd,
+    );
+}
+
+/// The S-55 mixed-kind cases run as ordinary (non-tail) frames: a `to` that
+/// tail-calls an `fn` **discards** the value (the `to` still yields Void), so
+/// reaching it through a `let` (where the resolver can't pin the kind) raises a
+/// consuming-site error rather than yielding the `fn`'s value.
+#[test]
+fn a_procedure_tail_calling_a_function_discards_the_value() {
+    assert_raises(
+        "fn add(a, b) a + b end\nto run() add(1, 2) end\nlet g = run\nlet r = g()\n",
+        ExceptionKind::ProcedureInExpression,
+    );
+}
+
+/// A **bare** `return` in a `fn` (non-tail, so the resolver can't reject it — the
+/// fn's *tail* still produces a value) makes the function value-less on that path.
+/// Reaching it raises `FunctionFellOffEnd` at the fn's completion — the same rule
+/// the `ReturnBarrier` applies on fall-through, but the `return` unwind path must
+/// enforce it too (it delivers the result without touching the barrier). Both the
+/// unconsumed and consumed cases raise the same error at the same site.
+#[test]
+fn a_bare_return_in_a_function_falls_off() {
+    assert_raises(
+        "fn f(c)\nif c then return end\n42\nend\nf(true)\n",
+        ExceptionKind::FunctionFellOffEnd,
+    );
+    assert_raises(
+        "fn f(c)\nif c then return end\n42\nend\nlet y = f(true)\ny\n",
+        ExceptionKind::FunctionFellOffEnd,
     );
 }
