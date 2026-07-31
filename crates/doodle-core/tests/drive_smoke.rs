@@ -208,6 +208,57 @@ fn is_with_a_non_type_right_operand_raises() {
     assert_raises("5 is 5\n", ExceptionKind::TypeMismatch);
 }
 
+/// A `to`/`fn` with a block argument and three-tier exits drives to Void
+/// completion — a top-level module always yields Void (L§6.11). Here a bare
+/// `break` exits the block-consuming call.
+#[test]
+fn a_block_program_with_exits_drives_to_void_completion() {
+    let mut inst = instance(
+        "to each3(do body)\nbody()\nbody()\nbody()\nend\n\
+         to go()\neach3() do break end\nend\ngo()\n",
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+}
+
+/// The open S-10 to-consumer half: a **valued** `break` exiting a **procedure**
+/// consuming call has no value destination (a `to` yields Void), so the machine
+/// raises **provisionally** rather than silently discard the value. Tracked
+/// pending the user's ruling on the S-10 to-consumer half.
+#[test]
+fn a_valued_break_into_a_procedure_consumer_raises_provisionally() {
+    assert_raises(
+        "to each1(do body)\nbody()\nend\nto wrap()\neach1() do break 5 end\nend\nwrap()\n",
+        ExceptionKind::NoValueDestination,
+    );
+}
+
+/// A block whose tail is value-less yields **Void**, not the previous statement's
+/// transient value (the register is cleared at each statement boundary). Here the
+/// block ends in a `while … break` (a loop yields Void, L§7.6), so `body()` yields
+/// Void and `let v = body()` (which uses the value) raises. A bug that leaked the
+/// loop body's last value (`42`) would let this bind `v = 42` and complete.
+#[test]
+fn a_block_ending_in_a_loop_yields_void() {
+    assert_raises(
+        "fn consume(do body)\nlet v = body()\nv\nend\n\
+         to go()\nconsume() do\nwhile true do\n42\nbreak\nend\nend\nend\ngo()\n",
+        ExceptionKind::ProcedureInExpression,
+    );
+}
+
+/// An empty block yields Void; consuming that value raises (it does not leak a
+/// prior statement's transient value).
+#[test]
+fn an_empty_block_yields_void() {
+    assert_raises(
+        "fn m(do body)\n99\nbody()\nend\nto go()\nlet r = m() do end\nend\ngo()\n",
+        ExceptionKind::ProcedureInExpression,
+    );
+}
+
 /// A `fn` that dynamically falls off the end without a value must raise at its
 /// **own** completion (L§8.4/§8.7), independent of whether the caller uses the
 /// value. This is the `fn`-tail-`to` case: `f`'s tail call `g()` has a runtime-

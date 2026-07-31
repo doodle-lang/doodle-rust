@@ -138,6 +138,18 @@ pub(crate) enum Cont {
         /// The index of the argument now in the register.
         index: u32,
     },
+    /// A **block invocation**'s argument at `index` is now in the register: stash
+    /// it and evaluate the next, or invoke the block once the last is in (§8.5).
+    /// Unlike [`CallGotArg`](Cont::CallGotArg) there is no callee value — the block
+    /// descriptor lives on the invoking frame (machine-design §8/§10).
+    BlockGotArg {
+        /// The `Call` node invoking the block parameter.
+        call: NodeId,
+        /// The argument values evaluated so far, in source order.
+        values: Vec<Value>,
+        /// The index of the argument now in the register.
+        index: u32,
+    },
     /// A parameter default's value is now in the register: write it into the
     /// callee frame's slot (defaults are evaluated in the callee activation, L§8.2).
     BindDefault {
@@ -155,7 +167,13 @@ pub(crate) enum Cont {
     },
     /// The root of a callable body's continuation stack (machine-design §8/§10):
     /// when it is reached the body is done, so the frame returns, delivering its
-    /// result (a `fn`'s value; Void for a `to`). Also the target a `return` unwinds
-    /// to (M2a.6).
+    /// result (a `fn`'s value; Void for a `to`). Also where a block delivers its
+    /// yielded value to its invoker (§8.5).
     ReturnBarrier,
+    /// A `return`/`break`/`continue` operand (if any) is now in the register: begin
+    /// the non-local transfer to the exit's resolver-annotated target (§12).
+    ExitApply {
+        /// The `Return`/`Break`/`Continue` node.
+        exit: NodeId,
+    },
 }

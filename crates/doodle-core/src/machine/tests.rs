@@ -298,3 +298,157 @@ fn a_callable_is_one_canonical_value_across_reads() {
         "each read of `f` must be the same canonical callable: {seen:?}"
     );
 }
+
+// Doodle indentation is not significant, so these multi-statement sources use
+// `\`-continued string literals (the escaped newline + leading whitespace are
+// stripped) to stay within the line-length limit.
+#[test]
+fn blocks_pass_invoke_and_read_enclosing_locals() {
+    for (src, want) in [
+        // Pass a block, invoke it, use its yielded value.
+        (
+            "fn call_it(do body)\n  body()\nend\ncall_it() do 42 end\n",
+            42,
+        ),
+        // A block invoked with an argument, bound to the block's own parameter.
+        (
+            "fn twice_sum(do body)\nbody(1) + body(2)\nend\n\
+             twice_sum() do (n) n * 10 end\n",
+            30,
+        ),
+        // A block reads an enclosing fn local through a static link (§7): `x` lives
+        // in `outer`'s frame, read from inside the block invoked within `give`.
+        (
+            "fn give(do body)\nbody()\nend\n\
+             fn outer()\nlet x = 10\ngive() do x end\nend\nouter()\n",
+            10,
+        ),
+        // A block mutates an enclosing local through the static link (§8.5).
+        (
+            "to run(do body)\nbody()\nend\n\
+             fn outer()\nlet n = 0\nrun() do n = n + 5 end\nn\nend\nouter()\n",
+            5,
+        ),
+        // The callee invokes the block several times (an iterating consumer),
+        // accumulating into an enclosing local across invocations.
+        (
+            "to each3(do body)\nbody()\nbody()\nbody()\nend\n\
+             fn sum()\nlet t = 0\neach3() do t = t + 1 end\nt\nend\nsum()\n",
+            3,
+        ),
+    ] {
+        let mut inst = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(want),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn a_block_param_invoked_from_a_nested_block_composes() {
+    for (src, want) in [
+        // `relay` receives `body` and invokes it from INSIDE another helper's block
+        // (`run() do body() end`) — a block-composition pattern. `body` reaches
+        // `relay`'s block parameter via the defining chain (a BlockOuter callee).
+        (
+            "to run(do b)\nb()\nend\nto relay(do body)\nrun() do body() end\nend\n\
+             fn f()\nlet t = 0\nrelay() do t = t + 9 end\nt\nend\nf()\n",
+            9,
+        ),
+        // A `return` in the composed block exits the WRITING function (`f`), punching
+        // through `run`, the wrapper block, and `relay`.
+        (
+            "to run(do b)\nb()\nend\nto relay(do body)\nrun() do body() end\nend\n\
+             fn f()\nrelay() do return 7 end\n99\nend\nf()\n",
+            7,
+        ),
+        // A `break` in the composed block exits the call that RECEIVED the block
+        // (`relay(…)`), not the inner helper's call — so `relay`'s `marker = 1`
+        // (after `run()`) never runs and the module `marker` stays 0. If `break`
+        // wrongly targeted `run`'s call, `relay` would continue and yield 1.
+        (
+            "let marker = 0\nto run(do b)\nb()\nb()\nend\n\
+             to relay(do body)\nrun() do body() end\nmarker = 1\nend\n\
+             fn f()\nrelay() do break end\nmarker\nend\nf()\n",
+            0,
+        ),
+    ] {
+        let mut inst = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(want),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn non_local_exits_reach_the_right_target() {
+    for (src, want) in [
+        // A plain `return`, and a conditional early `return` in a function.
+        ("fn f() return 42 end\nf()\n", 42),
+        ("fn f(x)\nif x > 0 then return 1 end\n2\nend\nf(5)\n", 1),
+        ("fn f(x)\nif x > 0 then return 1 end\n2\nend\nf(0 - 5)\n", 2),
+        // `return` inside a block exits the WRITING function, not the consumer
+        // (punch-through): `f` yields 7; the `99` after `run()` never runs.
+        (
+            "to run(do body)\nbody()\nend\nfn f()\nrun() do return 7 end\n99\nend\nf()\n",
+            7,
+        ),
+        // `return` punches through TWO nested blocks/consumers to the home fn.
+        (
+            "to outer(do body)\nbody()\nend\nto inner(do body)\nbody()\nend\n\
+             fn f()\nouter() do inner() do return 5 end end\n99\nend\nf()\n",
+            5,
+        ),
+        // `break` exits the block-consuming call: the iterating callee stops early.
+        (
+            "to loop3(do body)\nbody()\nbody()\nbody()\nend\n\
+             fn f()\nlet hits = 0\nloop3() do\nhits = hits + 1\n\
+             if hits == 2 then break end\nend\nhits\nend\nf()\n",
+            2,
+        ),
+        // A valued `break` becomes the (function) consuming call's result (§8.5):
+        // `search` yields the break value 7, not its fall-off value 999.
+        (
+            "fn search(do body)\nbody()\n999\nend\n\
+             fn f()\nsearch() do break 7 end\nend\nf()\n",
+            7,
+        ),
+        // `continue` ends the block invocation; the callee invokes it again. The
+        // skipped invocation adds nothing, so only two of three add 10.
+        (
+            "to each3(do body)\nbody()\nbody()\nbody()\nend\n\
+             fn f()\nlet sum = 0\nlet calls = 0\neach3() do\ncalls = calls + 1\n\
+             if calls == 2 then continue end\nsum = sum + 10\nend\nsum\nend\nf()\n",
+            20,
+        ),
+        // A valued `continue` is the block's yield to the callee (a mapping use).
+        (
+            "fn map_sum(do body)\nbody(1) + body(2)\nend\n\
+             fn f()\nmap_sum() do (n) continue n * 100 end\nend\nf()\n",
+            300,
+        ),
+        // Loop `break`/`continue` (same frame): sum 1,2, skip 3, sum 4,5, break at 6.
+        (
+            "fn f()\nlet i = 0\nlet sum = 0\nwhile i < 10 do\ni = i + 1\n\
+             if i == 3 then continue end\nif i == 6 then break end\n\
+             sum = sum + i\nend\nsum\nend\nf()\n",
+            12,
+        ),
+        // A `loop` (endless without a break) exited by a `break`.
+        (
+            "fn f()\nlet n = 0\nloop do\nn = n + 1\nif n == 4 then break end\nend\nn\nend\nf()\n",
+            4,
+        ),
+    ] {
+        let mut inst = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(want),
+            "{src:?}"
+        );
+    }
+}

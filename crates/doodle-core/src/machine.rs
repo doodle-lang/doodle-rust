@@ -14,6 +14,7 @@
 //! (ring buffer, fuel, unwind record, dynamic stack, drive stack) is added then.
 
 mod arith;
+mod block;
 mod call;
 mod compare;
 mod cont;
@@ -22,6 +23,7 @@ mod error;
 mod frame;
 mod step;
 mod types;
+mod unwind;
 
 pub use error::{Exception, ExceptionKind, Trace};
 pub(crate) use types::BuiltinType;
@@ -162,6 +164,24 @@ pub(crate) struct Machine {
     frames: Vec<Frame>,
     /// The result register (L§6.11): `None` = Void.
     reg: Option<Value>,
+    /// Monotonic frame-identity counter (machine-design §8): stamped into each
+    /// pushed frame's `serial`, so a frame activation is distinguishable from a
+    /// later reuse of the same stack slot (integrity for static links / consumers).
+    frame_serial: u64,
+    /// An in-flight non-local transfer (machine-design §12): while `Some`, `step`
+    /// unwinds toward the exit's resolver-annotated target instead of running
+    /// continuations normally. `None` in normal execution. A GC root once it can
+    /// carry an exception value (M4).
+    unwind: Option<unwind::Unwind>,
+}
+
+impl Machine {
+    /// The next frame serial (post-increment): a fresh, monotonic frame identity.
+    pub(crate) fn next_frame_serial(&mut self) -> u64 {
+        let serial = self.frame_serial;
+        self.frame_serial += 1;
+        serial
+    }
 }
 
 /// A running program: the machine state the host drives (engine spec E§3).
@@ -219,6 +239,7 @@ impl Instance {
                 block: root,
                 next: 0,
             },
+            0, // the module frame is frame serial 0; further frames count up
         );
         Instance {
             resolved,
@@ -226,6 +247,8 @@ impl Instance {
             machine: Machine {
                 frames: vec![frame],
                 reg: None,
+                frame_serial: 1,
+                unwind: None,
             },
             namespace,
             state: InstanceState::Ready,

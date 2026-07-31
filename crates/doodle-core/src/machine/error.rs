@@ -44,6 +44,11 @@ pub enum ExceptionKind {
     /// required argument, an unknown keyword, a duplicate binding, or too many
     /// positional arguments.
     ArgumentError,
+    /// A valued `break` exited a block-consuming call whose callee is a **procedure**
+    /// (yields no value), so the value has no destination (L§7.10, §8.5). This is
+    /// the **open** S-10 to-consumer half; the machine raises **provisionally**
+    /// (rather than silently discard the value) pending the user's ruling.
+    NoValueDestination,
 }
 
 /// A Doodle exception reaching a drive boundary (E§9).

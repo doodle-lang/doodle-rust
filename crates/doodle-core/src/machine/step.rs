@@ -13,7 +13,7 @@ use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Machine, Value, arith, call, compare, types};
+use super::{Machine, Value, arith, block, call, compare, types, unwind};
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -28,6 +28,11 @@ pub(crate) fn step(
     machine: &mut Machine,
     namespace: &Namespace,
 ) -> Result<(), Raise> {
+    // A non-local transfer in flight takes over the transition (§12): unwind toward
+    // the exit's target instead of running continuations normally.
+    if machine.unwind.is_some() {
+        return unwind::step(resolved, machine);
+    }
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
     let cont = machine
@@ -88,6 +93,11 @@ pub(crate) fn step(
             values,
             index,
         }) => call::got_arg(resolved, heap, machine, call, callee, values, index),
+        Some(Cont::BlockGotArg {
+            call,
+            values,
+            index,
+        }) => block::got_block_arg(resolved, machine, call, values, index),
         Some(Cont::BindDefault { slot, default }) => {
             call::bind_default(resolved, machine, slot, default)
         }
@@ -99,6 +109,7 @@ pub(crate) fn step(
             call::return_from_callable(resolved, heap, machine);
             Ok(())
         }
+        Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
         // The frame's work is drained: return from it.
         None => {
             return_from_top_frame(machine);
@@ -142,6 +153,15 @@ fn seq_step(resolved: &ResolvedModule, machine: &mut Machine, block: NodeId, nex
     let Some(&stmt) = stmts.get(next as usize) else {
         return;
     };
+    // Clear the register at each statement boundary, so a body's value is the value
+    // of its *last* statement — Void when that statement is value-less (an
+    // assignment, a `while`/`loop`, an unmatched `if`) or the body is empty. Without
+    // this, a value-less-tailed or empty **block** would leak the previous
+    // statement's transient value as its yield (§8.5). (Resolves the statement-
+    // boundary register question carried from M2a.2 for the cases blocks make
+    // observable; the final `Seq` step — past the last statement — does not clear,
+    // preserving that last value for a `fn` body / block yield.)
+    machine.reg = None;
     let frame = machine.frames.last_mut().expect("seq_step with no frame");
     frame.conts.push(Cont::Seq {
         block,
@@ -181,7 +201,15 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
         // the statement runs (call.rs). Anonymous `fn` never reaches here — it is
         // an expression, wrapped in an `ExprStmt`.
         Node::Callable { .. } => frame.conts.push(Cont::DefineCallable { decl: stmt }),
-        other => unimplemented!("statement not yet in the machine (M2a.6+): {other:?}"),
+        // A non-local exit (§7.10): evaluate its operand (if any), then arm the
+        // unwind toward the resolver-annotated target (unwind.rs).
+        Node::Return(op) | Node::Break(op) | Node::Continue(op) => {
+            frame.conts.push(Cont::ExitApply { exit: stmt });
+            if let Some(operand) = op {
+                frame.conts.push(Cont::Eval { node: *operand });
+            }
+        }
+        other => unimplemented!("statement not yet in the machine (M4+): {other:?}"),
     }
 }
 
@@ -240,11 +268,9 @@ fn eval(
             frame.conts.push(Cont::Eval { node: operand });
             return Ok(());
         }
-        // A call schedules callee/argument evaluation, then `Apply` (call.rs).
-        Node::Call { .. } => {
-            call::eval_call(resolved, machine, node);
-            return Ok(());
-        }
+        // A call schedules callee/argument evaluation, then `Apply` (call.rs); a
+        // block-parameter invocation takes the block path (block.rs).
+        Node::Call { .. } => return call::eval_call(resolved, heap, machine, node),
         // An anonymous `fn` expression interns its own callable value (L§6.10).
         Node::Callable { .. } => call::make_callable(resolved, heap, node),
         other => unimplemented!("expression not yet in the machine (M2a.5+): {other:?}"),
@@ -261,8 +287,10 @@ fn return_from_top_frame(machine: &mut Machine) {
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
         FrameKind::ModuleTopLevel => machine.reg = None,
-        FrameKind::Callable { .. } => {
-            unreachable!("a callable frame returns via its ReturnBarrier, not an empty cont stack")
+        FrameKind::Callable { .. } | FrameKind::Block { .. } => {
+            unreachable!(
+                "a callable/block frame returns via its ReturnBarrier, not an empty cont stack"
+            )
         }
     }
 }

@@ -5,15 +5,46 @@
 //! length; part of the same [`Resolver`](super::Resolver) walk.
 
 use super::{FrameCapture, FrameKind};
-use crate::ast::NodeId;
+use crate::ast::{Node, NodeId};
+use crate::diag::code::DiagnosticCode;
 use crate::resolve::{CaptureFrom, CaptureSource, NameRef, Resolution};
 
 impl super::Resolver<'_> {
-    /// Resolves a name *reference* at `node`: a local slot, a block static link, a
-    /// closure capture (cross-`fn`), or a free module name.
+    /// Resolves the callee of a call. When it is a simple name it resolves in
+    /// **invocation position** (a block parameter may appear here, §8.5); a
+    /// compound callee resolves as an ordinary expression.
+    pub(super) fn resolve_callee(&mut self, callee: NodeId) {
+        if let Node::Ident(name) = self.ast.node(callee) {
+            let name = name.clone();
+            self.resolve_ref_pos(callee, &name, true);
+        } else {
+            self.resolve(callee);
+        }
+    }
+
+    /// Resolves a name *reference* at `node` (a value position): a local slot, a
+    /// block static link, a closure capture (cross-`fn`), or a free module name.
     pub(super) fn resolve_ref(&mut self, node: NodeId, name: &str) {
+        self.resolve_ref_pos(node, name, false);
+    }
+
+    /// Resolves a name reference. `as_callee` is true only for a call's callee
+    /// (invocation position): a second-class block parameter (§8.5) may be invoked
+    /// there but is a static error in any value position.
+    fn resolve_ref_pos(&mut self, node: NodeId, name: &str, as_callee: bool) {
         match self.lookup(name) {
-            Some((frame, slot, _)) => {
+            Some((frame, slot, _, is_block)) => {
+                if is_block && !as_callee {
+                    self.error(
+                        DiagnosticCode::BlockUsedAsValue,
+                        node,
+                        &format!(
+                            "`{name}` is a block, so it can't be used as a value — \
+                             invoke it with `{name}(…)` (a block can't be stored, \
+                             returned, or passed on, §8.5)"
+                        ),
+                    );
+                }
                 let cur = self.frames.len() - 1;
                 if frame == cur {
                     self.set_res(node, Resolution::LocalSlot(slot));

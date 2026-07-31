@@ -17,7 +17,7 @@
 
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
-use super::frame::Frame;
+use super::frame::{Frame, FrameKind};
 use super::step::take_value;
 use super::{Machine, Value, compare};
 use crate::ast::{Node, NodeId};
@@ -47,7 +47,11 @@ pub(crate) fn read_ref(
             let name = &resolved.name_refs[idx as usize].name;
             read_cell(heap, find_cell(namespace, name), name, span)
         }
-        Resolution::BlockOuter { .. } => unimplemented!("block outer-local access is M2a.6"),
+        // A block body reading an enclosing local through the defining static link
+        // (§7): chase `defining` `hops` times, then read that frame's slot.
+        Resolution::BlockOuter { hops, slot } => {
+            read_slot_at(machine, outer_frame(machine, hops), slot, name, span)
+        }
     }
 }
 
@@ -115,7 +119,11 @@ pub(crate) fn assign_to(
             let cell = find_cell(namespace, name).ok_or_else(|| name_not_defined(name, span))?;
             heap.cell_mut(cell).value = Some(value);
         }
-        Resolution::BlockOuter { .. } => unimplemented!("block outer assignment is M2a.6"),
+        // A block body writing an enclosing local through the defining static link
+        // (§7/§8.5 — a block can mutate its enclosing variables).
+        Resolution::BlockOuter { hops, slot } => {
+            set_slot_at(machine, outer_frame(machine, hops), slot, value);
+        }
     }
     Ok(())
 }
@@ -211,14 +219,58 @@ pub(crate) fn loop_reloop(resolved: &ResolvedModule, machine: &mut Machine, node
 }
 
 fn read_slot(machine: &Machine, slot: u16, name: &str, span: Span) -> Result<Value, Raise> {
-    match machine.frames.last().expect("a frame is active").locals[slot as usize] {
+    read_slot_at(machine, machine.frames.len() - 1, slot, name, span)
+}
+
+fn set_slot(machine: &mut Machine, slot: u16, value: Value) {
+    let top = machine.frames.len() - 1;
+    set_slot_at(machine, top, slot, value);
+}
+
+/// Reads slot `slot` of the frame at `frame` (the top frame, or an enclosing one
+/// reached by a block static link), raising if it is uninitialized.
+fn read_slot_at(
+    machine: &Machine,
+    frame: usize,
+    slot: u16,
+    name: &str,
+    span: Span,
+) -> Result<Value, Raise> {
+    match machine.frames[frame].locals[slot as usize] {
         Some(v) => Ok(v),
         None => Err(used_before_defined(name, span)),
     }
 }
 
-fn set_slot(machine: &mut Machine, slot: u16, value: Value) {
-    machine.frames.last_mut().expect("a frame is active").locals[slot as usize] = Some(value);
+fn set_slot_at(machine: &mut Machine, frame: usize, slot: u16, value: Value) {
+    machine.frames[frame].locals[slot as usize] = Some(value);
+}
+
+/// The frame reached by chasing the top (block) frame's `defining` static link
+/// `hops` times (machine-design §7). `hops = 0` is the block's own frame; each
+/// hop steps to the frame the block was defined in. The intervening frames are
+/// block frames (the resolver guarantees the chain does not cross a callable
+/// boundary); the defining `serial` is checked to catch a stale link. Shared with
+/// `block.rs` (a block-parameter invocation from inside a nested block reaches the
+/// owning callable the same way).
+pub(crate) fn outer_frame(machine: &Machine, hops: u16) -> usize {
+    let mut idx = machine.frames.len() - 1;
+    for _ in 0..hops {
+        let FrameKind::Block {
+            defining,
+            defining_serial,
+            ..
+        } = machine.frames[idx].kind
+        else {
+            unreachable!("a BlockOuter static-link chase reached a non-block frame");
+        };
+        debug_assert_eq!(
+            machine.frames[defining].serial, defining_serial,
+            "stale block defining link — a frame slot was reused (machine-design §8)"
+        );
+        idx = defining;
+    }
+    idx
 }
 
 fn read_cell(heap: &Heap, cell: Option<CellIdx>, name: &str, span: Span) -> Result<Value, Raise> {

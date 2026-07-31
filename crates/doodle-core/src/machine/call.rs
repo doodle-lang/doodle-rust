@@ -19,25 +19,34 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::step::take_value;
-use super::{Machine, Value, control};
+use super::{Machine, Value, block, control};
 use crate::ast::{Arg, Node, NodeId, Param};
 use crate::heap::{CalObj, Heap};
-use crate::resolve::{BodyKind, ResolvedModule};
+use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
 use crate::span::Span;
 
-/// Schedules a call (an expression): evaluate the callee, then [`Cont::CallGotCallee`]
-/// takes over. A trailing block argument is M2a.6.
-pub(crate) fn eval_call(resolved: &ResolvedModule, machine: &mut Machine, call: NodeId) {
-    let Node::Call { callee, block, .. } = resolved.ast.node(call) else {
+/// Schedules a call (an expression). A `body(args)` invocation of the current
+/// callable's block parameter (§8.5) takes the block path (`block.rs`); every
+/// other call evaluates its callee, then [`Cont::CallGotCallee`] takes over. A
+/// trailing `do … end` block argument is carried on the `Call` node and bound in
+/// [`apply`].
+pub(crate) fn eval_call(
+    resolved: &ResolvedModule,
+    heap: &Heap,
+    machine: &mut Machine,
+    call: NodeId,
+) -> Result<(), Raise> {
+    let Node::Call { callee, .. } = resolved.ast.node(call) else {
         unreachable!("eval_call over a non-Call node");
     };
-    if block.is_some() {
-        unimplemented!("block arguments are M2a.6");
-    }
     let callee = *callee;
+    if block::is_block_invocation(resolved, heap, machine, callee) {
+        return block::eval_block_call(resolved, machine, call);
+    }
     let frame = machine.frames.last_mut().expect("eval_call with no frame");
     frame.conts.push(Cont::CallGotCallee { call });
     frame.conts.push(Cont::Eval { node: callee });
+    Ok(())
 }
 
 /// The callee is now in the register: start evaluating arguments left to right,
@@ -129,49 +138,17 @@ fn apply(
     };
     let callable_id = heap.callable(cal).callable as usize;
     let info = &resolved.callables[callable_id];
-    // Block parameters (and the block arguments that fill them) are M2a.6.
-    if info.params.iter().any(|p| p.is_block) {
-        unimplemented!("block parameters are M2a.6");
-    }
     let params = &info.params;
-    let mut slots: Vec<Option<Value>> = vec![None; info.slot_count as usize];
-    let mut filled = vec![false; params.len()];
+    let body = info.body;
+    let (slots, filled) =
+        bind_arguments(resolved, call, params, info.slot_count, &arg_values, span)?;
 
-    // Positional arguments come before keyword arguments (L§6.4); fill in turn.
-    let Node::Call { args, .. } = resolved.ast.node(call) else {
-        unreachable!("apply over a non-Call node");
-    };
-    let mut pos = 0usize;
-    for (arg, &val) in args.iter().zip(arg_values.iter()) {
-        let p = match arg {
-            Arg::Positional(_) => {
-                if pos >= params.len() {
-                    return Err(arg_error(span, "too many arguments for this call"));
-                }
-                let p = pos;
-                pos += 1;
-                p
-            }
-            Arg::Keyword { name, .. } => match params.iter().position(|pi| *pi.name == **name) {
-                Some(p) => p,
-                None => return Err(arg_error(span, format!("`{name}` isn't a parameter here"))),
-            },
-        };
-        if filled[p] {
-            return Err(arg_error(
-                span,
-                format!("`{}` was given more than once", params[p].name),
-            ));
-        }
-        slots[params[p].slot as usize] = Some(val);
-        filled[p] = true;
-    }
-
-    // Unfilled parameters need a default (scheduled below) or the call is missing
-    // a required argument.
+    // Unfilled ordinary parameters need a default (scheduled below) or the call is
+    // missing a required argument. A block parameter is filled from the `do … end`
+    // argument (below), never here.
     let mut defaults: Vec<(u16, NodeId)> = Vec::new();
     for (i, pi) in params.iter().enumerate() {
-        if filled[i] {
+        if filled[i] || pi.is_block {
             continue;
         }
         if pi.has_default {
@@ -184,8 +161,15 @@ fn apply(
         }
     }
 
-    let body = info.body;
-    machine.frames.push(Frame::callable(cal, slots, body));
+    // Bind the `do … end` block argument (if any) to the callee's block parameter,
+    // checking the two are consistent (§8.3/§8.5). Computed before the callee frame
+    // is pushed, so the descriptor's defining link names the caller frame.
+    let block_param = block::bind_block_argument(resolved, machine, call, params, span)?;
+
+    let serial = machine.next_frame_serial();
+    machine
+        .frames
+        .push(Frame::callable(cal, slots, body, serial, block_param));
     // Defaults are evaluated in the callee activation, before the body (LIFO: push
     // in reverse source order so earlier defaults run — and bind — first).
     let frame = machine
@@ -200,6 +184,62 @@ fn apply(
         frame.conts.push(Cont::Eval { node: expr });
     }
     Ok(())
+}
+
+/// Binds positional + keyword arguments to `params` (L§8.3), returning the filled
+/// slot vector (sized `slot_count`) and a per-parameter filled flag. Only ordinary
+/// parameters are bound: a block parameter is filled from the `do … end` argument
+/// (§8.5), so a positional or keyword argument targeting one raises. Too many
+/// arguments, an unknown keyword, and a duplicate binding each raise. Shared by
+/// callable [`apply`] and block invocation ([`block`]).
+pub(crate) fn bind_arguments(
+    resolved: &ResolvedModule,
+    call: NodeId,
+    params: &[ParamInfo],
+    slot_count: u16,
+    arg_values: &[Value],
+    span: Span,
+) -> Result<(Vec<Option<Value>>, Vec<bool>), Raise> {
+    let mut slots: Vec<Option<Value>> = vec![None; slot_count as usize];
+    let mut filled = vec![false; params.len()];
+    // Positional arguments come before keyword arguments (the parser guarantees it).
+    let Node::Call { args, .. } = resolved.ast.node(call) else {
+        unreachable!("bind_arguments over a non-Call node");
+    };
+    let mut pos = 0usize;
+    for (arg, &val) in args.iter().zip(arg_values.iter()) {
+        let p = match arg {
+            // A positional fills the next ordinary parameter; the block parameter
+            // is last, so reaching it means there are too many positionals.
+            Arg::Positional(_) => {
+                if pos >= params.len() || params[pos].is_block {
+                    return Err(arg_error(span, "too many arguments for this call"));
+                }
+                let p = pos;
+                pos += 1;
+                p
+            }
+            Arg::Keyword { name, .. } => match params.iter().position(|pi| *pi.name == **name) {
+                Some(p) if params[p].is_block => {
+                    return Err(arg_error(
+                        span,
+                        format!("`{name}` takes a `do … end` block, not a keyword argument"),
+                    ));
+                }
+                Some(p) => p,
+                None => return Err(arg_error(span, format!("`{name}` isn't a parameter here"))),
+            },
+        };
+        if filled[p] {
+            return Err(arg_error(
+                span,
+                format!("`{}` was given more than once", params[p].name),
+            ));
+        }
+        slots[params[p].slot as usize] = Some(val);
+        filled[p] = true;
+    }
+    Ok((slots, filled))
 }
 
 /// A parameter default's value is now in the register: write it into the callee
@@ -254,27 +294,35 @@ pub(crate) fn make_callable(resolved: &ResolvedModule, heap: &mut Heap, decl: No
     Value::Callable(cal)
 }
 
-/// Delivers a callable frame's result when its body drains to the
-/// [`Cont::ReturnBarrier`]: a `fn` leaves its value in the register; a `to` yields
-/// Void (L§8.4), so the register is cleared. Pops the frame.
+/// Delivers a frame's result when its body drains to the [`Cont::ReturnBarrier`],
+/// then pops it. A `fn` leaves its value in the register; a `to` yields Void
+/// (L§8.4), so the register is cleared; a block yields its last expression's value
+/// to its invoker (§8.5), so the register is kept.
 pub(crate) fn return_from_callable(resolved: &ResolvedModule, heap: &Heap, machine: &mut Machine) {
     let frame = machine.frames.pop().expect("return with no frame");
-    let FrameKind::Callable { cal } = frame.kind else {
-        unreachable!("ReturnBarrier on a non-callable frame");
-    };
-    let callable_id = heap.callable(cal).callable as usize;
-    match resolved.callables[callable_id].kind {
-        // A procedure yields no value; discard the body's final transient value.
-        BodyKind::Proc => machine.reg = None,
-        // A function's value is the register's current contents (its final
-        // expression, or an executed `return expr` at M2a.6).
-        BodyKind::Func => {}
-        other => unreachable!("callable frame over a non-callable body: {other:?}"),
+    match frame.kind {
+        FrameKind::Callable { cal } => {
+            match resolved.callables[heap.callable(cal).callable as usize].kind {
+                // A procedure yields no value; discard the body's final transient value.
+                BodyKind::Proc => machine.reg = None,
+                // A function's value is the register's current contents (its final
+                // expression, or an executed `return expr`).
+                BodyKind::Func => {}
+                other => unreachable!("callable frame over a non-callable body: {other:?}"),
+            }
+        }
+        // A block delivers its last expression's value to its invoker; keep `reg`.
+        FrameKind::Block { .. } => {}
+        FrameKind::ModuleTopLevel => {
+            unreachable!(
+                "the module top level returns via the empty-cont path, not a ReturnBarrier"
+            )
+        }
     }
 }
 
 /// The expression a call argument evaluates (positional value or keyword value).
-fn arg_expr(arg: &Arg) -> NodeId {
+pub(crate) fn arg_expr(arg: &Arg) -> NodeId {
     match arg {
         Arg::Positional(e) => *e,
         Arg::Keyword { value, .. } => *value,

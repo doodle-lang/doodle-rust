@@ -71,7 +71,8 @@ impl super::Resolver<'_> {
                 let callee = *callee;
                 let args = args.clone();
                 let block = block.clone();
-                self.resolve(callee);
+                // Invocation position: a block parameter may be the callee (§8.5).
+                self.resolve_callee(callee);
                 for arg in &args {
                     match arg {
                         Arg::Positional(e) => self.resolve(*e),

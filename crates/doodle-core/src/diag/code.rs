@@ -60,6 +60,17 @@ pub enum DiagnosticCode {
     /// A `return`/`break`/`continue` outside its valid context — `return` outside
     /// a procedure/function, or `break`/`continue` outside a loop or block (L§7.10).
     MisplacedExit,
+    /// A valued `break`/`continue` whose destination is a `while`/`loop`, which
+    /// yields no value (L§7.10, S-10 loop half): the value has nowhere to go. Only
+    /// a block-consuming call can receive a `break`/`continue` value.
+    ValuedExitInLoop,
+    /// A valued `return` inside a procedure (`to`), which yields no value (L§8.4):
+    /// the returned value has no destination. Use a plain `return`, or an `fn`.
+    ValuedReturnInProcedure,
+    /// A `do name` block parameter used as a **value** rather than invoked (L§8.5):
+    /// a block is second-class — it may only be invoked (`name(…)`), never stored,
+    /// returned, assigned, or passed on.
+    BlockUsedAsValue,
     /// Two bindings of the same name in one scope (L§5.2).
     DuplicateDeclaration,
     /// Assigning to a name that is not a mutable (`let`) binding visible here — an
@@ -104,6 +115,9 @@ impl DiagnosticCode {
             DiagnosticCode::MalformedTripleQuote => "malformed-triple-quote",
             DiagnosticCode::Shadowing => "shadowing",
             DiagnosticCode::MisplacedExit => "misplaced-exit",
+            DiagnosticCode::ValuedExitInLoop => "valued-exit-in-loop",
+            DiagnosticCode::ValuedReturnInProcedure => "valued-return-in-procedure",
+            DiagnosticCode::BlockUsedAsValue => "block-used-as-value",
             DiagnosticCode::DuplicateDeclaration => "duplicate-declaration",
             DiagnosticCode::UndeclaredAssignment => "undeclared-assignment",
             DiagnosticCode::FunctionFallsOffEnd => "function-falls-off-end",

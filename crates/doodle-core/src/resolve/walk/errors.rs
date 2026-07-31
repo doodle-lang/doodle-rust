@@ -50,8 +50,8 @@ impl Resolver<'_> {
         };
         let name = name.clone();
         match self.lookup(&name) {
-            Some((_, _, GlobalKind::Let)) => {} // a mutable local — assignable
-            Some((_, _, kind)) => self.non_assignable_error(target, &name, kind),
+            Some((_, _, GlobalKind::Let, _)) => {} // a mutable local — assignable
+            Some((_, _, kind, _)) => self.non_assignable_error(target, &name, kind),
             // Not a local: a module name; its assignability needs the complete
             // `globals`, so defer.
             None => self.pending_assigns.push((target, name)),

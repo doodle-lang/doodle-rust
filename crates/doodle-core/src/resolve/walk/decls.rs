@@ -41,7 +41,7 @@ impl super::Resolver<'_> {
     pub(super) fn scope_params(&mut self, decl: NodeId, param_infos: &[ParamInfo]) {
         for pi in param_infos {
             self.check_shadowing(decl, &pi.name);
-            self.bind_in_scope(&pi.name, pi.slot, GlobalKind::Let);
+            self.bind_in_scope(&pi.name, pi.slot, GlobalKind::Let, pi.is_block);
         }
     }
 
@@ -135,7 +135,7 @@ impl super::Resolver<'_> {
     /// (L§8.2), see [`alloc_frame_slot`] + [`bind_in_scope`].
     pub(super) fn declare_local(&mut self, name: &str, kind: GlobalKind) -> u16 {
         let slot = self.alloc_frame_slot(name);
-        self.bind_in_scope(name, slot, kind);
+        self.bind_in_scope(name, slot, kind, false); // not a block parameter
         slot
     }
 
@@ -150,8 +150,9 @@ impl super::Resolver<'_> {
         slot
     }
 
-    /// Binds `name` → `slot` (declaration `kind`) in the current scope.
-    fn bind_in_scope(&mut self, name: &str, slot: u16, kind: GlobalKind) {
+    /// Binds `name` → `slot` (declaration `kind`; `is_block` for a `do name` block
+    /// parameter) in the current scope.
+    fn bind_in_scope(&mut self, name: &str, slot: u16, kind: GlobalKind, is_block: bool) {
         self.scopes
             .last_mut()
             .expect("a scope is open")
@@ -160,6 +161,7 @@ impl super::Resolver<'_> {
                 name: name.into(),
                 slot,
                 kind,
+                is_block,
             });
     }
 }

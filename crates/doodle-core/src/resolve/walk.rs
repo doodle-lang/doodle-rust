@@ -28,8 +28,11 @@ mod voidcheck;
 /// placement (machine-design §12). A callable is a `return` target and a
 /// `break`/`continue` barrier; a loop/block is a `break`/`continue` target.
 /// (`if`/`with`/`try` are transparent to exits, so they push nothing.)
+///
+/// The callable carries its [`BodyKind`] so `return` placement can reject a
+/// **valued** `return` in a procedure (a `to` yields no value, L§8.4).
 enum Ctrl {
-    Callable,
+    Callable(BodyKind),
     Loop(NodeId),
     Block,
 }
@@ -77,6 +80,10 @@ struct Binding {
     name: Box<str>,
     slot: u16,
     kind: GlobalKind,
+    /// Whether this is a callee's `do name` **block parameter** (§8.2), which is
+    /// second-class: it may only be *invoked* (`name(…)`), never used as a value
+    /// (§8.5). A reference to it outside invocation position is a static error.
+    is_block: bool,
 }
 
 pub(super) struct Resolver<'a> {
@@ -255,7 +262,7 @@ impl<'a> Resolver<'a> {
             frame: self.frames.len() - 1,
             bindings: Vec::new(),
         });
-        self.ctrl.push(Ctrl::Callable); // a `return` target; a break/continue barrier
+        self.ctrl.push(Ctrl::Callable(kind)); // a `return` target; a break/continue barrier
         // Allocate param slots (0..n) in this frame, but bind their names in scope
         // only AFTER resolving defaults: a default must not see a sibling param
         // (L§8.2 — the *declaration's* lexical scope), yet it must resolve with THIS
@@ -393,11 +400,11 @@ impl<'a> Resolver<'a> {
 
     /// Looks up `name` in the scope stack (innermost first), returning its frame,
     /// slot, and declaration kind.
-    pub(super) fn lookup(&self, name: &str) -> Option<(usize, u16, GlobalKind)> {
+    pub(super) fn lookup(&self, name: &str) -> Option<(usize, u16, GlobalKind, bool)> {
         for scope in self.scopes.iter().rev() {
             for b in scope.bindings.iter().rev() {
                 if &*b.name == name {
-                    return Some((scope.frame, b.slot, b.kind));
+                    return Some((scope.frame, b.slot, b.kind, b.is_block));
                 }
             }
         }

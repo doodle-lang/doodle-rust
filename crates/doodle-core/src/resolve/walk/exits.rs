@@ -7,7 +7,7 @@
 use super::Ctrl;
 use crate::ast::NodeId;
 use crate::diag::code::DiagnosticCode;
-use crate::resolve::ExitTarget;
+use crate::resolve::{BodyKind, ExitTarget};
 
 impl super::Resolver<'_> {
     /// Resolves a `while`/`loop` body: a construct scope plus a [`Ctrl::Loop`]
@@ -19,18 +19,36 @@ impl super::Resolver<'_> {
     }
 
     /// Annotates a `return` with its lexical target — the nearest enclosing
-    /// callable (machine-design §12) — or reports a misplaced `return`.
+    /// callable (machine-design §12) — or reports a misplaced `return`. A **valued**
+    /// `return` in a procedure (`to`) has no value destination and is rejected
+    /// (L§8.4; the value half of the S-10 rule, alongside `valued-exit-in-loop`).
     pub(super) fn resolve_return(&mut self, node: NodeId, operand: Option<NodeId>) {
         if let Some(e) = operand {
             self.resolve(e);
         }
-        if self.ctrl.iter().any(|c| matches!(c, Ctrl::Callable)) {
-            self.set_exit(node, ExitTarget::HomeCallable);
-        } else {
-            self.exit_error(
+        // `if`/`with`/`try`/loops/blocks are transparent to `return`; the nearest
+        // `Ctrl::Callable` is its home.
+        let home_kind = self.ctrl.iter().rev().find_map(|c| match c {
+            Ctrl::Callable(kind) => Some(*kind),
+            _ => None,
+        });
+        match home_kind {
+            Some(kind) => {
+                self.set_exit(node, ExitTarget::HomeCallable);
+                if operand.is_some() && kind == BodyKind::Proc {
+                    self.error(
+                        DiagnosticCode::ValuedReturnInProcedure,
+                        node,
+                        "a procedure yields no value, so `return` here can't take one — \
+                         use a plain `return`, or make this a function (`fn`) if it \
+                         should yield a value",
+                    );
+                }
+            }
+            None => self.exit_error(
                 node,
                 "`return` can only appear inside a procedure or function",
-            );
+            ),
         }
     }
 
@@ -53,12 +71,28 @@ impl super::Resolver<'_> {
             Some(Ctrl::Loop(loop_node)) => Some(ExitTarget::ThisLoop(*loop_node)),
             Some(Ctrl::Block) if is_break => Some(ExitTarget::ConsumerCall),
             Some(Ctrl::Block) => Some(ExitTarget::ThisBlock),
-            Some(Ctrl::Callable) | None => None,
+            Some(Ctrl::Callable(_)) | None => None,
         };
         // Record a `break` bound to a loop, so the S-5 tail classifier knows that
         // loop can exit (a `loop` with no bound `break` diverges).
         if let (true, Some(ExitTarget::ThisLoop(loop_node))) = (is_break, target) {
             self.loops_with_break.push(loop_node);
+        }
+        // A `while`/`loop` yields no value, so a valued `break`/`continue` targeting
+        // one has no destination — a static error (L§7.10, S-10 loop half). Only a
+        // block-consuming call receives a `break`/`continue` value.
+        if operand.is_some() && matches!(target, Some(ExitTarget::ThisLoop(_))) {
+            let kw = if is_break { "break" } else { "continue" };
+            self.error(
+                DiagnosticCode::ValuedExitInLoop,
+                node,
+                &format!(
+                    "a loop yields no value, so `{kw}` here can't take one — \
+                     assign the value to a variable, `return` it if the enclosing \
+                     function should yield it, or use a block-consuming call for a \
+                     value-yielding loop"
+                ),
+            );
         }
         match target {
             Some(t) => self.set_exit(node, t),

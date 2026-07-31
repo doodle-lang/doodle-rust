@@ -635,12 +635,15 @@ fn procedure_call_where_a_value_is_required_is_a_consuming_site_error() {
         vec![pie]
     );
     assert_eq!(diags(&resolved("to p() end\nparameter c = p()")), vec![pie]);
-    // `raise`/`break` operands consume a value (Void is not a value, so this errors
-    // regardless of how S-10 lands).
+    // A `raise` operand consumes a value (Void is not a value, so this errors).
     assert_eq!(diags(&resolved("to p() end\nraise p()")), vec![pie]);
+    // A valued `break` in a loop hits two independent checks: the S-10 loop-half
+    // rule (a loop receives no value) at the `break`, and the consuming-site rule
+    // (its operand is Void) at the call. Both are reported, source-ordered (cascade
+    // suppression is a deferred diagnostic-quality item).
     assert_eq!(
         diags(&resolved("to p() end\nwhile c do\n  break p()\nend")),
-        vec![pie]
+        vec!["valued-exit-in-loop", pie]
     );
     // The producer-site blame names the procedure and points at the call.
     let r = resolved("to p() end\nlet x = p()");
@@ -918,4 +921,59 @@ fn nested_callables_are_marked_independently() {
         )),
         vec!["g:T", "h:T"]
     );
+}
+
+#[test]
+fn a_valued_break_or_continue_in_a_loop_is_a_static_error() {
+    // S-10 loop half: a `while`/`loop` yields no value, so a valued exit there has
+    // no destination (L§7.10).
+    assert_eq!(
+        diags(&resolved("while true do break 5 end")),
+        vec!["valued-exit-in-loop"]
+    );
+    assert_eq!(
+        diags(&resolved("loop do continue 1 end")),
+        vec!["valued-exit-in-loop"]
+    );
+    // A value-less `break` in a loop is fine.
+    assert!(diags(&resolved("while true do break end")).is_empty());
+    // A valued `break` targeting a block-consuming call is legal — the value
+    // becomes that call's result (§8.5); the enclosing `to` avoids a falls-off diag.
+    assert!(
+        diags(&resolved(
+            "to c(do body) body() end\nto f() c() do break 5 end end"
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_valued_return_in_a_procedure_is_a_static_error() {
+    // C: a `to` yields no value (L§8.4), so `return expr` there has no destination.
+    assert_eq!(
+        diags(&resolved("to p()\n  return 5\nend")),
+        vec!["valued-return-in-procedure"]
+    );
+    // A bare `return` in a `to` is fine; a valued `return` in a `fn` is fine.
+    assert!(diags(&resolved("to p()\n  return\nend")).is_empty());
+    assert!(diags(&resolved("fn f()\n  return 5\nend")).is_empty());
+    // The nearest enclosing callable is the home: a valued `return` in a nested
+    // `fn` inside a `to` targets the `fn`, so it is fine.
+    assert!(diags(&resolved("to p()\n  fn f()\n    return 5\n  end\nend")).is_empty());
+}
+
+#[test]
+fn a_block_parameter_used_as_a_value_is_a_static_error() {
+    // D: a block parameter is second-class (§8.5) — only invocable, never a value.
+    assert_eq!(
+        diags(&resolved("to f(do body)\n  let x = body\nend")),
+        vec!["block-used-as-value"]
+    );
+    // Passing it onward as an argument is also using it as a value.
+    assert_eq!(
+        diags(&resolved("to f(do body)\n  other(body)\nend")),
+        vec!["block-used-as-value"]
+    );
+    // Invoking it (the one legal use) is fine.
+    assert!(diags(&resolved("to f(do body)\n  body()\nend")).is_empty());
 }
