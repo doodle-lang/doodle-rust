@@ -10,7 +10,58 @@
 //! (e.g. U+037A).
 
 use std::borrow::Cow;
+use std::fmt;
 use unicode_normalization::UnicodeNormalization;
+
+/// A Unicode/UCD version, `major.minor.micro` (L§4.4). Names the release whose
+/// normalization and (at M4) grapheme behavior an instance uses; carried in the
+/// instance config's optional target-version field (E§3.1, S-41).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnicodeVersion {
+    /// Major version (e.g. `16`).
+    pub major: u16,
+    /// Minor version.
+    pub minor: u16,
+    /// Micro (patch) version.
+    pub micro: u16,
+}
+
+impl fmt::Display for UnicodeVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.micro)
+    }
+}
+
+/// The UCD version this engine is pinned to (L§4.4, plan AD4). Read from the
+/// `unicode-normalization` crate's **own** pin, so the constant can never drift from
+/// the normalization tables actually linked in. The engine reports it in its
+/// identity and a recording records it; a replay refuses a mismatch (AD4; E§11;
+/// S-36). Identifier classification (L§3.4) runs through the separately-versioned
+/// `unicode-ident` crate; the compile-time cross-check below guarantees it pins the
+/// **same** UCD version, so this single reported version covers identifier lexing
+/// too — not just normalization.
+pub const UNICODE_VERSION: UnicodeVersion = UnicodeVersion {
+    major: unicode_normalization::UNICODE_VERSION.0 as u16,
+    minor: unicode_normalization::UNICODE_VERSION.1 as u16,
+    micro: unicode_normalization::UNICODE_VERSION.2 as u16,
+};
+
+// The reported version must cover EVERY UCD-dependent, language-observable path, not
+// just normalization. `unicode-ident` is versioned independently and — AD4 warns —
+// has historically skewed from `unicode-normalization`; both are caret-pinned, so a
+// routine `cargo update` could move one without the other. Both crates export their
+// pinned UCD version, so cross-check them here: a skew is a **build failure**, not a
+// silent lex/replay divergence (E§11) hidden behind a reported version that only
+// reflects normalization. This is the compile-time half of AD4's per-crate pin
+// verification; the behavioral XID conformance vector is deeper and lands at M4.
+// (`unicode-segmentation` joins this check when grapheme segmentation lands, M4.)
+const _: () = assert!(
+    unicode_ident::UNICODE_VERSION.0 == unicode_normalization::UNICODE_VERSION.0
+        && unicode_ident::UNICODE_VERSION.1 == unicode_normalization::UNICODE_VERSION.1
+        && unicode_ident::UNICODE_VERSION.2 == unicode_normalization::UNICODE_VERSION.2,
+    "unicode-ident and unicode-normalization pin different UCD versions: the engine's \
+     reported Unicode version would not cover identifier classification (AD4, S-41)"
+);
 
 /// Normalizes `s` to Unicode Normalization Form C (L§3.1). Idempotent; borrows
 /// without allocating when `s` is already NFC.

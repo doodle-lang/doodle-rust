@@ -8,10 +8,10 @@
 //! time.
 //!
 //! **Scope.** The CESK machine over the demo subset: frames, a continuation stack,
-//! `step`, operators, binding, control flow, calls, PTC, and safe-point resource
-//! limits (the fused counter, `machine/limits.rs`). GC and handles join in later M2a
-//! chunks (`plan/plan-m2a.md`); the additional `Machine` state they need (dynamic
-//! stack, drive stack) is added then.
+//! `step`, operators, binding, control flow, calls, PTC, safe-point resource limits
+//! (the fused counter, `machine/limits.rs`), the mark-sweep GC (`machine/gc.rs`), and
+//! host handles + the config surface (`machine/handle.rs`). The dynamic-parameter and
+//! drive stacks join with the features that need them (`plan/plan-m2a.md`).
 
 mod arith;
 mod block;
@@ -22,6 +22,7 @@ mod control;
 mod error;
 mod frame;
 mod gc;
+mod handle;
 mod limits;
 mod local;
 mod ring;
@@ -31,14 +32,17 @@ mod unwind;
 
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
+pub use handle::{Handle, HandleError};
 pub(crate) use types::BuiltinType;
 
-use crate::drive::Limits;
+use crate::drive::{Config, ConfigError, Limits};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::span::ModuleId;
+use crate::unicode::{UNICODE_VERSION, UnicodeVersion};
 use cont::Cont;
 use frame::Frame;
+use handle::HandleTable;
 use limits::FusedCounter;
 use std::sync::Arc;
 
@@ -191,6 +195,10 @@ pub(crate) struct Machine {
     /// §15). Starts at [`limits::GC_MIN_BYTES`] and is re-armed after each collect to
     /// the surviving set's next doubling, so GC stays cheap when little is live.
     gc_threshold: u64,
+    /// The host handle table (machine-design §16): each live handle's value is a GC
+    /// root, so a value the host retains survives collection. Lives here (rather than
+    /// on the `Instance`) so `gc::collect` roots it alongside the other machine state.
+    handles: HandleTable,
 }
 
 impl Machine {
@@ -228,6 +236,30 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
+    /// Validates the config first (S-41): a requested Unicode version that is not the
+    /// engine's build-pinned one is rejected — the engine supports exactly its pinned
+    /// version, so a host or replay can assert the expected version at create time
+    /// rather than diverge silently on grapheme/normalization behavior (E§11). `None`
+    /// uses the pinned version.
+    pub fn create(module: ResolvedModule, config: Config) -> Result<Self, ConfigError> {
+        if let Some(requested) = config.unicode_version
+            && requested != UNICODE_VERSION
+        {
+            return Err(ConfigError::UnsupportedUnicodeVersion {
+                requested,
+                pinned: UNICODE_VERSION,
+            });
+        }
+        Ok(Self::load_with_limits(module, config.limits))
+    }
+
+    /// The Unicode/UCD version this engine is pinned to (L§4.4; the config's
+    /// target-version field is validated against it, S-41).
+    pub fn unicode_version() -> UnicodeVersion {
+        UNICODE_VERSION
+    }
+
     /// Loads a resolved module into a fresh `Ready` instance with the
     /// [`Default`](Limits) resource limits. See [`load_with_limits`](Self::load_with_limits).
     pub fn load(module: ResolvedModule) -> Self {
@@ -294,6 +326,7 @@ impl Instance {
                 ring: ring::RingBuffer::new(),
                 fuel: FusedCounter::new(&limits),
                 gc_threshold: limits::GC_MIN_BYTES,
+                handles: HandleTable::new(),
                 limits,
             },
             namespace,
@@ -311,6 +344,35 @@ impl Instance {
     /// for effect and yields Void.
     pub fn result(&self) -> Option<Value> {
         self.machine.reg
+    }
+
+    /// Interns the current result value as a fresh host handle (engine spec E§4.2),
+    /// keeping it reachable across collections and later drives; `None` when the
+    /// result is Void. The host must [`release`](Self::release) it when done.
+    pub fn retain_result(&mut self) -> Option<Handle> {
+        self.machine
+            .reg
+            .map(|value| self.machine.handles.intern(value))
+    }
+
+    /// Adds a reference to `handle` (engine spec E§4.2). Errors on a stale handle
+    /// (used after release) — the boundary generation check.
+    pub fn retain(&mut self, handle: Handle) -> Result<Handle, HandleError> {
+        self.machine.handles.retain(handle)
+    }
+
+    /// Releases a reference to `handle` (engine spec E§4.2); at zero references its
+    /// value stops being a GC root. Errors on a stale handle.
+    pub fn release(&mut self, handle: Handle) -> Result<(), HandleError> {
+        self.machine.handles.release(handle)
+    }
+
+    /// The value a handle names, generation-checked (E§4.2). The public typed
+    /// readers (`as_int`, `kind_of`, …) build on this at M2b; this crate-internal
+    /// form is what the M2a handle tests read with.
+    #[cfg(test)]
+    pub(crate) fn resolve(&self, handle: Handle) -> Result<Value, HandleError> {
+        self.machine.handles.resolve(handle)
     }
 
     /// Sets the lifecycle state (the drive loop drives the transitions).

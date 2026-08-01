@@ -796,3 +796,41 @@ fn a_garbage_loop_reclaims_under_a_heap_limit_below_the_gc_floor() {
         "the last-ditch collect should keep a tight-limit garbage loop alive, got {fault:?}"
     );
 }
+
+// --- M2a.11: host handles (engine spec E§4.2, machine-design §16) ---
+
+/// A retained handle keeps its value reachable across a collection (the M2a.11
+/// accept criterion): a byte string retained through a handle survives GC after the
+/// register that produced it is gone, and is reclaimed once the handle is released.
+#[test]
+fn a_retained_handle_keeps_its_value_alive_across_collection() {
+    let mut inst = load_source("b\"hello\"\n");
+    let baseline = inst.live_object_count();
+    // Retain a handle to the byte string once it lands in the register.
+    step_to_first_value(&mut inst);
+    let handle = inst
+        .retain_result()
+        .expect("the result is a byte string, not Void");
+    // Drive to halt: the module returns Void, so only the handle now references the
+    // byte string.
+    while !inst.is_halted() {
+        inst.step().expect("unexpected raise");
+    }
+    inst.force_collect();
+    assert!(
+        inst.live_object_count() > baseline,
+        "a live handle must keep its value across collection"
+    );
+    assert!(
+        inst.resolve(handle).is_ok(),
+        "the handle still resolves after GC"
+    );
+    // Releasing the last reference lets the next collection reclaim it.
+    inst.release(handle).expect("releasing a live handle");
+    inst.force_collect();
+    assert_eq!(
+        inst.live_object_count(),
+        baseline,
+        "after release the byte string is reclaimed"
+    );
+}

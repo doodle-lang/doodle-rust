@@ -7,6 +7,7 @@
 //! chunks fill in.
 
 use crate::machine::{Exception, Halt, Instance, InstanceState, Trace, Value};
+use crate::unicode::UnicodeVersion;
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,6 +122,35 @@ impl Default for Limits {
             stack_depth: 100_000,
         }
     }
+}
+
+/// Instance configuration (engine spec E§3.1). The resource-limits subset landed at
+/// M2a.9; this adds the target Unicode version (S-41). The module-resolver hook,
+/// observation mode, and opaque host-data value join with their features (M2b/M5).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Config {
+    /// Resource limits (E§10.2).
+    pub limits: Limits,
+    /// The requested target Unicode version (E§3.1, L§4.4). `None` uses the engine's
+    /// build-pinned version ([`crate::unicode::UNICODE_VERSION`]); `Some(v)` that is
+    /// not that pinned version fails [`create`](crate::machine::Instance::create)
+    /// with [`ConfigError::UnsupportedUnicodeVersion`] (S-41). Naming it lets a host
+    /// assert the version a recording was made under at create time — a loud failure
+    /// instead of a silent grapheme/normalization divergence (determinism, E§11).
+    pub unicode_version: Option<UnicodeVersion>,
+}
+
+/// Why [`create`](crate::machine::Instance::create) rejected a [`Config`] (E§3.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConfigError {
+    /// The config named a Unicode version the engine does not support — at M2a, any
+    /// version other than the single build-pinned one (S-41).
+    UnsupportedUnicodeVersion {
+        /// The version the host requested.
+        requested: UnicodeVersion,
+        /// The engine's build-pinned version.
+        pinned: UnicodeVersion,
+    },
 }
 
 /// A capability request carried by [`Outcome::Suspended`] (engine spec E§7.5).
