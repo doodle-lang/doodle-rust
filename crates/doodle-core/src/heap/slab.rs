@@ -20,12 +20,15 @@
 enum Slot<T> {
     /// A live object, stamped with the monotonic allocation `serial` (MD §4) —
     /// a deterministic identity-derived scalar valid while any witness to this
-    /// object's identity outlives it. (The GC mark bit joins here at M2a.10.)
+    /// object's identity outlives it.
     Occupied {
         /// The stored object.
         obj: T,
         /// The allocation serial (see the variant doc).
         serial: u64,
+        /// The GC reachability mark (MD §15): set during a collection's mark
+        /// phase, cleared by its sweep. `false` between collections.
+        mark: bool,
     },
     /// A recycled slot; `next_free` links to the next hole, or `None` at the end.
     Free {
@@ -66,13 +69,21 @@ impl<T> Slab<T> {
                     unreachable!("free_head pointed at an occupied slot");
                 };
                 self.free_head = next_free;
-                self.slots[index as usize] = Slot::Occupied { obj, serial };
+                self.slots[index as usize] = Slot::Occupied {
+                    obj,
+                    serial,
+                    mark: false,
+                };
                 index
             }
             None => {
                 let index =
                     u32::try_from(self.slots.len()).expect("heap slab exceeds the u32 index space");
-                self.slots.push(Slot::Occupied { obj, serial });
+                self.slots.push(Slot::Occupied {
+                    obj,
+                    serial,
+                    mark: false,
+                });
                 index
             }
         }
@@ -126,6 +137,61 @@ impl<T> Slab<T> {
         };
         self.free_head = Some(index);
         self.live_count -= 1;
+    }
+
+    /// Marks the object at `index` reachable for the in-progress collection (MD
+    /// §15). Returns `true` if it was newly marked (previously unmarked), `false`
+    /// if already marked — so the tracer scans each object's children exactly once
+    /// and cycles terminate. Panics on a free slot (a dangling index is a bug).
+    pub fn mark(&mut self, index: u32) -> bool {
+        match &mut self.slots[index as usize] {
+            Slot::Occupied { mark, .. } => {
+                if *mark {
+                    false
+                } else {
+                    *mark = true;
+                    true
+                }
+            }
+            Slot::Free { .. } => unreachable!("mark on a freed slab slot {index}"),
+        }
+    }
+
+    /// Sweeps the slab (MD §15): frees every occupied slot whose mark is clear
+    /// (calling `on_free` with the reclaimed object, so the heap can subtract its
+    /// byte charge), clears the mark on every survivor, and rebuilds the free list
+    /// in **index order** so allocation reuse is identical across runs (a
+    /// determinism gate). The mark phase must have run first; afterward every
+    /// survivor is unmarked, ready for the next cycle.
+    pub fn sweep(&mut self, mut on_free: impl FnMut(&T)) {
+        let mut free_head = None;
+        let mut live = 0u32;
+        // Walk indices high→low and prepend each hole, so the rebuilt list runs
+        // low→high (smallest free index at the head, reused first): index-ordered,
+        // deterministic reuse regardless of the order objects died.
+        for i in (0..self.slots.len()).rev() {
+            let keep = match &mut self.slots[i] {
+                Slot::Occupied { mark, .. } => {
+                    let reachable = *mark;
+                    *mark = false;
+                    reachable
+                }
+                Slot::Free { .. } => false,
+            };
+            if keep {
+                live += 1;
+            } else {
+                if let Slot::Occupied { obj, .. } = &self.slots[i] {
+                    on_free(obj);
+                }
+                self.slots[i] = Slot::Free {
+                    next_free: free_head,
+                };
+                free_head = Some(i as u32);
+            }
+        }
+        self.free_head = free_head;
+        self.live_count = live;
     }
 
     /// Whether the slot at `index` currently holds a live object.
@@ -202,5 +268,51 @@ mod tests {
         let mut slab: Slab<u32> = Slab::new();
         slab.alloc(1, 0);
         assert!(!slab.is_occupied(5));
+    }
+
+    #[test]
+    fn mark_is_idempotent_within_a_cycle() {
+        let mut slab: Slab<u32> = Slab::new();
+        let a = slab.alloc(1, 0);
+        assert!(slab.mark(a), "first mark is newly-marked");
+        assert!(!slab.mark(a), "second mark reports already-marked");
+    }
+
+    #[test]
+    fn sweep_frees_unmarked_keeps_marked_and_clears_marks() {
+        let mut slab: Slab<u32> = Slab::new();
+        let a = slab.alloc(10, 0);
+        let b = slab.alloc(20, 1);
+        let c = slab.alloc(30, 2);
+        slab.mark(b); // only `b` is reachable
+        let mut freed = Vec::new();
+        slab.sweep(|v| freed.push(*v));
+        freed.sort_unstable(); // on_free order is unspecified; only the set matters
+        // `a` and `c` were reclaimed; `b` survives; live count reflects it.
+        assert_eq!(freed, vec![10, 30]);
+        assert!(!slab.is_occupied(a));
+        assert!(slab.is_occupied(b));
+        assert!(!slab.is_occupied(c));
+        assert_eq!(slab.live_count(), 1);
+        // The mark on the survivor is cleared, so a second sweep (nothing marked)
+        // reclaims it too — marks do not persist across cycles.
+        let mut freed2 = Vec::new();
+        slab.sweep(|v| freed2.push(*v));
+        assert_eq!(freed2, vec![20]);
+        assert_eq!(slab.live_count(), 0);
+    }
+
+    #[test]
+    fn sweep_rebuilds_the_free_list_in_index_order() {
+        let mut slab: Slab<u32> = Slab::new();
+        let a = slab.alloc(10, 0); // index 0
+        let b = slab.alloc(20, 1); // index 1
+        let _c = slab.alloc(30, 2); // index 2
+        // Keep only index 2; free 0 and 1. The rebuilt free list must hand out the
+        // SMALLEST free index first (index order) regardless of sweep direction.
+        slab.mark(_c);
+        slab.sweep(|_| {});
+        assert_eq!(slab.alloc(40, 3), a, "smallest free index reused first");
+        assert_eq!(slab.alloc(50, 4), b, "then the next");
     }
 }

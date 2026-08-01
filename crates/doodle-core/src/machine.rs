@@ -21,6 +21,7 @@ mod cont;
 mod control;
 mod error;
 mod frame;
+mod gc;
 mod limits;
 mod local;
 mod ring;
@@ -186,6 +187,10 @@ pub(crate) struct Machine {
     /// The fused safe-point counter (machine-design §9): decremented once per
     /// statement-level safe point; exhaustion is the step budget.
     fuel: FusedCounter,
+    /// The accounted-bytes level at which the next collection triggers (machine-design
+    /// §15). Starts at [`limits::GC_MIN_BYTES`] and is re-armed after each collect to
+    /// the surviving set's next doubling, so GC stays cheap when little is live.
+    gc_threshold: u64,
 }
 
 impl Machine {
@@ -288,6 +293,7 @@ impl Instance {
                 unwind: None,
                 ring: ring::RingBuffer::new(),
                 fuel: FusedCounter::new(&limits),
+                gc_threshold: limits::GC_MIN_BYTES,
                 limits,
             },
             namespace,
@@ -328,6 +334,20 @@ impl Instance {
     #[cfg(test)]
     pub(crate) fn top_frame_tail_count(&self) -> Option<u64> {
         self.machine.frames.last().map(|f| f.tail_count)
+    }
+
+    /// Forces a collection now (machine-design §15), independent of the trigger
+    /// threshold — for tests that drive GC at chosen points to prove reachable state
+    /// survives and garbage is reclaimed.
+    #[cfg(test)]
+    pub(crate) fn force_collect(&mut self) {
+        gc::collect(&mut self.heap, &self.machine, &self.namespace);
+    }
+
+    /// The number of live heap objects across all slabs (for GC tests).
+    #[cfg(test)]
+    pub(crate) fn live_object_count(&self) -> u32 {
+        self.heap.live_objects()
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:

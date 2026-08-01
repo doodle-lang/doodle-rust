@@ -63,6 +63,21 @@ pub(crate) enum Unwind {
     },
 }
 
+impl Unwind {
+    /// The in-flight value this transfer carries, if any — a GC root (machine-design
+    /// §15). A collection cannot currently begin mid-unwind (`step` runs the unwind
+    /// path without hitting a safe point), so this is belt-and-suspenders; MD §15
+    /// lists `unwind` as a root regardless, and it stays correct if that changes.
+    pub(crate) fn gc_value(&self) -> Option<Value> {
+        match self {
+            Unwind::BlockContinue { value }
+            | Unwind::BlockBreak { value, .. }
+            | Unwind::Return { value, .. } => *value,
+            Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } => None,
+        }
+    }
+}
+
 /// The exit operand (if any) is now in the register: resolve the exit's target and
 /// arm the [`Unwind`]. A valued `break` exiting a **procedure** consumer has no
 /// value destination (the open S-10 to-consumer half) and raises provisionally.

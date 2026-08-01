@@ -177,3 +177,40 @@ pub(crate) enum Cont {
         exit: NodeId,
     },
 }
+
+impl Cont {
+    /// Invokes `f` with each [`Value`] this continuation holds — its GC roots
+    /// (machine-design §15). Only the plumbing variants that stash an
+    /// already-evaluated operand carry values; every other variant holds just
+    /// `NodeId`s, slots, and spans. The match is **exhaustive on purpose**: a new
+    /// value-carrying variant will fail to compile here until its values are
+    /// enumerated, so a live value can never silently escape the root set.
+    pub(crate) fn each_value(&self, mut f: impl FnMut(Value)) {
+        match self {
+            Cont::BinApply { lhs, .. } => f(*lhs),
+            Cont::CallGotArg { callee, values, .. } => {
+                f(*callee);
+                values.iter().copied().for_each(&mut f);
+            }
+            Cont::BlockGotArg { values, .. } => values.iter().copied().for_each(f),
+            // Value-free: NodeIds, slots, spans, operators only.
+            Cont::Seq { .. }
+            | Cont::Eval { .. }
+            | Cont::BinRhs { .. }
+            | Cont::UnaryApply { .. }
+            | Cont::AndRhs { .. }
+            | Cont::OrRhs { .. }
+            | Cont::AssertBool { .. }
+            | Cont::BindLet { .. }
+            | Cont::AssignTo { .. }
+            | Cont::IfChoose { .. }
+            | Cont::WhileCheck { .. }
+            | Cont::LoopReloop { .. }
+            | Cont::CallGotCallee { .. }
+            | Cont::BindDefault { .. }
+            | Cont::DefineCallable { .. }
+            | Cont::ReturnBarrier
+            | Cont::ExitApply { .. } => {}
+        }
+    }
+}

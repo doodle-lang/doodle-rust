@@ -16,12 +16,14 @@ const RING_CAPACITY: usize = 64;
 
 /// One elided frame (machine-design §11, S-34): the callable whose activation was
 /// overwritten by a tail call, tagged with the consuming (reused) frame's serial.
-#[allow(dead_code)] // read at M2a.10 (GC roots) and by E§8.3 observation (M2b+)
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ElidedFrame {
-    /// The overwritten frame's callable value.
+    /// The overwritten frame's callable value. A GC root (§15): a tail-elided
+    /// callable must survive so the E§8.3 history can still name it.
     pub(crate) callable: CalIdx,
-    /// The reusing frame's `serial` (which activation absorbed this one).
+    /// The reusing frame's `serial` (which activation absorbed this one). Read by
+    /// the E§8.3 observation surface (M2b+); not yet consumed.
+    #[allow(dead_code)]
     pub(crate) consuming_serial: u64,
 }
 
@@ -51,5 +53,11 @@ impl RingBuffer {
             self.entries[self.next] = entry;
         }
         self.next = (self.next + 1) % RING_CAPACITY;
+    }
+
+    /// The callable of each retained elided frame — GC roots (machine-design §15):
+    /// the tail-history must keep its callables alive so tooling can name them.
+    pub(crate) fn callables(&self) -> impl Iterator<Item = CalIdx> + '_ {
+        self.entries.iter().map(|e| e.callable)
     }
 }

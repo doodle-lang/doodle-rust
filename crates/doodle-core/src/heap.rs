@@ -27,6 +27,7 @@
 //! (`&mut ListObj` etc.): mutation goes through accounting-aware `Heap` methods,
 //! which land with the list/string operations that first need them.
 
+mod gc;
 mod slab;
 
 pub use slab::Slab;
@@ -54,6 +55,47 @@ const CELLIDX_BYTES: u64 = size_of::<CellIdx>() as u64;
 /// user's ruling: MD §4 accounts `payload + fixed per-object overhead`). A flat
 /// constant — not `size_of` of a slot — keeps the charge identical across targets.
 const OBJECT_OVERHEAD: u64 = 32;
+
+// Per-object payload sizes (MD §4). Defined once and used on **both** paths that
+// must agree: `charge_object` at allocation and the GC sweep's reclamation
+// accounting (`heap/gc.rs`). A drift between the two would corrupt
+// `bytes_allocated`, so they share these helpers rather than inlining the formula.
+
+/// A string's payload: its NFC UTF-8 byte length.
+fn str_payload(o: &StrObj) -> u64 {
+    o.utf8.len() as u64
+}
+
+/// A byte string's payload: its byte length.
+fn bytes_payload(o: &BytesObj) -> u64 {
+    o.bytes.len() as u64
+}
+
+/// A list's payload: one value width per element.
+fn list_payload(o: &ListObj) -> u64 {
+    o.items.len() as u64 * VALUE_BYTES
+}
+
+/// A bignum's payload: its magnitude size in bytes (bit length rounded up); `bits`
+/// is deterministic, so accounting stays replay-stable.
+fn bigint_payload(o: &BigIntObj) -> u64 {
+    o.value.bits().div_ceil(8)
+}
+
+/// A cell's payload: one value width (MD §6/§7).
+fn cell_payload(_: &CellObj) -> u64 {
+    VALUE_BYTES
+}
+
+/// A callable's payload: a fixed header plus one width per captured cell (MD §4).
+fn cal_payload(o: &CalObj) -> u64 {
+    VALUE_BYTES + o.captures.len() as u64 * CELLIDX_BYTES
+}
+
+/// A type value's payload: one fixed header width (MD §4).
+fn type_payload(_: &TypeObj) -> u64 {
+    VALUE_BYTES
+}
 
 /// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
 /// construction path (literal decode, concat seam pass, `make_string`) produces
@@ -185,33 +227,35 @@ impl Heap {
             unicode_normalization::is_nfc(&utf8),
             "alloc_string requires NFC input (machine-design §5)"
         );
-        self.charge_object(utf8.len() as u64);
+        let obj = StrObj { utf8 };
+        self.charge_object(str_payload(&obj));
         let serial = self.next_serial();
-        StrIdx(self.strings.alloc(StrObj { utf8 }, serial))
+        StrIdx(self.strings.alloc(obj, serial))
     }
 
     /// Allocates a byte string.
     pub fn alloc_bytes(&mut self, bytes: Box<[u8]>) -> BytesIdx {
-        self.charge_object(bytes.len() as u64);
+        let obj = BytesObj { bytes };
+        self.charge_object(bytes_payload(&obj));
         let serial = self.next_serial();
-        BytesIdx(self.bytes.alloc(BytesObj { bytes }, serial))
+        BytesIdx(self.bytes.alloc(obj, serial))
     }
 
     /// Allocates a list from its initial elements.
     pub fn alloc_list(&mut self, items: Vec<Value>) -> ListIdx {
-        self.charge_object(items.len() as u64 * VALUE_BYTES);
+        let obj = ListObj { items };
+        self.charge_object(list_payload(&obj));
         let serial = self.next_serial();
-        ListIdx(self.lists.alloc(ListObj { items }, serial))
+        ListIdx(self.lists.alloc(obj, serial))
     }
 
     /// Allocates a bignum. The caller must uphold the canonical-int invariant
     /// (MD §3): `value` must not fit `i64` — a fitting value is a [`Value::Int`].
     pub fn alloc_bigint(&mut self, value: BigInt) -> BigIntIdx {
-        // Payload is the magnitude size in bytes (bit length rounded up); `bits`
-        // is deterministic, so accounting stays replay-stable.
-        self.charge_object(value.bits().div_ceil(8));
+        let obj = BigIntObj { value };
+        self.charge_object(bigint_payload(&obj));
         let serial = self.next_serial();
-        BigIntIdx(self.bigints.alloc(BigIntObj { value }, serial))
+        BigIntIdx(self.bigints.alloc(obj, serial))
     }
 
     /// Borrows the string at `idx`.
@@ -237,9 +281,10 @@ impl Heap {
     /// Allocates a binding cell with the given initial `value` (`None` =
     /// uninitialized). Its payload is one value width (MD §6/§7).
     pub fn alloc_cell(&mut self, value: Option<Value>) -> CellIdx {
-        self.charge_object(VALUE_BYTES);
+        let obj = CellObj { value };
+        self.charge_object(cell_payload(&obj));
         let serial = self.next_serial();
-        CellIdx(self.cells.alloc(CellObj { value }, serial))
+        CellIdx(self.cells.alloc(obj, serial))
     }
 
     /// Borrows the cell at `idx`.
@@ -255,7 +300,7 @@ impl Heap {
     /// Allocates a callable. Payload is a fixed header plus one width per captured
     /// cell (MD §4), over the per-object overhead.
     pub fn alloc_callable(&mut self, obj: CalObj) -> CalIdx {
-        self.charge_object(VALUE_BYTES + obj.captures.len() as u64 * CELLIDX_BYTES);
+        self.charge_object(cal_payload(&obj));
         let serial = self.next_serial();
         CalIdx(self.callables.alloc(obj, serial))
     }
@@ -268,7 +313,7 @@ impl Heap {
     /// Allocates a type value. Payload is one fixed header width (MD §4), over the
     /// per-object overhead.
     pub fn alloc_type(&mut self, obj: TypeObj) -> TypeIdx {
-        self.charge_object(VALUE_BYTES);
+        self.charge_object(type_payload(&obj));
         let serial = self.next_serial();
         TypeIdx(self.types.alloc(obj, serial))
     }

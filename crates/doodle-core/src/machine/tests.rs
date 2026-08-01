@@ -619,3 +619,180 @@ fn non_local_exits_reach_the_right_target() {
         );
     }
 }
+
+// --- M2a.10: garbage collection (precise non-moving mark-sweep, MD §15) ---
+
+use crate::drive::{EngineFault, LimitKind, Limits};
+
+/// Builds an instance from Doodle source under `limits` (for GC-trigger tests that
+/// need a small step budget to stop an intentional infinite loop).
+fn load_source_with_limits(src: &str, limits: Limits) -> Instance {
+    use crate::diag::Severity;
+    let nfc = crate::source::normalize(src);
+    let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error),
+        "unexpected parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "unexpected resolve diagnostic(s)"
+    );
+    Instance::load_with_limits(resolved.module, limits)
+}
+
+/// Drives to halt, forcing a full collection **before every step** — maximal GC
+/// pressure. Returns the last register value. If any reachable object is wrongly
+/// collected, a later step reads a freed slab slot and panics (or the result
+/// diverges), so agreement with the un-forced drive is the correctness signal.
+fn drive_forcing_gc(inst: &mut Instance) -> Option<Value> {
+    let mut last = None;
+    let mut steps = 0;
+    while !inst.is_halted() {
+        inst.force_collect();
+        if let Some(v) = inst.result() {
+            last = Some(v);
+        }
+        inst.step().expect("unexpected raise under forced GC");
+        steps += 1;
+        assert!(steps < 20000, "machine failed to halt");
+    }
+    last
+}
+
+/// Drives until a step returns a fault, returning it (panics on completion/raise).
+fn drive_to_fault(inst: &mut Instance) -> EngineFault {
+    let mut steps = 0;
+    loop {
+        assert!(!inst.is_halted(), "completed without faulting");
+        match inst.step() {
+            Ok(()) => {}
+            Err(Halt::Raise(r)) => panic!("unexpected raise: {r:?}"),
+            Err(Halt::Fault(f)) => return f,
+        }
+        steps += 1;
+        assert!(steps < 5_000_000, "did not fault in time");
+    }
+}
+
+/// Collecting before **every** step must never change the result: GC is precise
+/// (only unreachable objects are freed) and non-moving (survivors keep their slab
+/// index). Each program builds live heap state — captured cells, a self-recursive
+/// letrec cell, nested-closure capture chains, a running callable with no other
+/// reference — that a missed root would corrupt.
+#[test]
+fn forced_collection_never_changes_the_result() {
+    for (src, want) in [
+        // A captured, mutated cell must survive across the calls that read it.
+        // `bump` mutates and yields Void, so it is a `to` (a `fn` would fall off).
+        (
+            "fn outer()\nlet c = 0\nto bump()\nc = c + 1\nend\n\
+             bump()\nbump()\nbump()\nc\nend\nouter()\n",
+            3,
+        ),
+        // A self-recursive helper's own (letrec) cell must survive the recursion.
+        (
+            "fn outer()\nfn fact(n)\nif n < 2 then 1 else n * fact(n - 1) end\nend\n\
+             fact(10)\nend\nouter()\n",
+            3_628_800,
+        ),
+        // A capture reached through nested closures (hops > 1).
+        (
+            "fn outer()\nlet x = 10\nfn mid()\nfn inner()\nx\nend\ninner()\nend\n\
+             mid()\nend\nouter()\n",
+            10,
+        ),
+        // Blocks sharing the enclosing cell through the static link.
+        (
+            "to run(do body)\nbody()\nend\nfn outer()\nlet n = 0\n\
+             run() do n = n + 5 end\nrun() do n = n + 5 end\nn\nend\nouter()\n",
+            10,
+        ),
+    ] {
+        let mut normal = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut normal).and_then(Value::as_int),
+            Some(want),
+            "un-forced: {src:?}"
+        );
+        let mut forced = load_source(src);
+        assert_eq!(
+            drive_forcing_gc(&mut forced).and_then(Value::as_int),
+            Some(want),
+            "forced-GC: {src:?}"
+        );
+    }
+}
+
+/// A collection reclaims unreachable objects and leaves the reachable ones (the
+/// built-in prelude, rooted through the namespace) untouched: after driving three
+/// discarded byte-string statements, a forced collect returns the live count to its
+/// pre-drive baseline.
+#[test]
+fn collection_reclaims_unreachable_garbage() {
+    let mut inst = load_source("b\"aaaa\"\nb\"bbbb\"\nb\"cccc\"\n");
+    let baseline = inst.live_object_count();
+    drive_capturing_last_value(&mut inst);
+    assert!(
+        inst.live_object_count() > baseline,
+        "the discarded byte strings should accumulate before collection"
+    );
+    inst.force_collect();
+    assert_eq!(
+        inst.live_object_count(),
+        baseline,
+        "collection reclaims exactly the unreachable byte strings"
+    );
+}
+
+/// The automatic trigger keeps a garbage-producing loop in bounded memory: each
+/// iteration allocates a fresh byte string it never keeps. The heap limit here is
+/// set **below** what the loop would reach if nothing were reclaimed, yet the run
+/// stops on the **step budget**, not the heap — proof the collector fired and kept
+/// live memory bounded (without it the loop would `Heap`-fault first).
+#[test]
+fn the_gc_trigger_bounds_a_garbage_loop() {
+    let mut inst = load_source_with_limits(
+        "loop do\nb\"xxxxxxxx\"\nend\n",
+        Limits {
+            step_budget: 200_000,
+            // 2 MiB: below the ~4 MiB the loop's garbage would reach un-reclaimed
+            // within the step budget, but never reached because GC (floor 1 MiB)
+            // keeps live memory oscillating around ~1 MiB.
+            heap_bytes: 2 * 1024 * 1024,
+            ..Limits::default()
+        },
+    );
+    let fault = drive_to_fault(&mut inst);
+    assert!(
+        matches!(fault, EngineFault::LimitExceeded(LimitKind::StepBudget)),
+        "expected StepBudget (GC kept memory under the heap limit), got {fault:?}"
+    );
+}
+
+/// A heap limit **below** the GC trigger floor (`GC_MIN_BYTES`) still reclaims: the
+/// safe point collects on heap pressure (not only when the threshold is crossed),
+/// so a garbage loop under a tight sandbox limit runs to the step budget instead of
+/// spuriously faulting on `Heap` (MD §15: the limit trips only after a failed
+/// collect).
+#[test]
+fn a_garbage_loop_reclaims_under_a_heap_limit_below_the_gc_floor() {
+    let mut inst = load_source_with_limits(
+        "loop do\nb\"xxxxxxxx\"\nend\n",
+        Limits {
+            step_budget: 50_000,
+            heap_bytes: 256 * 1024, // far below the 1 MiB GC floor
+            ..Limits::default()
+        },
+    );
+    let fault = drive_to_fault(&mut inst);
+    assert!(
+        matches!(fault, EngineFault::LimitExceeded(LimitKind::StepBudget)),
+        "the last-ditch collect should keep a tight-limit garbage loop alive, got {fault:?}"
+    );
+}

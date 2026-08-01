@@ -13,7 +13,7 @@ use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Halt, Machine, Value, arith, block, call, compare, types, unwind};
+use super::{Halt, Machine, Value, arith, block, call, compare, limits, types, unwind};
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -57,14 +57,14 @@ pub(crate) fn step(
     let depth_before = machine.frames.len();
     dispatch(resolved, heap, machine, namespace, cont)?;
     if stmt_safe_point {
-        machine.safe_point(heap.bytes_allocated())?;
+        limits::safe_point(heap, machine, namespace)?;
     }
     // A call or block invocation just pushed a frame — a **non-tail** entry (a tail
     // call reuses a frame in place, §11): the call-entry safe point, and the only
     // place non-tail stack depth grows.
     let depth = machine.frames.len();
     if depth > depth_before {
-        machine.safe_point(heap.bytes_allocated())?;
+        limits::safe_point(heap, machine, namespace)?;
         machine.check_stack_depth(depth)?;
     }
     Ok(())

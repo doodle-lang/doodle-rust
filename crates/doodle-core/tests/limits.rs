@@ -75,35 +75,41 @@ fn deep_non_tail_recursion_hits_the_stack_depth_limit() {
     );
 }
 
-/// A loop that allocates each iteration and never reuses the memory (no GC yet)
-/// grows `bytes_allocated` monotonically until it crosses the **heap** limit — a
-/// fault at a deterministic step. (M2a.9 exit criterion: unbounded allocation →
-/// heap fault.)
+/// **Reachable** unbounded allocation trips the heap limit: `x = x * x` doubles a
+/// bignum that stays bound to `x`, so the collector cannot reclaim it and the live
+/// set outgrows the limit — a fault at a deterministic step (M2a.9 exit criterion 3,
+/// now that GC is on: only *retained* growth faults). The step budget is a safety
+/// net; the heap fault fires first (~20 doublings to cross 100 KB).
 #[test]
-fn unbounded_allocation_hits_the_heap_limit() {
+fn unbounded_reachable_allocation_hits_the_heap_limit() {
     assert_limit(
-        "loop do\nb\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nend\n",
+        "let x = 3\nlet i = 0\nwhile i < 1000 do\nx = x * x\ni = i + 1\nend\nx\n",
         Limits {
-            heap_bytes: 8_192,
+            heap_bytes: 100_000,
+            step_budget: 100_000,
             ..Limits::default()
         },
         LimitKind::Heap,
     );
 }
 
-/// A loop allocating **empty** objects (`b""`, zero payload) still trips the heap
-/// limit: each allocation carries a fixed per-object overhead, so object *count*
-/// counts. Without that overhead `bytes_allocated` would stay flat while real
-/// memory grew — the M2a.1 object-count hole — and the fault would never fire.
+/// With GC on, a flood of **dropped** empty objects (`b""`, discarded at each
+/// statement boundary) is **reclaimed**, not faulted: the run stops on the step
+/// budget rather than the heap limit — even with `heap_bytes` below the GC floor, so
+/// the last-ditch collect (MD §15) does the reclaiming. The per-object overhead
+/// still makes each empty object count toward the GC trigger (keeping memory
+/// bounded); it no longer causes the spurious fault the pre-GC engine gave for
+/// garbage. (The overhead's byte accounting is unit-tested in `heap`.)
 #[test]
-fn a_flood_of_empty_objects_still_hits_the_heap_limit() {
+fn a_flood_of_dropped_empty_objects_is_reclaimed_not_faulted() {
     assert_limit(
         "loop do\nb\"\"\nend\n",
         Limits {
+            step_budget: 50_000,
             heap_bytes: 4_096,
             ..Limits::default()
         },
-        LimitKind::Heap,
+        LimitKind::StepBudget,
     );
 }
 
