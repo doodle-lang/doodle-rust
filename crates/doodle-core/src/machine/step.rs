@@ -13,25 +13,30 @@ use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Machine, Value, arith, block, call, compare, types, unwind};
+use super::{Halt, Machine, Value, arith, block, call, compare, types, unwind};
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use num_bigint::BigInt;
 
-/// Performs one machine transition. Precondition: `machine` has at least one
-/// frame (the caller checks `is_halted` first). Returns `Err` if the transition
-/// raised a runtime error.
+/// Performs one machine transition (machine-design §8), evaluating resource limits
+/// at each statement-level safe point (E§7.4, §10.2). Precondition: `machine` has at
+/// least one frame (the caller checks `is_halted` first). Returns `Err` if the
+/// transition stopped the drive — an uncaught raise or an engine fault.
 pub(crate) fn step(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
     namespace: &Namespace,
-) -> Result<(), Raise> {
+) -> Result<(), Halt> {
     // A non-local transfer in flight takes over the transition (§12): unwind toward
-    // the exit's target instead of running continuations normally.
+    // the exit's target instead of running continuations normally. Unwinding is
+    // finite cleanup toward a target (bounded by the stack it already paid for on
+    // the way in), so it does not itself hit safe points — the next normal step,
+    // once the unwind settles, does.
     if machine.unwind.is_some() {
-        return unwind::step(resolved, heap, machine);
+        unwind::step(resolved, heap, machine)?;
+        return Ok(());
     }
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
@@ -41,6 +46,40 @@ pub(crate) fn step(
         .expect("step with no frame")
         .conts
         .pop();
+    // Statement-level safe points (E§7.4): between statements (`Seq`) and at return
+    // (a callable's `ReturnBarrier`, or `None` = the module top level draining). The
+    // third — call/block entry — is detected after dispatch by the frame stack
+    // growing, which is also the only place non-tail depth grows.
+    let stmt_safe_point = matches!(
+        cont,
+        Some(Cont::Seq { .. }) | Some(Cont::ReturnBarrier) | None
+    );
+    let depth_before = machine.frames.len();
+    dispatch(resolved, heap, machine, namespace, cont)?;
+    if stmt_safe_point {
+        machine.safe_point(heap.bytes_allocated())?;
+    }
+    // A call or block invocation just pushed a frame — a **non-tail** entry (a tail
+    // call reuses a frame in place, §11): the call-entry safe point, and the only
+    // place non-tail stack depth grows.
+    let depth = machine.frames.len();
+    if depth > depth_before {
+        machine.safe_point(heap.bytes_allocated())?;
+        machine.check_stack_depth(depth)?;
+    }
+    Ok(())
+}
+
+/// Executes one popped continuation — or, when `None`, returns from a drained
+/// frame. This is the transition proper; `step` wraps it with the safe-point limit
+/// checks. Its error is a plain [`Raise`]; `step`'s `?` lifts it into [`Halt`].
+fn dispatch(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    namespace: &Namespace,
+    cont: Option<Cont>,
+) -> Result<(), Raise> {
     match cont {
         Some(Cont::Seq { block, next }) => {
             seq_step(resolved, machine, block, next);

@@ -6,7 +6,7 @@
 //! outcomes' payloads (suspension, raise, fault) are shells the later M2a/M2b
 //! chunks fill in.
 
-use crate::machine::{Exception, Instance, InstanceState, Trace, Value};
+use crate::machine::{Exception, Halt, Instance, InstanceState, Trace, Value};
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -82,6 +82,47 @@ pub enum LimitKind {
     TailHistory,
 }
 
+/// Resource limits for an instance (engine spec E§10.2), enforced by the machine
+/// at statement-level safe points (E§7.4). This is the limits **subset** of the
+/// `create(config)` surface (E§3.1); the rest — the module-resolver hook, target
+/// Unicode version (S-41), observation mode, and host data — lands with the full
+/// config surface at **M2a.11**.
+///
+/// Exceeding any limit yields [`Outcome::Faulted`]`(`[`EngineFault::LimitExceeded`]`)`.
+/// Proper tail calls reuse frames (L§8.7), so a tail loop never trips `stack_depth`;
+/// a runaway **non-tail** recursion does. The tail-history bound (E§8.3) is a fixed
+/// ring capacity that overwrites its oldest entry rather than faulting, so it is not
+/// a field here.
+///
+/// The [`Default`] values are **provisional** engineering ceilings: generous enough
+/// that ordinary kid-authored programs never trip them, yet finite so a runaway
+/// still faults. E§10.2 leaves the concrete values to host config; the real
+/// host-chosen values arrive with the M2a.11 config surface.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Limits {
+    /// Maximum statement-level safe points executed (E§7.4) before
+    /// `LimitExceeded(StepBudget)`. The engine owns no clock, so a host enforces a
+    /// wall-clock timeout via this budget or by cancelling (E§10.2).
+    pub step_budget: u64,
+    /// Maximum heap payload bytes ([`Heap::bytes_allocated`](crate::heap::Heap::bytes_allocated),
+    /// which excludes pure caches, MD §5) before `LimitExceeded(Heap)`.
+    pub heap_bytes: u64,
+    /// Maximum non-tail frame-stack depth before `LimitExceeded(StackDepth)`.
+    pub stack_depth: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            // ~1.1e12 safe points, ~1.7e10 payload bytes (16 GiB), 100k non-tail
+            // frames — see the type's "provisional" note.
+            step_budget: 1 << 40,
+            heap_bytes: 1 << 34,
+            stack_depth: 100_000,
+        }
+    }
+}
+
 /// A capability request carried by [`Outcome::Suspended`] (engine spec E§7.5).
 ///
 /// Shell for M0: the capability identity and its bound argument handles are
@@ -108,12 +149,22 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
     );
     instance.set_state(InstanceState::Running);
     while !instance.is_halted() {
-        if let Err(raise) = instance.step() {
-            // Uncaught (no handlers at M2a.3a). The post-raise instance state
-            // (E§3.3 has no distinct "raised" state) is provisionally `Faulted` —
-            // tracked as a discovered delta; the outcome carries the real result.
-            instance.set_state(InstanceState::Faulted);
-            return Outcome::Raised(raise.exception, raise.trace);
+        match instance.step() {
+            Ok(()) => {}
+            // An uncaught raise (no handlers at M2a.3a). The post-raise instance
+            // state (E§3.3 has no distinct "raised" state) is provisionally
+            // `Faulted` — tracked as a discovered delta; the outcome carries the
+            // real result.
+            Err(Halt::Raise(raise)) => {
+                instance.set_state(InstanceState::Faulted);
+                return Outcome::Raised(raise.exception, raise.trace);
+            }
+            // A resource limit was exceeded at a safe point (E§10.2): a
+            // non-resumable fault.
+            Err(Halt::Fault(fault)) => {
+                instance.set_state(InstanceState::Faulted);
+                return Outcome::Faulted(fault);
+            }
         }
     }
     instance.set_state(InstanceState::Completed);

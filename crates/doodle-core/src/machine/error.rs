@@ -13,6 +13,7 @@
 //!
 //! [`Raised`]: crate::drive::Outcome::Raised
 
+use crate::drive::EngineFault;
 use crate::span::Span;
 
 /// The kind of a runtime error (a Doodle exception, E§9).
@@ -35,8 +36,12 @@ pub enum ExceptionKind {
     /// A binding was used before its declaration executed — the temporal dead
     /// zone (cell present but uninitialized).
     UsedBeforeDefined,
-    /// `**` with an exponent too large to compute — the S-12 resource half,
-    /// provisional until the M2a.9 heap/step limits bound it deterministically.
+    /// `**` with an exponent that overflows `u32` — the guard that keeps a single
+    /// `Int ** Int` transition's bignum finite (S-12 resource half). The M2a.9
+    /// heap/step limits now bound `**` deterministically (it faults at a
+    /// deterministic step); because that check is post-allocation (at a safe point),
+    /// this guard also caps the one-transition overshoot. A tight pre-allocation
+    /// size estimate is a tracked refinement (claude-todo).
     ExponentTooLarge,
     /// A call whose callee is not a callable value (L§6.4/§8).
     NotCallable,
@@ -98,5 +103,34 @@ impl Raise {
                 raised_at: Some(span),
             },
         }
+    }
+}
+
+/// Why a machine transition stopped the drive: an uncaught **raise** (a Doodle
+/// exception → [`Outcome::Raised`]) or an **engine fault** (a resource limit
+/// exceeded, → [`Outcome::Faulted`], E§10.2). `step` returns this as its `Err`;
+/// the drive loop maps each arm to its outcome. The `From` impls let a transition
+/// return either through `?`. Pause/suspend (slicing, capabilities) join this
+/// channel when those land.
+///
+/// [`Outcome::Raised`]: crate::drive::Outcome::Raised
+/// [`Outcome::Faulted`]: crate::drive::Outcome::Faulted
+#[derive(Clone, Debug)]
+pub(crate) enum Halt {
+    /// An uncaught Doodle exception (no handler; `try`/`rescue` is M4).
+    Raise(Raise),
+    /// An engine fault — a configured limit was exceeded (E§10.2).
+    Fault(EngineFault),
+}
+
+impl From<Raise> for Halt {
+    fn from(raise: Raise) -> Self {
+        Halt::Raise(raise)
+    }
+}
+
+impl From<EngineFault> for Halt {
+    fn from(fault: EngineFault) -> Self {
+        Halt::Fault(fault)
     }
 }

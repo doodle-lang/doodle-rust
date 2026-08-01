@@ -7,11 +7,11 @@
 //! the drive loop ([`crate::drive`]) advances it one [`step`](Instance::step) at a
 //! time.
 //!
-//! **Scope (M2a.2).** The CESK skeleton: frames, a continuation stack, `step`,
-//! and module-top-level execution over the demo subset's literals. Operators,
-//! calls, binding, control flow, PTC, safe points/limits, and GC join in later
-//! M2a chunks (`plan/plan-m2a.md`); the additional `Machine` state they need
-//! (ring buffer, fuel, unwind record, dynamic stack, drive stack) is added then.
+//! **Scope.** The CESK machine over the demo subset: frames, a continuation stack,
+//! `step`, operators, binding, control flow, calls, PTC, and safe-point resource
+//! limits (the fused counter, `machine/limits.rs`). GC and handles join in later M2a
+//! chunks (`plan/plan-m2a.md`); the additional `Machine` state they need (dynamic
+//! stack, drive stack) is added then.
 
 mod arith;
 mod block;
@@ -21,21 +21,24 @@ mod cont;
 mod control;
 mod error;
 mod frame;
+mod limits;
 mod local;
 mod ring;
 mod step;
 mod types;
 mod unwind;
 
+pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
 pub(crate) use types::BuiltinType;
 
+use crate::drive::Limits;
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::span::ModuleId;
 use cont::Cont;
-use error::Raise;
 use frame::Frame;
+use limits::FusedCounter;
 use std::sync::Arc;
 
 macro_rules! heap_index {
@@ -177,6 +180,12 @@ pub(crate) struct Machine {
     unwind: Option<unwind::Unwind>,
     /// Bounded history of frames elided by tail-call reuse (E§8.3, §11).
     ring: ring::RingBuffer,
+    /// The configured resource limits (E§10.2): the heap and non-tail stack-depth
+    /// thresholds the safe points check against (`machine/limits.rs`).
+    limits: Limits,
+    /// The fused safe-point counter (machine-design §9): decremented once per
+    /// statement-level safe point; exhaustion is the step budget.
+    fuel: FusedCounter,
 }
 
 impl Machine {
@@ -214,12 +223,19 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18).
-    /// Each module-level name gets an **uninitialized** binding cell (its
-    /// `let`/`const` fills it when it executes; a read before then is a
-    /// use-before-defined error). The module top level becomes an ordinary,
-    /// drivable `ModuleTopLevel` frame whose pending work sequences its statements.
+    /// Loads a resolved module into a fresh `Ready` instance with the
+    /// [`Default`](Limits) resource limits. See [`load_with_limits`](Self::load_with_limits).
     pub fn load(module: ResolvedModule) -> Self {
+        Self::load_with_limits(module, Limits::default())
+    }
+
+    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
+    /// under the given resource limits (E§10.2). Each module-level name gets an
+    /// **uninitialized** binding cell (its `let`/`const` fills it when it executes;
+    /// a read before then is a use-before-defined error). The module top level
+    /// becomes an ordinary, drivable `ModuleTopLevel` frame whose pending work
+    /// sequences its statements.
+    pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
         debug_assert!(
             matches!(
                 module.ast.node(module.root),
@@ -271,6 +287,8 @@ impl Instance {
                 frame_serial: 1,
                 unwind: None,
                 ring: ring::RingBuffer::new(),
+                fuel: FusedCounter::new(&limits),
+                limits,
             },
             namespace,
             state: InstanceState::Ready,
@@ -313,9 +331,10 @@ impl Instance {
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:
-    /// `!self.is_halted()`. Returns `Err` if the transition raised a runtime
-    /// error (the drive loop turns it into `Raised`).
-    pub(crate) fn step(&mut self) -> Result<(), Raise> {
+    /// `!self.is_halted()`. Returns `Err` if the transition stopped the drive —
+    /// an uncaught raise or an engine fault (the drive loop maps each to its
+    /// [`Outcome`](crate::drive::Outcome)).
+    pub(crate) fn step(&mut self) -> Result<(), Halt> {
         step::step(
             &self.resolved,
             &mut self.heap,

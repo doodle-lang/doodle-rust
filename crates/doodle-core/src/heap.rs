@@ -45,6 +45,16 @@ const VALUE_BYTES: u64 = size_of::<Value>() as u64;
 /// callable. A fixed per-build constant (not a `Vec` capacity), for determinism.
 const CELLIDX_BYTES: u64 = size_of::<CellIdx>() as u64;
 
+/// A fixed per-object overhead charged to [`Heap::bytes_allocated`] on **every**
+/// allocation, on top of the object's payload (MD §4). It makes **object count**
+/// contribute to the heap total: without it, a flood of empty/tiny objects (each
+/// ~0 payload but a real slab slot) would grow memory while `bytes_allocated`
+/// stayed flat, so the heap limit and (M2a.10) the GC trigger would never fire —
+/// an OOM-instead-of-clean-fault hole (the M2a.1 object-count gap, resolved by the
+/// user's ruling: MD §4 accounts `payload + fixed per-object overhead`). A flat
+/// constant — not `size_of` of a slot — keeps the charge identical across targets.
+const OBJECT_OVERHEAD: u64 = 32;
+
 /// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
 /// construction path (literal decode, concat seam pass, `make_string`) produces
 /// NFC, so consumers never re-normalize. The lazy grapheme memo (MD §5) joins
@@ -129,8 +139,10 @@ pub struct Heap {
     cells: Slab<CellObj>,
     callables: Slab<CalObj>,
     types: Slab<TypeObj>,
-    /// Program-driven payload bytes (MD §4); see the module-level determinism
-    /// note. Monotonic under M2a.1 (no reclamation); GC decreases it at M2a.10.
+    /// Accounted heap bytes (MD §4): each object's program-driven payload plus a
+    /// fixed [`OBJECT_OVERHEAD`], so object count counts (see the module-level
+    /// determinism note). Monotonic under M2a.1 (no reclamation); GC decreases it
+    /// at M2a.10.
     bytes_allocated: u64,
     /// Monotonic allocation counter; stamped into each object's slot as its
     /// identity serial (MD §4).
@@ -160,27 +172,34 @@ impl Heap {
         serial
     }
 
+    /// Charges one object's `payload` bytes plus the fixed [`OBJECT_OVERHEAD`] to
+    /// the heap total (MD §4). Every `alloc_*` routes through this, so no allocation
+    /// can escape the per-object charge that makes object count count.
+    fn charge_object(&mut self, payload: u64) {
+        self.bytes_allocated += OBJECT_OVERHEAD + payload;
+    }
+
     /// Allocates a string (its `utf8` must already be NFC — see [`StrObj`]).
     pub fn alloc_string(&mut self, utf8: Box<str>) -> StrIdx {
         debug_assert!(
             unicode_normalization::is_nfc(&utf8),
             "alloc_string requires NFC input (machine-design §5)"
         );
-        self.bytes_allocated += utf8.len() as u64;
+        self.charge_object(utf8.len() as u64);
         let serial = self.next_serial();
         StrIdx(self.strings.alloc(StrObj { utf8 }, serial))
     }
 
     /// Allocates a byte string.
     pub fn alloc_bytes(&mut self, bytes: Box<[u8]>) -> BytesIdx {
-        self.bytes_allocated += bytes.len() as u64;
+        self.charge_object(bytes.len() as u64);
         let serial = self.next_serial();
         BytesIdx(self.bytes.alloc(BytesObj { bytes }, serial))
     }
 
     /// Allocates a list from its initial elements.
     pub fn alloc_list(&mut self, items: Vec<Value>) -> ListIdx {
-        self.bytes_allocated += items.len() as u64 * VALUE_BYTES;
+        self.charge_object(items.len() as u64 * VALUE_BYTES);
         let serial = self.next_serial();
         ListIdx(self.lists.alloc(ListObj { items }, serial))
     }
@@ -190,7 +209,7 @@ impl Heap {
     pub fn alloc_bigint(&mut self, value: BigInt) -> BigIntIdx {
         // Payload is the magnitude size in bytes (bit length rounded up); `bits`
         // is deterministic, so accounting stays replay-stable.
-        self.bytes_allocated += value.bits().div_ceil(8);
+        self.charge_object(value.bits().div_ceil(8));
         let serial = self.next_serial();
         BigIntIdx(self.bigints.alloc(BigIntObj { value }, serial))
     }
@@ -218,7 +237,7 @@ impl Heap {
     /// Allocates a binding cell with the given initial `value` (`None` =
     /// uninitialized). Its payload is one value width (MD §6/§7).
     pub fn alloc_cell(&mut self, value: Option<Value>) -> CellIdx {
-        self.bytes_allocated += VALUE_BYTES;
+        self.charge_object(VALUE_BYTES);
         let serial = self.next_serial();
         CellIdx(self.cells.alloc(CellObj { value }, serial))
     }
@@ -234,10 +253,9 @@ impl Heap {
     }
 
     /// Allocates a callable. Payload is a fixed header plus one width per captured
-    /// cell (MD §4; the object-count accounting model is pending an MD §4/§15
-    /// ruling — see claude-todo).
+    /// cell (MD §4), over the per-object overhead.
     pub fn alloc_callable(&mut self, obj: CalObj) -> CalIdx {
-        self.bytes_allocated += VALUE_BYTES + obj.captures.len() as u64 * CELLIDX_BYTES;
+        self.charge_object(VALUE_BYTES + obj.captures.len() as u64 * CELLIDX_BYTES);
         let serial = self.next_serial();
         CalIdx(self.callables.alloc(obj, serial))
     }
@@ -247,9 +265,10 @@ impl Heap {
         self.callables.get(idx.0)
     }
 
-    /// Allocates a type value. Payload is one fixed header width (MD §4).
+    /// Allocates a type value. Payload is one fixed header width (MD §4), over the
+    /// per-object overhead.
     pub fn alloc_type(&mut self, obj: TypeObj) -> TypeIdx {
-        self.bytes_allocated += VALUE_BYTES;
+        self.charge_object(VALUE_BYTES);
         let serial = self.next_serial();
         TypeIdx(self.types.alloc(obj, serial))
     }
@@ -259,7 +278,7 @@ impl Heap {
         self.types.get(idx.0)
     }
 
-    /// Total program-driven payload bytes currently accounted (MD §4). Drives GC
+    /// Total accounted heap bytes (payload + per-object overhead, MD §4). Drives GC
     /// triggering and the heap limit (M2a.9/M2a.10).
     pub fn bytes_allocated(&self) -> u64 {
         self.bytes_allocated
@@ -329,12 +348,17 @@ mod tests {
     }
 
     #[test]
-    fn bytes_allocated_counts_logical_payloads_across_kinds() {
+    fn bytes_allocated_counts_payload_plus_per_object_overhead_across_kinds() {
         let mut heap = Heap::new();
         heap.alloc_string("abcd".into()); // 4 payload bytes
         heap.alloc_bytes(vec![0u8; 3].into()); // 3 payload bytes
         heap.alloc_list(vec![Value::Int(1), Value::Int(2)]); // 2 * VALUE_BYTES
-        assert_eq!(heap.bytes_allocated(), 4 + 3 + 2 * VALUE_BYTES);
+        // Each of the three objects also carries the fixed per-object overhead, so
+        // object count (not just payload) contributes to the heap total.
+        assert_eq!(
+            heap.bytes_allocated(),
+            4 + 3 + 2 * VALUE_BYTES + 3 * OBJECT_OVERHEAD
+        );
     }
 
     #[test]
