@@ -1,0 +1,4 @@
+#! clause: L4.2
+#! mode: run
+#! expect-raise: divide by zero @ 4:1
+1 / 0

@@ -3,10 +3,11 @@
 //! The conformance runner (`tools/conformance-runner`) asks doodle-core, per
 //! test, whether the stage a test requires is implemented yet; a test whose
 //! required stage is unimplemented is skipped rather than failed. The gate
-//! lifts stage by stage across M1 (lex/parse/full) and M2 (run). As of M1.10 the
-//! lexer, parser, and resolver are implemented, so `stage: lex`, `stage: parse`,
-//! and `stage: full` (lex+parse+resolve, the full static front end) tests
-//! execute; `mode: run` still skips (no machine until M2).
+//! lifts stage by stage across M1 (lex/parse/full) and M2 (run). As of M2a.12 the
+//! machine runs the demo subset, so `mode: run` tests execute too — the runner
+//! drives the program and matches `expect-raise`. A run test whose transcript
+//! needs a not-yet-registered capability (any `expect-out`, which needs `print`)
+//! still skips until M2b, keyed on the test's expectations, not this stage scalar.
 
 /// A front-end / execution stage a conformance test may require, ordered least
 /// to most: lexing < parsing < full static analysis < running.
@@ -23,16 +24,17 @@ pub enum Stage {
 }
 
 /// The highest [`Stage`] doodle-core currently implements, or `None` before any
-/// stage exists. As of M1.10 this is `Some(Stage::Full)`.
+/// stage exists. As of M2a.12 this is `Some(Stage::Run)`.
 ///
 /// A conformance test requiring stage `s` is executable iff this returns
-/// `Some(impl)` with `impl >= s`; otherwise the runner skips the test.
+/// `Some(impl)` with `impl >= s`; otherwise the runner skips the test. (A run test
+/// may still skip for a *capability* it needs — e.g. `print` — which the runner
+/// checks from the test's expectations, not from this scalar.)
 pub fn implemented_through() -> Option<Stage> {
-    // M1.10: the lexer (`crate::lex`), parser (`crate::parse`), and resolver
-    // (`crate::resolve`) are implemented — full static analysis; run is not.
-    // Bumps here must land with the corresponding conformance-runner executor
-    // (`tools/conformance-runner`) atomically.
-    Some(Stage::Full)
+    // M2a.12: the machine (`crate::machine`, `crate::drive`) runs the demo subset,
+    // so run mode joins the front end. Bumps here must land with the corresponding
+    // conformance-runner executor (`tools/conformance-runner`) atomically.
+    Some(Stage::Run)
 }
 
 #[cfg(test)]
@@ -47,9 +49,9 @@ mod tests {
     }
 
     #[test]
-    fn implemented_through_full_at_m1_10() {
-        // The resolver (full static analysis) is the highest implemented stage;
-        // run is not (no machine until M2).
-        assert_eq!(implemented_through(), Some(Stage::Full));
+    fn implemented_through_run_at_m2a_12() {
+        // The machine runs the demo subset, so run is the highest implemented
+        // stage (bumped atomically with the conformance-runner run executor).
+        assert_eq!(implemented_through(), Some(Stage::Run));
     }
 }

@@ -6,17 +6,21 @@ file format; it was ratified as the M0.4 mini-spec in the `discussions` repo
 (`plan/plan-m0.md`) and moved here. The runner lives at
 `tools/conformance-runner`.
 
-## What runs today (M1.3)
+## What runs today (M2a.12)
 
 The runner discovers tests, parses and syntax-validates each file's directive
 block, and applies the **staged pass policy**: a test whose required pipeline
 stage doodle-core implements is **executed** and its `expect-*` directives
 matched against real output; a test above the implemented stage is **SKIP**,
-not FAIL. As of M1.3 the lexer is implemented
-(`doodle_core::stage::implemented_through()` is `Some(Stage::Lex)`), so
-`stage: lex` tests run — matching `expect-static-error` / `expect-warning`
-against the lexer's diagnostics. `mode: run` and `stage: parse`/`full` tests
-still SKIP until those stages land.
+not FAIL. As of M2a.12 the machine runs the demo subset
+(`doodle_core::stage::implemented_through()` is `Some(Stage::Run)`), so every
+stage executes: `stage: lex`/`parse`/`full` match `expect-static-error` /
+`expect-warning` against the front-end diagnostics, and `mode: run` drives the
+program and matches `expect-raise` (message substring + source position) against
+the uncaught exception. A `mode: run` test whose transcript needs a **capability**
+that has not landed — `expect-out` needs `print` (M2b) — still SKIPs, keyed on the
+test's expectations rather than the stage scalar, so raise-only run tests execute
+now while output tests wait.
 
 Run it from the repo root:
 

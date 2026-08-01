@@ -834,3 +834,169 @@ fn a_retained_handle_keeps_its_value_alive_across_collection() {
         "after release the byte string is reclaimed"
     );
 }
+
+// --- M2a.12: GC-stress determinism harness (exit criterion 4) ---
+
+/// A determinism-comparable summary of driving a program to its terminal state.
+/// Heap-valued results are compared by KIND only: GC is non-moving, so a reachable
+/// value's content never changes; a collection that wrongly freed a live value would
+/// instead panic on a freed slot (failing the test) rather than alter the kind.
+#[derive(PartialEq, Eq, Debug)]
+enum Terminal {
+    Value(ValueRepr),
+    Raised(ExceptionKind),
+    Faulted(crate::drive::EngineFault),
+}
+
+#[derive(PartialEq, Eq, Debug)]
+enum ValueRepr {
+    Void,
+    Int(i64),
+    Bool(bool),
+    Nil,
+    FloatBits(u64),
+    HeapKind(&'static str),
+}
+
+fn value_repr(v: Option<Value>) -> ValueRepr {
+    match v {
+        None => ValueRepr::Void,
+        Some(Value::Int(n)) => ValueRepr::Int(n),
+        Some(Value::Bool(b)) => ValueRepr::Bool(b),
+        Some(Value::Nil) => ValueRepr::Nil,
+        Some(Value::Float(x)) => ValueRepr::FloatBits(x.to_bits()),
+        Some(Value::Bytes(_)) => ValueRepr::HeapKind("bytes"),
+        Some(Value::Str(_)) => ValueRepr::HeapKind("str"),
+        Some(Value::BigInt(_)) => ValueRepr::HeapKind("bigint"),
+        Some(Value::Callable(_)) => ValueRepr::HeapKind("callable"),
+        Some(Value::Type(_)) => ValueRepr::HeapKind("type"),
+        Some(_) => ValueRepr::HeapKind("other"),
+    }
+}
+
+/// Drives `inst` to a terminal state, optionally forcing a collection **before every
+/// step** (maximal GC pressure). Returns the terminal outcome in comparable form.
+fn drive_terminal(inst: &mut Instance, force_gc: bool) -> Terminal {
+    let mut last = None;
+    let mut steps = 0;
+    loop {
+        if inst.is_halted() {
+            return Terminal::Value(value_repr(last));
+        }
+        if force_gc {
+            inst.force_collect();
+        }
+        if let Some(v) = inst.result() {
+            last = Some(v);
+        }
+        match inst.step() {
+            Ok(()) => {}
+            Err(Halt::Raise(raise)) => return Terminal::Raised(raise.exception.kind),
+            Err(Halt::Fault(fault)) => return Terminal::Faulted(fault),
+        }
+        steps += 1;
+        assert!(steps < 2_000_000, "program did not terminate");
+    }
+}
+
+/// The determinism gate (M2a exit criterion 4): every program in the corpus produces
+/// a **bit-identical terminal outcome** whether or not a collection is forced at every
+/// safe point. A GC that corrupted reachable state — a missed root, a wrongly-freed
+/// live object, a nondeterministic sweep — would change or crash one of the two runs.
+/// The corpus spans the evaluable demo subset: arithmetic (int/float/bignum), the
+/// numeric tower, comparison and booleans, control flow, calls, closures (shared
+/// cells, letrec recursion, loop-fresh, nested capture), blocks and non-local exits,
+/// and every raise kind reachable today.
+#[test]
+fn gc_stress_determinism_gate_over_the_corpus() {
+    let corpus = [
+        // Arithmetic + the numeric tower (int, promotion to bignum, floored, float).
+        "2 * 3 + 4\n",
+        "9223372036854775807 + 1\n",
+        "9223372036854775807 * 2 * 2\n",
+        "(-7) // 2\n",
+        "7 % 3\n",
+        "2.5 + 1.5 * 2.0\n",
+        "2 ** 10\n",
+        // Comparison, equality across kinds, strict booleans.
+        "3 < 5\n",
+        "1 == 1.0\n",
+        "true and (false or not false)\n",
+        // Control flow.
+        "let x = 0\nif 3 > 2 then x = 5 else x = 9 end\nx\n",
+        "let n = 0\nwhile n < 20 do n = n + 1 end\nn\n",
+        // Calls, keyword args, defaults.
+        "fn add(a, b) a + b end\nadd(2, b: 3)\n",
+        "fn f(a, b = 10) a + b end\nf(5)\n",
+        // Closures: shared mutable cell, letrec recursion, nested capture.
+        "fn outer()\nlet c = 0\nto bump()\nc = c + 1\nend\nbump()\nbump()\nc\nend\nouter()\n",
+        "fn outer()\nfn fact(n)\nif n < 2 then 1 else n * fact(n - 1) end\nend\n\
+         fact(15)\nend\nouter()\n",
+        "fn outer()\nlet x = 7\nfn mid()\nfn inner()\nx\nend\ninner()\nend\nmid()\nend\nouter()\n",
+        // Loop-fresh closures capturing distinct per-iteration bindings.
+        "let last = 0\nlet i = 0\nwhile i < 5 do\nlet k = i\nfn get()\nk\nend\n\
+         last = get()\ni = i + 1\nend\nlast\n",
+        // Blocks: passing, invocation, enclosing-local access, non-local exits.
+        "to run(do b)\nb()\nend\nfn outer()\nlet n = 0\nrun() do n = n + 5 end\nn\nend\nouter()\n",
+        "fn f()\nto run(do b)\nb()\nend\nrun() do return 7 end\n99\nend\nf()\n",
+        // Non-local exits carrying a value: a valued `break` (block consumer), a
+        // valued `continue` (mapping), and loop `break`/`continue`.
+        "fn search(do body)\nbody()\n999\nend\nfn f()\nsearch() do break 7 end\nend\nf()\n",
+        "fn map_sum(do body)\nbody(1) + body(2)\nend\n\
+         fn f()\nmap_sum() do (n) continue n * 100 end\nend\nf()\n",
+        "fn f()\nlet i = 0\nlet s = 0\nwhile i < 10 do\ni = i + 1\n\
+         if i == 3 then continue end\nif i == 6 then break end\ns = s + i\nend\ns\nend\nf()\n",
+        // Heap value CONTENT under GC pressure, folded back to an exactly-compared
+        // scalar (a by-kind terminal would hide a content divergence): a bignum
+        // product reduced mod a prime, and a bignum carried through an in-flight
+        // `break` (stressing the unwind heap-value GC root) before being reduced.
+        "(9223372036854775807 * 9223372036854775807) % 1000000007\n",
+        "fn search(do body)\nbody()\n0\nend\n\
+         fn f()\nsearch() do break 9223372036854775807 * 3 end\nend\nf() % 1000000007\n",
+        // Heap-valued results also compared by kind (content coverage is above).
+        "b\"hello, world\"\n",
+        "9223372036854775807 * 9223372036854775807\n",
+        // Raise kinds reachable from clean-loading programs (an undefined name and a
+        // statically-caught fall-off are load-time diagnostics, not run-mode raises).
+        "1 / 0\n",
+        "1 + true\n",
+        "5()\n",
+        "1.0e308 + 1.0e308\n",
+    ];
+    for src in corpus {
+        let normal = drive_terminal(&mut load_source(src), false);
+        let stressed = drive_terminal(&mut load_source(src), true);
+        assert_eq!(
+            normal, stressed,
+            "GC-stress changed the terminal outcome of {src:?}"
+        );
+    }
+}
+
+/// The determinism gate extends to the resource-limit faults: a program stopped by a
+/// limit faults at the **same** terminal outcome under GC pressure. (Driven under a
+/// small step budget so the intentional non-terminating cases stop deterministically.)
+#[test]
+fn gc_stress_determinism_gate_over_limit_faults() {
+    let budget = Limits {
+        step_budget: 5_000,
+        heap_bytes: 64 * 1024,
+        stack_depth: 200,
+    };
+    for src in [
+        "loop do\nb\"xxxx\"\nend\n",      // heap or step budget, whichever first
+        "fn f(n)\n1 + f(n)\nend\nf(0)\n", // non-tail recursion → stack depth
+        "let i = 0\nwhile i < 100000000 do\ni = i + 1\nend\ni\n", // step budget
+    ] {
+        let normal = drive_terminal(&mut load_source_with_limits(src, budget), false);
+        let stressed = drive_terminal(&mut load_source_with_limits(src, budget), true);
+        assert_eq!(
+            normal, stressed,
+            "GC-stress changed the limit-fault outcome of {src:?}"
+        );
+        assert!(
+            matches!(normal, Terminal::Faulted(_)),
+            "{src:?} should fault under the small limits, got {normal:?}"
+        );
+    }
+}

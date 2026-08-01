@@ -1,16 +1,22 @@
 //! Executing a conformance test against doodle-core and matching its declared
 //! expectations against real output.
 //!
-//! At M1.7 the `stage: lex` and `stage: parse` static stages are executable:
-//! the lexer or parser runs and its diagnostics are matched against
-//! `expect-static-error` / `expect-warning`. Higher stages (full/run) are still
-//! SKIPped by the caller, so their expectation kinds (`expect-out` /
-//! `expect-raise`) never reach here yet — a static test carrying one is
-//! mis-authored and fails loudly.
+//! Static stages (`lex`/`parse`/`full`) run the front end and match diagnostics
+//! against `expect-static-error` / `expect-warning` (see [`run_static`]). The `run`
+//! stage (M2a.12) drives the machine and matches `expect-raise` against the uncaught
+//! exception (see [`run_dynamic`]); a run test whose transcript needs `print`
+//! (`expect-out`) is skipped by the caller until M2b, so only `expect-raise` reaches
+//! the run arm here. A run expectation at a static stage (or vice versa) is a
+//! mis-authored test and fails loudly.
 
 use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
+use doodle_core::drive::{Directive, Outcome, run};
+use doodle_core::machine::Instance;
+use doodle_core::parse::parse_program;
+use doodle_core::resolve::resolve;
 use doodle_core::source::{LineIndex, Position, normalize};
+use doodle_core::span::ModuleId;
 use doodle_core::stage::Stage;
 use doodle_core::{full_to_diagnostics, lex_to_diagnostics, parse_to_diagnostics};
 
@@ -20,13 +26,113 @@ use doodle_core::{full_to_diagnostics, lex_to_diagnostics, parse_to_diagnostics}
 pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
     match test.required {
         Stage::Lex | Stage::Parse | Stage::Full => run_static(test, source, test.required),
-        // The caller dispatches here only when implemented_through() >= required,
-        // and Stage::Full is the highest implemented stage, so no higher stage
-        // reaches this arm. It exists so a future bump that forgets its executor
-        // fails loudly instead of silently passing.
-        other => Err(vec![format!(
-            "no executor for stage {other:?} (runner/coordination bug)"
+        Stage::Run => run_dynamic(test, source),
+    }
+}
+
+/// Executes a `mode: run` test: load the program, drive it to completion, and match
+/// its outcome against the test's `expect-raise` expectations (conformance/README.md
+/// § `mode: run`). The caller skips a run test needing an unregistered capability
+/// (any `expect-out`, which needs `print`, M2b), so only `expect-raise` and
+/// clean-completion tests reach here at M2a.
+fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
+    let nfc = normalize(source);
+    let index = LineIndex::new(nfc.as_ref());
+
+    // A run fixture must load clean — a load-time (parse/resolve) error is a FAIL,
+    // not a raise. Report every such error so a mis-authored fixture is obvious.
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    let parse_errors = error_messages(&parsed.diagnostics);
+    if !parse_errors.is_empty() {
+        return Err(parse_errors);
+    }
+    let resolved = resolve(parsed.ast, parsed.root, ModuleId(0));
+    let resolve_errors = error_messages(&resolved.diagnostics);
+    if !resolve_errors.is_empty() {
+        return Err(resolve_errors);
+    }
+
+    let mut instance = Instance::load(resolved.module);
+    let outcome = run(&mut instance, Directive::RunToCompletion);
+    match_run_outcome(test, &outcome, nfc.as_ref(), &index)
+}
+
+/// The messages of every error-severity diagnostic (empty when the load is clean).
+fn error_messages(diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| format!("load error: {}", d.message))
+        .collect()
+}
+
+/// Matches a driven program's `outcome` against a run test's expectations. At M2a
+/// the only expectation kind reaching here is `expect-raise` (an uncaught exception,
+/// which terminates the program), plus the empty transcript of a clean completion.
+fn match_run_outcome(
+    test: &Test,
+    outcome: &Outcome,
+    nfc: &str,
+    index: &LineIndex,
+) -> Result<(), Vec<String>> {
+    let expected: Vec<(&String, &Position)> = test
+        .expectations
+        .iter()
+        .filter_map(|e| match e {
+            Expectation::Raise { substring, pos } => Some((substring, pos)),
+            _ => None,
+        })
+        .collect();
+
+    match outcome {
+        Outcome::Raised(exception, trace) => {
+            let pos = trace.raised_at.map(|s| index.position_at(nfc, s.start));
+            // An uncaught raise terminates, so the transcript is exactly one raise:
+            // exactly one `expect-raise` must match it (substring + position).
+            if expected.len() != 1 {
+                return Err(vec![format!(
+                    "program raised ({}), but the test declares {} expect-raise expectation(s)",
+                    describe_raise(&exception.message, pos),
+                    expected.len()
+                )]);
+            }
+            let (substring, want) = expected[0];
+            if exception.message.contains(substring.as_str()) && pos == Some(*want) {
+                Ok(())
+            } else {
+                Err(vec![format!(
+                    "expected raise {substring:?} @ {}:{}, got {}",
+                    want.line,
+                    want.column,
+                    describe_raise(&exception.message, pos)
+                )])
+            }
+        }
+        Outcome::Completed(_) => {
+            if expected.is_empty() {
+                Ok(())
+            } else {
+                Err(vec![format!(
+                    "expected a raise ({:?}) but the program completed",
+                    expected[0].0
+                )])
+            }
+        }
+        Outcome::Faulted(fault) => Err(vec![format!(
+            "program did not complete: Faulted({fault:?})"
         )]),
+        Outcome::Suspended(_) => Err(vec![
+            "program suspended (no capabilities at M2a)".to_string(),
+        ]),
+        Outcome::Paused(_) => Err(vec!["program paused (no observation at M2a)".to_string()]),
+    }
+}
+
+/// Renders an actual raise (message + position) for a FAIL report.
+fn describe_raise(message: &str, pos: Option<Position>) -> String {
+    match pos {
+        Some(p) => format!("{message:?} @ {}:{}", p.line, p.column),
+        None => format!("{message:?} @ <no position>"),
     }
 }
 

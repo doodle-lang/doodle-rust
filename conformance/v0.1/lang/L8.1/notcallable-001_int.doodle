@@ -1,0 +1,4 @@
+#! clause: L8.1
+#! mode: run
+#! expect-raise: something you can call @ 4:1
+5()

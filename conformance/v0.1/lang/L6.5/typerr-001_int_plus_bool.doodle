@@ -1,0 +1,4 @@
+#! clause: L6.5
+#! mode: run
+#! expect-raise: needs two numbers @ 4:1
+1 + true
