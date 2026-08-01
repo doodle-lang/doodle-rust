@@ -21,6 +21,7 @@ mod cont;
 mod control;
 mod error;
 mod frame;
+mod local;
 mod ring;
 mod step;
 mod types;
@@ -241,11 +242,20 @@ impl Instance {
             let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { builtin }));
             namespace.push((name.into(), heap.alloc_cell(Some(ty))));
         }
-        let slot_count = module_top_level_slots(&module);
+        // The module top level's construct-body locals may be cell-boxed (a `fn`
+        // captured one, §7), so build its slots like any frame — no params, no
+        // captures. `raw` is all-`None`; `let`s fill the slots as they execute.
+        let module_id = module
+            .callables
+            .iter()
+            .position(|c| matches!(c.kind, crate::resolve::BodyKind::ModuleTopLevel))
+            .expect("a resolved module has a top-level callable");
+        let raw = vec![None; module.callables[module_id].slot_count as usize];
+        let locals = local::build(&module, &mut heap, module_id, &raw, &[]);
         let root = module.root;
         let resolved = Arc::new(module);
         let frame = Frame::module_top_level(
-            slot_count,
+            locals,
             Cont::Seq {
                 block: root,
                 next: 0,
@@ -313,17 +323,6 @@ impl Instance {
             &self.namespace,
         )
     }
-}
-
-/// The module top level's local-slot count (its construct-body locals) — the
-/// size of its frame's `locals`. Zero when the module has no `if`/`while`/`loop`
-/// bodies with their own bindings.
-fn module_top_level_slots(module: &ResolvedModule) -> u16 {
-    module
-        .callables
-        .iter()
-        .find(|c| matches!(c.kind, crate::resolve::BodyKind::ModuleTopLevel))
-        .map_or(0, |c| c.slot_count)
 }
 
 #[cfg(test)]

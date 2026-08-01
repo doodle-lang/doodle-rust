@@ -1,10 +1,12 @@
 //! Calls: callee/argument evaluation, argument binding, and callable-frame
 //! entry/return (machine-design §8/§10/§11).
 //!
-//! **Scope (M2a.7).** Calls of `to`/`fn`/anonymous-`fn` values with positional +
-//! keyword arguments and parameter defaults (L§8.3), interning callable values,
-//! and **proper tail calls** (the apply-time kind gate + frame reuse, S-55). Block
-//! arguments are bound here and invoked in `block.rs`; closure captures are M2a.8.
+//! **Scope (M2a.8).** Calls of `to`/`fn`/anonymous-`fn` values with positional +
+//! keyword arguments and parameter defaults (L§8.3), interning callable values
+//! (with **closure captures** read from the creating environment, §7/§10), and
+//! **proper tail calls** (the apply-time kind gate + frame reuse, S-55). Block
+//! arguments are bound here and invoked in `block.rs`; a frame's cell-boxed slots
+//! (representation B) are built in `local.rs`.
 //!
 //! A call runs as: evaluate the callee ([`Cont::CallGotCallee`]), evaluate each
 //! argument left to right ([`Cont::CallGotArg`]), then [`apply`] binds parameters
@@ -16,12 +18,12 @@
 
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
-use super::frame::{Frame, FrameKind};
+use super::frame::{Frame, FrameKind, Local};
 use super::step::take_value;
-use super::{Machine, Value, block, control};
+use super::{Machine, Value, block, control, local};
 use crate::ast::{Arg, Node, NodeId, Param};
 use crate::heap::{CalObj, Heap};
-use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
+use crate::resolve::{BodyKind, ParamInfo, Resolution, ResolvedModule};
 use crate::span::Span;
 
 /// Schedules a call (an expression). A `body(args)` invocation of the current
@@ -31,7 +33,7 @@ use crate::span::Span;
 /// [`apply`].
 pub(crate) fn eval_call(
     resolved: &ResolvedModule,
-    heap: &Heap,
+    heap: &mut Heap,
     machine: &mut Machine,
     call: NodeId,
 ) -> Result<(), Raise> {
@@ -40,7 +42,7 @@ pub(crate) fn eval_call(
     };
     let callee = *callee;
     if block::is_block_invocation(resolved, heap, machine, callee) {
-        return block::eval_block_call(resolved, machine, call);
+        return block::eval_block_call(resolved, heap, machine, call);
     }
     let frame = machine.frames.last_mut().expect("eval_call with no frame");
     frame.conts.push(Cont::CallGotCallee { call });
@@ -170,9 +172,14 @@ fn apply(
     // that frame instead of growing the stack (proper tail calls, MD §11) — so a
     // tail loop runs in constant memory. A kind mismatch (or a non-tail call) pushes
     // an ordinary frame, giving exact non-tail semantics (S-55).
-    if resolved.tail_calls[call.0 as usize]
-        && reuses_current_frame(machine, resolved, heap, callee_kind)
-    {
+    let reuse = resolved.tail_calls[call.0 as usize]
+        && reuses_current_frame(machine, resolved, heap, callee_kind);
+    // Build the callee's slots (representation B): cell-box captured slots and
+    // splice the closure's captured cells (§7/§10). `captured` is cloned so the
+    // immutable read releases before the cell allocations.
+    let captured = heap.callable(cal).captures.clone();
+    let locals = local::build(resolved, heap, callable_id, &slots, &captured);
+    if reuse {
         let top = machine
             .frames
             .last()
@@ -185,12 +192,12 @@ fn apply(
             .frames
             .last_mut()
             .expect("a frame is active")
-            .reuse_as_callable(cal, slots, body, block_param);
+            .reuse_as_callable(cal, locals, body, block_param);
     } else {
         let serial = machine.next_frame_serial();
         machine
             .frames
-            .push(Frame::callable(cal, slots, body, serial, block_param));
+            .push(Frame::callable(cal, locals, body, serial, block_param));
     }
     // Defaults are evaluated in the callee activation, before the body (LIFO: push
     // in reverse source order so earlier defaults run — and bind — first).
@@ -283,25 +290,31 @@ pub(crate) fn bind_arguments(
 }
 
 /// A parameter default's value is now in the register: write it into the callee
-/// frame slot (L§8.2). A default is an expression, so it must yield a value.
+/// frame slot (L§8.2), through the cell for a cell-boxed (captured) parameter. A
+/// default is an expression, so it must yield a value.
 pub(crate) fn bind_default(
     resolved: &ResolvedModule,
+    heap: &mut Heap,
     machine: &mut Machine,
     slot: u16,
     default: NodeId,
 ) -> Result<(), Raise> {
     let value = take_value(machine, resolved.ast.span(default))?;
-    machine
-        .frames
-        .last_mut()
-        .expect("bind_default with no frame")
-        .locals[slot as usize] = Some(value);
+    let top = machine.frames.len() - 1;
+    local::write(heap, &mut machine.frames[top].locals[slot as usize], value);
     Ok(())
 }
 
 /// Interns and binds a named `to`/`fn` declaration to its target (a module cell
 /// or a frame slot). Runs when the declaration statement executes, so a call
 /// before then reads an uninitialized binding — the temporal dead zone (M2a.4a).
+///
+/// A **cell-boxed local** declaration needs **letrec** order: the callable's body
+/// may reference its own name (a self-recursive helper — the reference crosses the
+/// callable's `fn` boundary, so it resolves as a capture, §7), so the callable must
+/// capture the **same** cell the binding fills. We therefore give the slot a fresh
+/// cell *before* interning the callable (so `make_callable`'s self-capture reads it,
+/// and each loop iteration's helper is a distinct binding, L§5.4), then fill it.
 pub(crate) fn define_callable(
     resolved: &ResolvedModule,
     heap: &mut Heap,
@@ -309,27 +322,52 @@ pub(crate) fn define_callable(
     namespace: &control::Namespace,
     decl: NodeId,
 ) {
-    let value = make_callable(resolved, heap, decl);
+    if let Some(Resolution::LocalSlot(slot)) = resolved.resolutions[decl.0 as usize] {
+        let top = machine.frames.len() - 1;
+        if matches!(machine.frames[top].locals[slot as usize], Local::Boxed(_)) {
+            let cell = heap.alloc_cell(None);
+            machine.frames[top].locals[slot as usize] = Local::Boxed(cell);
+            let value = make_callable(resolved, heap, machine, decl);
+            heap.cell_mut(cell).value = Some(value);
+            return;
+        }
+    }
+    // A direct slot or a module global: intern the callable, then bind it.
+    let value = make_callable(resolved, heap, machine, decl);
     control::bind_decl(resolved, heap, machine, namespace, decl, value);
 }
 
 /// Interns a callable value for the `Callable` node `decl`: one canonical
-/// [`CalObj`] naming its `CallableId` (machine-design §8). A plain `to`/`fn`'s
-/// declaration runs once, so this is its single canonical value; an anonymous
-/// `fn` gets a fresh value per evaluation. Closure captures are M2a.8.
-pub(crate) fn make_callable(resolved: &ResolvedModule, heap: &mut Heap, decl: NodeId) -> Value {
+/// [`CalObj`] naming its `CallableId` (machine-design §8), with its **captured
+/// cells** read from the creating environment (representation B, §7/§10). A plain
+/// `to`/`fn`'s declaration runs once, so this is its single canonical value; an
+/// anonymous `fn` (a closure) gets a fresh value — with fresh captures — per
+/// evaluation.
+pub(crate) fn make_callable(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &Machine,
+    decl: NodeId,
+) -> Value {
     let callable_id = resolved
         .callables
         .iter()
         .position(|c| c.decl == decl)
         .expect("a Callable node has a resolved CallableInfo");
-    if !resolved.callables[callable_id].captures.is_empty() {
-        unimplemented!("closure captures are M2a.8");
-    }
+    // Each capture reads a cell from the creating environment: chase the creating
+    // frame's defining chain `hops` (§7), then take the cell-boxed source slot's cell.
+    let captures: Vec<_> = resolved.callables[callable_id]
+        .captures
+        .iter()
+        .map(|cs| {
+            let owner = control::outer_frame(machine, cs.from.hops);
+            local::cell_of(machine.frames[owner].locals[cs.from.slot as usize])
+        })
+        .collect();
     let cal = heap.alloc_callable(CalObj {
         module: resolved.canonical_id,
         callable: callable_id as u32,
-        captures: Vec::new(),
+        captures,
     });
     Value::Callable(cal)
 }

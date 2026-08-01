@@ -394,6 +394,126 @@ fn a_kind_matched_tail_call_reuses_a_procedure_frame_too() {
 }
 
 #[test]
+fn closures_capture_shared_mutable_bindings() {
+    for (src, want) in [
+        // make_counter (S-11): `inc` captures `n` and mutates it across calls; the
+        // binding outlives `make_counter`'s frame.
+        (
+            "fn make_counter()\nlet n = 0\nfn inc()\nn = n + 1\nn\nend\ninc\nend\n\
+             let c = make_counter()\nc()\nc()\nc()\n",
+            3,
+        ),
+        // Two counters are INDEPENDENT: `a`'s count (1 then 2) is unaffected by a
+        // `b()` call in between — a shared cell would make the last `a()` yield 3.
+        (
+            "fn make_counter()\nlet n = 0\nfn inc()\nn = n + 1\nn\nend\ninc\nend\n\
+             let a = make_counter()\nlet b = make_counter()\na()\nb()\na()\n",
+            2,
+        ),
+        // A captured PARAMETER: `add` closes over `base`.
+        (
+            "fn adder(base)\nfn add(x)\nbase + x\nend\nadd\nend\nlet a5 = adder(5)\na5(3)\n",
+            8,
+        ),
+        // Two closures sharing one binding see each other's writes: `bump` (a `to`,
+        // it only mutates) writes `x`, `peek` (a `fn`) reads it.
+        (
+            "fn pair()\nlet x = 0\nto bump()\nx = x + 1\nend\nfn peek()\nx\nend\n\
+             bump()\nbump()\npeek()\nend\npair()\n",
+            2,
+        ),
+        // A captured DEFAULTED parameter: the default fills the cell (bind_default).
+        (
+            "fn adder(base = 4)\nfn add(x)\nbase + x\nend\nadd\nend\nlet a = adder()\na(10)\n",
+            14,
+        ),
+        // Nested closures: `inner` captures `x`, threaded through `mid` — one cell.
+        (
+            "fn outer()\nlet x = 7\nfn mid()\nfn inner()\nx\nend\ninner()\nend\n\
+             mid()\nend\nouter()\n",
+            7,
+        ),
+        // A closure created INSIDE a `do … end` block, capturing an outer fn local
+        // through the defining chain (a `BlockOuter`-sourced capture, hops > 1).
+        (
+            "fn outer()\nlet x = 100\nlet result = 0\nto run(do body)\nbody()\nend\n\
+             run() do\nfn get()\nx\nend\nresult = get()\nend\nresult\nend\nouter()\n",
+            100,
+        ),
+    ] {
+        let mut inst = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(want),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn a_self_recursive_nested_helper_works() {
+    // A locally-declared recursive `fn`/`to` references its own name — a capture of
+    // its own binding (letrec). The closure must capture the SAME cell the binding
+    // fills, or the recursive self-call reads an uninitialized cell (a spurious
+    // UsedBeforeDefined). This is a common idiom (a recursive helper inside a fn).
+    for (src, want) in [
+        // Recursive `fn` helper: fact(5) = 120.
+        (
+            "fn outer()\nfn fact(n)\nif n < 2 then 1 else n * fact(n - 1) end\nend\n\
+             fact(5)\nend\nouter()\n",
+            120,
+        ),
+        // Recursive `to` helper mutating a captured counter: step(3) sets c = 3.
+        (
+            "fn outer()\nlet c = 0\nto step(n)\nif n > 0 then\nc = c + 1\nstep(n - 1)\nend\nend\n\
+             step(3)\nc\nend\nouter()\n",
+            3,
+        ),
+    ] {
+        let mut inst = load_source(src);
+        assert_eq!(
+            drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+            Some(want),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn loop_created_closures_capture_fresh_bindings() {
+    // Exit criterion 5 / loop-fresh (L§5.4): each iteration's `let k` is a distinct
+    // binding, so `grab` closures from different iterations capture DIFFERENT cells.
+    // iter 0 captures k=0, iter 1 captures k=1 → 0 + 1*10 = 10. A shared cell would
+    // make both read the final k (1) → 11.
+    let src = "let first = nil\nlet second = nil\nlet i = 0\n\
+               while i < 2 do\nlet k = i\nfn grab()\nk\nend\n\
+               if i == 0 then first = grab else second = grab end\ni = i + 1\nend\n\
+               first() + second() * 10\n";
+    let mut inst = load_source(src);
+    assert_eq!(
+        drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+        Some(10)
+    );
+}
+
+#[test]
+fn a_loop_closure_shares_the_outer_counter_but_freshens_the_inner_let() {
+    // The distinction that makes closures subtle: `i` (declared OUTSIDE the loop) is
+    // one binding mutated across iterations, so both closures see its final value
+    // (2); `k` (declared INSIDE) is loop-fresh, so each closure sees its own
+    // iteration's value (10, 11). `g0` = 2 + 10 = 12, `g1` = 2 + 11 = 13.
+    let src = "let f0 = nil\nlet f1 = nil\nlet i = 0\n\
+               while i < 2 do\nlet k = i + 10\nfn g()\ni + k\nend\n\
+               if i == 0 then f0 = g else f1 = g end\ni = i + 1\nend\n\
+               f0() + f1() * 100\n";
+    let mut inst = load_source(src);
+    assert_eq!(
+        drive_capturing_last_value(&mut inst).and_then(Value::as_int),
+        Some(1312),
+    );
+}
+
+#[test]
 fn a_block_param_invoked_from_a_nested_block_composes() {
     for (src, want) in [
         // `relay` receives `body` and invokes it from INSIDE another helper's block

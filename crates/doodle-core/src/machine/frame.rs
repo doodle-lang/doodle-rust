@@ -13,7 +13,21 @@
 use super::Value;
 use super::cont::Cont;
 use crate::ast::NodeId;
-use crate::machine::CalIdx;
+use crate::machine::{CalIdx, CellIdx};
+
+/// One frame-local slot (machine-design §7). A **direct** slot stores its value
+/// inline; a **cell-boxed** slot holds a reference to a heap [`CellObj`](crate::heap::CellObj)
+/// — its storage that a nested `fn` captured (representation B, §7/§10), so the
+/// closure and the frame share one mutable binding. The resolver's `cell_boxed`
+/// flag decides which a slot is at frame entry; thereafter the variant is
+/// self-describing (reads/writes dereference a `Boxed` slot).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Local {
+    /// A plain local; `None` = declared-but-unbound (the temporal dead zone).
+    Direct(Option<Value>),
+    /// A cell-boxed local: the value lives in the heap cell at this index.
+    Boxed(CellIdx),
+}
 
 /// What a frame is running (machine-design §8 `FrameKind`).
 pub(crate) enum FrameKind {
@@ -79,9 +93,8 @@ pub(crate) struct Frame {
     /// What this frame is running.
     pub(crate) kind: FrameKind,
     /// Frame-local slots (machine-design §7), sized by the body's resolver
-    /// `slot_count`. `None` = an uninitialized slot (declared but not yet bound).
-    /// A cell-boxed slot (closure capture, §7) arrives at M2a.8.
-    pub(crate) locals: Vec<Option<Value>>,
+    /// `slot_count`. Each is direct or cell-boxed (see [`Local`]).
+    pub(crate) locals: Vec<Local>,
     /// Pending work for this frame (LIFO).
     pub(crate) conts: Vec<Cont>,
     /// Frame identity (machine-design §8): distinguishes this activation from a
@@ -97,13 +110,12 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    /// A fresh module-top-level frame with `slot_count` (uninitialized) local
-    /// slots, whose only pending work is `body_seq` (the sequencing continuation
-    /// over the module's statements).
-    pub(crate) fn module_top_level(slot_count: u16, body_seq: Cont, serial: u64) -> Self {
+    /// A fresh module-top-level frame with pre-built `locals`, whose only pending
+    /// work is `body_seq` (the sequencing continuation over the module's statements).
+    pub(crate) fn module_top_level(locals: Vec<Local>, body_seq: Cont, serial: u64) -> Self {
         Frame {
             kind: FrameKind::ModuleTopLevel,
-            locals: vec![None; slot_count as usize],
+            locals,
             conts: vec![body_seq],
             serial,
             block_param: None,
@@ -112,13 +124,13 @@ impl Frame {
     }
 
     /// A fresh callable frame for invoking `cal`, with `locals` already holding
-    /// the bound arguments (unfilled slots `None`) and `block_param` the bound
+    /// the bound arguments (direct or cell-boxed) and `block_param` the bound
     /// `do name` block argument, if any. Its pending work is the body `Seq` over a
     /// [`ReturnBarrier`](Cont::ReturnBarrier) (machine-design §8/§10); parameter
     /// defaults are pushed on top by the caller so they run before the body.
     pub(crate) fn callable(
         cal: CalIdx,
-        locals: Vec<Option<Value>>,
+        locals: Vec<Local>,
         body: NodeId,
         serial: u64,
         block_param: Option<BlockDescriptor>,
@@ -142,7 +154,7 @@ impl Frame {
     pub(crate) fn reuse_as_callable(
         &mut self,
         cal: CalIdx,
-        locals: Vec<Option<Value>>,
+        locals: Vec<Local>,
         body: NodeId,
         block_param: Option<BlockDescriptor>,
     ) {
@@ -163,7 +175,7 @@ impl Frame {
         defining: usize,
         defining_serial: u64,
         consumer: Consumer,
-        locals: Vec<Option<Value>>,
+        locals: Vec<Local>,
         body: NodeId,
         serial: u64,
     ) -> Self {

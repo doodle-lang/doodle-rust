@@ -19,7 +19,7 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::step::take_value;
-use super::{Machine, Value, compare};
+use super::{Machine, Value, compare, local};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::CellIdx;
@@ -42,7 +42,7 @@ pub(crate) fn read_ref(
     let span = resolved.ast.span(node);
     let name = ident_name(resolved, node);
     match resolution(resolved, node) {
-        Resolution::LocalSlot(slot) => read_slot(machine, slot, name, span),
+        Resolution::LocalSlot(slot) => read_slot(machine, heap, slot, name, span),
         Resolution::ModuleName(idx) => {
             let name = &resolved.name_refs[idx as usize].name;
             read_cell(heap, find_cell(namespace, name), name, span)
@@ -50,7 +50,7 @@ pub(crate) fn read_ref(
         // A block body reading an enclosing local through the defining static link
         // (§7): chase `defining` `hops` times, then read that frame's slot.
         Resolution::BlockOuter { hops, slot } => {
-            read_slot_at(machine, outer_frame(machine, hops), slot, name, span)
+            read_slot_at(machine, heap, outer_frame(machine, hops), slot, name, span)
         }
     }
 }
@@ -82,8 +82,9 @@ pub(crate) fn bind_decl(
     value: Value,
 ) {
     match resolved.resolutions[decl.0 as usize] {
-        // A construct-body / nested local: a frame slot.
-        Some(Resolution::LocalSlot(slot)) => set_slot(machine, slot, value),
+        // A construct-body / nested local: a frame slot. A declaration is a new
+        // binding, so a boxed slot gets a fresh cell (loop-fresh).
+        Some(Resolution::LocalSlot(slot)) => rebind_slot(machine, heap, slot, value),
         // A module global: the declaration's name binds its cell (created at load).
         None => {
             let name = decl_name(resolved, decl);
@@ -113,7 +114,7 @@ pub(crate) fn assign_to(
         unimplemented!("assignment to a field/index place is M4 (S-38)");
     }
     match resolution(resolved, target) {
-        Resolution::LocalSlot(slot) => set_slot(machine, slot, value),
+        Resolution::LocalSlot(slot) => set_slot(machine, heap, slot, value),
         Resolution::ModuleName(idx) => {
             let name = &resolved.name_refs[idx as usize].name;
             let cell = find_cell(namespace, name).ok_or_else(|| name_not_defined(name, span))?;
@@ -122,7 +123,8 @@ pub(crate) fn assign_to(
         // A block body writing an enclosing local through the defining static link
         // (§7/§8.5 — a block can mutate its enclosing variables).
         Resolution::BlockOuter { hops, slot } => {
-            set_slot_at(machine, outer_frame(machine, hops), slot, value);
+            let owner = outer_frame(machine, hops);
+            set_slot_at(machine, heap, owner, slot, value);
         }
     }
     Ok(())
@@ -218,32 +220,52 @@ pub(crate) fn loop_reloop(resolved: &ResolvedModule, machine: &mut Machine, node
     });
 }
 
-fn read_slot(machine: &Machine, slot: u16, name: &str, span: Span) -> Result<Value, Raise> {
-    read_slot_at(machine, machine.frames.len() - 1, slot, name, span)
+fn read_slot(
+    machine: &Machine,
+    heap: &Heap,
+    slot: u16,
+    name: &str,
+    span: Span,
+) -> Result<Value, Raise> {
+    read_slot_at(machine, heap, machine.frames.len() - 1, slot, name, span)
 }
 
-fn set_slot(machine: &mut Machine, slot: u16, value: Value) {
+fn set_slot(machine: &mut Machine, heap: &mut Heap, slot: u16, value: Value) {
     let top = machine.frames.len() - 1;
-    set_slot_at(machine, top, slot, value);
+    set_slot_at(machine, heap, top, slot, value);
 }
 
 /// Reads slot `slot` of the frame at `frame` (the top frame, or an enclosing one
-/// reached by a block static link), raising if it is uninitialized.
+/// reached by a block static link), dereferencing a cell-boxed slot (§7), and
+/// raising if it is uninitialized.
 fn read_slot_at(
     machine: &Machine,
+    heap: &Heap,
     frame: usize,
     slot: u16,
     name: &str,
     span: Span,
 ) -> Result<Value, Raise> {
-    match machine.frames[frame].locals[slot as usize] {
+    match local::read(heap, machine.frames[frame].locals[slot as usize]) {
         Some(v) => Ok(v),
         None => Err(used_before_defined(name, span)),
     }
 }
 
-fn set_slot_at(machine: &mut Machine, frame: usize, slot: u16, value: Value) {
-    machine.frames[frame].locals[slot as usize] = Some(value);
+/// Writes to an existing slot (an assignment) — mutating the cell for a boxed slot.
+fn set_slot_at(machine: &mut Machine, heap: &mut Heap, frame: usize, slot: u16, value: Value) {
+    local::write(
+        heap,
+        &mut machine.frames[frame].locals[slot as usize],
+        value,
+    );
+}
+
+/// Binds a `let`/`const`/declaration value to the top frame's slot — a boxed slot
+/// gets a **fresh** cell (loop-fresh, L§5.4), a direct slot is set inline.
+fn rebind_slot(machine: &mut Machine, heap: &mut Heap, slot: u16, value: Value) {
+    let top = machine.frames.len() - 1;
+    local::rebind(heap, &mut machine.frames[top].locals[slot as usize], value);
 }
 
 /// The frame reached by chasing the top (block) frame's `defining` static link

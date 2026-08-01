@@ -97,9 +97,9 @@ pub(crate) fn step(
             call,
             values,
             index,
-        }) => block::got_block_arg(resolved, machine, call, values, index),
+        }) => block::got_block_arg(resolved, heap, machine, call, values, index),
         Some(Cont::BindDefault { slot, default }) => {
-            call::bind_default(resolved, machine, slot, default)
+            call::bind_default(resolved, heap, machine, slot, default)
         }
         Some(Cont::DefineCallable { decl }) => {
             call::define_callable(resolved, heap, machine, namespace, decl);
@@ -268,8 +268,9 @@ fn eval(
         // A call schedules callee/argument evaluation, then `Apply` (call.rs); a
         // block-parameter invocation takes the block path (block.rs).
         Node::Call { .. } => return call::eval_call(resolved, heap, machine, node),
-        // An anonymous `fn` expression interns its own callable value (L§6.10).
-        Node::Callable { .. } => call::make_callable(resolved, heap, node),
+        // An anonymous `fn` expression interns its own closure value (L§6.10),
+        // reading its captured cells from the creating environment (M2a.8).
+        Node::Callable { .. } => call::make_callable(resolved, heap, machine, node),
         other => unimplemented!("expression not yet in the machine (M2a.5+): {other:?}"),
     };
     machine.reg = Some(value);
