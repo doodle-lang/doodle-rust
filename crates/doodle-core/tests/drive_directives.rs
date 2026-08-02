@@ -1,0 +1,166 @@
+//! Drive-state-machine tests (M2b.3): the resumable [`run`]/[`resolve`] loop, the
+//! `Step*`/`Continue` directives (basic granularity), the E§3.3 outcome↔state
+//! correspondence, and the host-contract phase guards.
+//!
+//! These drive through the public API only — `run`, `state`, `result`, `output` —
+//! so they double as the "drive-directive determinism" check (E§7.7): the same
+//! program reaches the same terminal under a step-through as under a fast run.
+
+use doodle_core::drive::{Directive, EngineFault, LimitKind, Limits, Outcome, resolve, run};
+use doodle_core::machine::{Instance, InstanceState};
+use doodle_core::parse::parse_program;
+use doodle_core::resolve::resolve as resolve_module;
+use doodle_core::source::normalize;
+use doodle_core::span::ModuleId;
+
+/// Loads Doodle `src` into an instance through the real pipeline, asserting it loads
+/// clean.
+fn instance(src: &str) -> Instance {
+    load(src, Limits::default())
+}
+
+fn load(src: &str, limits: Limits) -> Instance {
+    use doodle_core::diag::Severity;
+    let nfc = normalize(src);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = resolve_module(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "resolve diagnostic(s): {:?}",
+        resolved.diagnostics
+    );
+    Instance::load_with_limits(resolved.module, limits)
+}
+
+/// Drives `inst` to a terminal outcome under a fixed `directive`, re-driving past each
+/// `Paused`; returns how many times it paused and the terminal outcome.
+fn drive_counting(inst: &mut Instance, directive: Directive) -> (usize, Outcome) {
+    let mut pauses = 0;
+    let mut outcome = run(inst, directive);
+    while matches!(outcome, Outcome::Paused(_)) {
+        pauses += 1;
+        assert!(pauses < 100_000, "step loop did not terminate");
+        outcome = run(inst, directive);
+    }
+    (pauses, outcome)
+}
+
+// ---- outcome ↔ state correspondence (E§3.3) ----
+
+#[test]
+fn a_clean_program_completes_and_leaves_completed() {
+    let mut inst = instance("let a = 1\nlet b = 2\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn an_uncaught_raise_leaves_the_instance_raised() {
+    // A distinct terminal `Raised` state (E§3.3/§9), NOT `Faulted` — `state()` alone
+    // tells a Doodle exception from an engine fault.
+    let mut inst = instance("1 / 0\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
+    assert_eq!(inst.state(), InstanceState::Raised);
+}
+
+#[test]
+fn a_limit_fault_leaves_the_instance_faulted() {
+    // A tiny step budget trips at a safe point → Faulted(LimitExceeded(StepBudget)).
+    let limits = Limits {
+        step_budget: 50,
+        ..Limits::default()
+    };
+    let mut inst = load("loop do\n1\nend\n", limits);
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+// ---- host-contract phase guards ----
+
+#[test]
+#[should_panic(expected = "not re-drivable")]
+fn re_driving_a_terminal_instance_is_a_contract_violation() {
+    let mut inst = instance("1\n");
+    run(&mut inst, Directive::RunToCompletion); // → Completed
+    let _ = run(&mut inst, Directive::RunToCompletion); // debug-asserts
+}
+
+#[test]
+#[should_panic(expected = "Suspended")]
+fn resolving_a_non_suspended_instance_is_a_contract_violation() {
+    let mut inst = instance("1\n");
+    // Nothing has suspended (capabilities are M2b.4), so resolve is misuse.
+    let handle = inst.make_int(0);
+    let _ = resolve(&mut inst, doodle_core::drive::Resolution::Value(handle));
+}
+
+// ---- Step directives ----
+
+#[test]
+fn step_pauses_statement_by_statement_then_completes() {
+    let mut inst = instance("let a = 1\nlet b = 2\nlet c = 3\n");
+    let (pauses, outcome) = drive_counting(&mut inst, Directive::Step);
+    // Every `Step` stops at a statement-level safe point, so a three-statement module
+    // pauses a few times before completing (the exact count is an implementation
+    // detail of safe-point placement; what matters is it steps and then completes).
+    assert!(pauses >= 3, "expected per-statement pauses, got {pauses}");
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn stepping_through_reaches_the_same_terminal_as_a_fast_run() {
+    // Drive-directive determinism (E§7.7): the terminal outcome + state is the same
+    // whether stepped or run straight through.
+    let src = "let a = 1\nlet b = 2\nlet c = 3\n";
+    let mut fast = instance(src);
+    let fast_outcome = run(&mut fast, Directive::RunToCompletion);
+
+    let mut stepped = instance(src);
+    let (_, step_outcome) = drive_counting(&mut stepped, Directive::Step);
+
+    assert!(matches!(fast_outcome, Outcome::Completed(None)));
+    assert!(matches!(step_outcome, Outcome::Completed(None)));
+    assert_eq!(fast.state(), stepped.state());
+}
+
+#[test]
+fn step_into_descends_into_a_call_but_step_over_does_not() {
+    // `f` has a body of two statements. StepInto pauses at them (descends, depth 2);
+    // StepOver treats the call as one step (skips the deeper safe points), so it
+    // pauses strictly fewer times.
+    let src = "to f()\nlet x = 1\nlet y = 2\nend\nf()\n";
+    let mut into = instance(src);
+    let (into_pauses, into_outcome) = drive_counting(&mut into, Directive::StepInto);
+    let mut over = instance(src);
+    let (over_pauses, over_outcome) = drive_counting(&mut over, Directive::StepOver);
+
+    assert!(matches!(into_outcome, Outcome::Completed(None)));
+    assert!(matches!(over_outcome, Outcome::Completed(None)));
+    assert!(
+        into_pauses > over_pauses,
+        "StepInto ({into_pauses}) should pause more than StepOver ({over_pauses}) — it \
+         descends into f's body"
+    );
+}

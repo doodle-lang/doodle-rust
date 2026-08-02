@@ -6,7 +6,7 @@
 //! outcomes' payloads (suspension, raise, fault) are shells the later M2a/M2b
 //! chunks fill in.
 
-use crate::machine::{Exception, Halt, Instance, InstanceState, Trace, Value};
+use crate::machine::{Exception, Halt, Handle, Instance, InstanceState, Trace, Value};
 use crate::unicode::UnicodeVersion;
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
@@ -160,36 +160,101 @@ pub enum ConfigError {
 #[derive(Clone, Copy, Debug)]
 pub struct CapabilityRequest;
 
-/// Drives `instance` under `directive`, returning an [`Outcome`] (E§7.3).
+/// How a host resolves a [`Suspended`](Outcome::Suspended) capability (E§7.3): the
+/// value the capability produced (which becomes the call's result) or an exception to
+/// raise at the call site. The suspend→resolve mechanism is wired at M2b.4; the
+/// [`resolve`] entry and its phase guard land now (M2b.3).
+#[derive(Clone, Copy, Debug)]
+pub enum Resolution {
+    /// The capability's result value (E§7.5).
+    Value(Handle),
+    /// Raise this value at the capability call site (E§7.5).
+    Raise(Handle),
+}
+
+/// Starts (from `Ready`) or continues (after a `Paused`) driving `instance` under
+/// `directive`, returning an [`Outcome`] (E§7.3).
 ///
-/// M2a.3a runs the machine to completion or to an **uncaught raise** — a runtime
-/// error (type mismatch, division by zero, a nonfinite float result, …) has no
-/// handler yet (`try`/`rescue` is M4), so it surfaces as [`Outcome::Raised`]. The
-/// `Step*`/`Continue` directives gain meaning once safe points, breakpoints, and
-/// the fused counter land (E§7.4, M2a.9); until then every directive runs through.
+/// `RunToCompletion` and `Continue` run without pausing (breakpoints and the
+/// raise-trap that make `Continue` distinct are M6); a `Step*` directive pauses at
+/// the next statement-level safe point selected by frame depth (E§8.5) →
+/// [`Paused`](Outcome::Paused)`(`[`PauseReason::Step`]`)`. An uncaught raise leaves
+/// the instance `Raised`, an engine fault leaves it `Faulted`, and completion leaves
+/// it `Completed` (E§3.3 outcome↔state correspondence). Re-driving a terminal
+/// instance, or `run`-ing a `Suspended` one (use [`resolve`]), is a host-contract
+/// violation — debug-asserted, and a returned `Faulted(Internal)` in release rather
+/// than undefined behavior.
 pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
-    let _ = directive;
-    // A terminal instance is not re-drivable at M2a.3a: after a raise, frames are
-    // left on the stack, so re-driving would resume them. The full drive-state
-    // machine — resuming Paused/Suspended, rejecting terminal states per E§7 — is
-    // M2b; until then, guard the single-drive contract.
     debug_assert!(
-        matches!(instance.state(), InstanceState::Ready),
-        "re-driving a non-Ready instance is not yet supported (M2b)"
+        matches!(
+            instance.state(),
+            InstanceState::Ready | InstanceState::Paused
+        ),
+        "run() requires a Ready or Paused instance (got {:?}); use resolve() after \
+         Suspended, and terminal states are not re-drivable (E§3.3/§7.3)",
+        instance.state()
     );
+    if !matches!(
+        instance.state(),
+        InstanceState::Ready | InstanceState::Paused
+    ) {
+        return Outcome::Faulted(EngineFault::Internal);
+    }
+    drive(instance, directive)
+}
+
+/// Continues a `Suspended` `instance` with the host's `resolution` (E§7.3).
+///
+/// The suspend→resolve resume path (injecting the value / raising at the parked call
+/// site) lands with suspending capabilities at **M2b.4**; at M2b.3 nothing suspends,
+/// so this only enforces the phase guard: `resolve` on an instance with no pending
+/// suspension is a host-contract violation (debug-asserted; `Faulted(Internal)` in
+/// release).
+pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
+    let _ = resolution;
+    debug_assert!(
+        matches!(instance.state(), InstanceState::Suspended),
+        "resolve() requires a Suspended instance (got {:?}); it continues a pending \
+         capability request (E§7.3/§7.5)",
+        instance.state()
+    );
+    // No capability can suspend yet (M2b.4), so there is never a pending request to
+    // resolve; the guard makes the misuse loud rather than silently proceeding.
+    Outcome::Faulted(EngineFault::Internal)
+}
+
+/// The core drive loop: steps `instance` to a stopping [`Outcome`] under `directive`,
+/// pausing a `Step*` at the next matching safe point. Shared by [`run`] (and, at
+/// M2b.4, the resume side of [`resolve`]).
+fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
+    // Anchor `Step*` depth judgments at the frame depth we resume from (E§8.5).
+    let anchor_depth = instance.frame_depth();
     instance.set_state(InstanceState::Running);
-    while !instance.is_halted() {
+    loop {
+        if instance.is_halted() {
+            instance.set_state(InstanceState::Completed);
+            // E§7.2: a top-level module drive completes with **no value** (Void) — a
+            // module runs for effect (L§6.11). `Completed`'s value is present only for
+            // a returning `fn` (a reentrant callable return, E§7.6, M2b.5).
+            return Outcome::Completed(None);
+        }
         match instance.step() {
-            Ok(()) => {}
-            // An uncaught raise (no handlers at M2a.3a). The post-raise instance
-            // state (E§3.3 has no distinct "raised" state) is provisionally
-            // `Faulted` — tracked as a discovered delta; the outcome carries the
-            // real result.
+            Ok(safe_point) => {
+                if let Some(depth) = safe_point
+                    && should_pause(directive, anchor_depth, depth)
+                {
+                    instance.set_state(InstanceState::Paused);
+                    return Outcome::Paused(PauseReason::Step);
+                }
+            }
+            // An uncaught raise reached the outermost boundary (no handlers yet;
+            // `try`/`rescue` is M4). The instance enters the terminal `Raised` state
+            // (E§3.3/§9), distinct from `Faulted`; the outcome carries exception + trace.
             Err(Halt::Raise(raise)) => {
-                instance.set_state(InstanceState::Faulted);
+                instance.set_state(InstanceState::Raised);
                 return Outcome::Raised(raise.exception, raise.trace);
             }
-            // A resource limit was exceeded at a safe point (E§10.2): a
+            // A resource limit (or, later, cancellation) at a safe point (E§10.2): a
             // non-resumable fault.
             Err(Halt::Fault(fault)) => {
                 instance.set_state(InstanceState::Faulted);
@@ -197,11 +262,23 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
             }
         }
     }
-    instance.set_state(InstanceState::Completed);
-    // E§7.2: a top-level module drive completes with **no value** (Void). A
-    // module runs for effect (L§6.11 — statements yield no value); `Completed`'s
-    // value is present only for a returning `fn` (a reentrant callable return,
-    // E§7.6), which arrives at M2a.5. This replaces the M0.3 provisional (which
-    // returned the last expression's value).
-    Outcome::Completed(None)
+}
+
+/// Whether a safe point at frame `depth` stops the given `directive`, anchored at the
+/// depth the drive resumed from (E§8.5, basic granularity — breakpoints and
+/// tail-aware refinements are M6).
+fn should_pause(directive: Directive, anchor_depth: usize, depth: usize) -> bool {
+    match directive {
+        // A fast run and a "resume the program" both run to the next capability /
+        // fault / completion; the breakpoints and raise-trap that make `Continue`
+        // distinct are M6.
+        Directive::RunToCompletion | Directive::Continue => false,
+        // Stop at the very next safe point, in any frame.
+        Directive::Step | Directive::StepInto => true,
+        // Treat a call as one step: stop at the next safe point at the anchor depth or
+        // shallower (a call's deeper entry safe point is skipped).
+        Directive::StepOver => depth <= anchor_depth,
+        // Run until the current frame returns: stop only strictly shallower.
+        Directive::StepOut => depth < anchor_depth,
+    }
 }

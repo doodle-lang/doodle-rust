@@ -131,29 +131,43 @@ pub(crate) fn exit_apply(
 }
 
 /// Performs one unwind transition (machine-design §12). Precondition:
-/// `machine.unwind` is `Some`.
+/// `machine.unwind` is `Some`. Returns `Ok(Some(depth))` on the **settling**
+/// transition that pops the target frame and returns control to a shallower frame —
+/// a return safe point (E§7.4) at that post-pop depth, the same as the fall-through
+/// [`ReturnBarrier`](super::cont::Cont::ReturnBarrier) path — so `Step*` (esp.
+/// `StepOut`) and the limit checks see it. Intervening pops and in-frame settles
+/// (loop `break`/`continue`, block `continue`, which resume in the same frame and
+/// let the *next* normal safe point fire) return `Ok(None)`.
 pub(crate) fn step(
     resolved: &ResolvedModule,
     heap: &Heap,
     machine: &mut Machine,
-) -> Result<(), Raise> {
+) -> Result<Option<usize>, Raise> {
     match machine
         .unwind
         .expect("unwind::step with no in-flight unwind")
     {
-        Unwind::LoopBreak { loop_node } => loop_break(machine, loop_node),
-        Unwind::LoopContinue { loop_node } => loop_continue(resolved, machine, loop_node),
-        Unwind::BlockContinue { value } => block_continue(machine, value),
+        Unwind::LoopBreak { loop_node } => {
+            loop_break(machine, loop_node);
+            Ok(None)
+        }
+        Unwind::LoopContinue { loop_node } => {
+            loop_continue(resolved, machine, loop_node);
+            Ok(None)
+        }
+        Unwind::BlockContinue { value } => {
+            block_continue(machine, value);
+            Ok(None)
+        }
         Unwind::BlockBreak {
             value,
             consumer,
             consumer_serial,
-        } => block_break(machine, value, consumer, consumer_serial),
+        } => Ok(block_break(machine, value, consumer, consumer_serial)),
         // A `return` can fall off the end of a `fn` (a bare `return`), so it alone
         // may raise as it delivers.
-        Unwind::Return { value, home } => return do_return(resolved, heap, machine, value, home),
+        Unwind::Return { value, home } => do_return(resolved, heap, machine, value, home),
     }
-    Ok(())
 }
 
 /// `break` in a loop: pop continuations off the current frame until the matching
@@ -213,7 +227,14 @@ fn block_continue(machine: &mut Machine, value: Option<Value>) {
 
 /// `break` in a block: pop frames (the block, then any intervening frames) through
 /// the consumer frame inclusive, delivering `value` as the consuming call's result.
-fn block_break(machine: &mut Machine, value: Option<Value>, consumer: usize, serial: u64) {
+/// Returns `Some(post-pop depth)` on the settling transition that pops the consumer
+/// (a return safe point), `None` for an intervening pop.
+fn block_break(
+    machine: &mut Machine,
+    value: Option<Value>,
+    consumer: usize,
+    serial: u64,
+) -> Option<usize> {
     let top = machine.frames.len() - 1;
     if top == consumer {
         debug_assert_eq!(
@@ -223,10 +244,12 @@ fn block_break(machine: &mut Machine, value: Option<Value>, consumer: usize, ser
         machine.frames.pop();
         machine.reg = value;
         machine.unwind = None;
+        Some(machine.frames.len())
     } else {
         // An intervening frame (the block, or a punched-through consumer); its
         // continuations are abandoned (no `WithRestore` to run until M4).
         machine.frames.pop();
+        None
     }
 }
 
@@ -241,12 +264,12 @@ fn do_return(
     machine: &mut Machine,
     value: Option<Value>,
     home: usize,
-) -> Result<(), Raise> {
+) -> Result<Option<usize>, Raise> {
     let top = machine.frames.len() - 1;
     if top != home {
         // An intervening frame (a punched-through block/consumer); keep unwinding.
         machine.frames.pop();
-        return Ok(());
+        return Ok(None);
     }
     let fell_off = match machine.frames[home].kind {
         FrameKind::Callable { cal } => {
@@ -269,7 +292,7 @@ fn do_return(
         ));
     }
     machine.reg = value;
-    Ok(())
+    Ok(Some(machine.frames.len()))
 }
 
 /// The home callable frame for a `return` (machine-design §12): the current frame

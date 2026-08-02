@@ -671,7 +671,7 @@ fn drive_to_fault(inst: &mut Instance) -> EngineFault {
     loop {
         assert!(!inst.is_halted(), "completed without faulting");
         match inst.step() {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(Halt::Raise(r)) => panic!("unexpected raise: {r:?}"),
             Err(Halt::Fault(f)) => return f,
         }
@@ -890,7 +890,7 @@ fn drive_terminal(inst: &mut Instance, force_gc: bool) -> Terminal {
             last = Some(v);
         }
         match inst.step() {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(Halt::Raise(raise)) => return Terminal::Raised(raise.exception.kind),
             Err(Halt::Fault(fault)) => return Terminal::Faulted(fault),
         }
@@ -997,6 +997,65 @@ fn gc_stress_determinism_gate_over_limit_faults() {
         assert!(
             matches!(normal, Terminal::Faulted(_)),
             "{src:?} should fault under the small limits, got {normal:?}"
+        );
+    }
+}
+
+/// Loads `src` with the `print` intrinsic registered, so a test can observe whether
+/// a side-effecting call has run (via captured output).
+fn load_source_with_print(src: &str) -> Instance {
+    use crate::diag::Severity;
+    let nfc = crate::source::normalize(src);
+    let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let mut registry = Registry::new();
+    registry.register(print_intrinsic()).unwrap();
+    Instance::load_with_intrinsics(resolved.module, registry)
+}
+
+#[test]
+fn step_out_stops_the_instant_a_fn_returns_before_a_sibling_runs() {
+    use crate::drive::{Directive, Outcome, run};
+    // `StepOut` from inside `f` must pause the instant `f` returns — before the sibling
+    // `h()` in `f() + h()` runs — regardless of whether `f` exits by an explicit
+    // `return` (a frame-popping unwind) or by falling through (a `ReturnBarrier`). The
+    // two paths must report the return safe point identically, so `h` (which prints)
+    // has produced no output when `StepOut` pauses.
+    for src in [
+        "fn f()\nreturn 1\nend\nfn h()\nprint(\"H\")\nreturn 2\nend\nlet x = f() + h()\n",
+        "fn f()\n1\nend\nfn h()\nprint(\"H\")\n2\nend\nlet x = f() + h()\n",
+    ] {
+        let mut inst = load_source_with_print(src);
+        // Step into `f` (its body runs at frame depth 2 — module frame is depth 1).
+        loop {
+            let outcome = run(&mut inst, Directive::StepInto);
+            assert!(matches!(outcome, Outcome::Paused(_)), "src={src:?}");
+            if inst.frame_depth() == 2 {
+                break;
+            }
+        }
+        let outcome = run(&mut inst, Directive::StepOut);
+        assert!(
+            matches!(outcome, Outcome::Paused(_)),
+            "src={src:?} {outcome:?}"
+        );
+        assert_eq!(
+            inst.output(),
+            b"",
+            "StepOut overshot f's return and ran the sibling h(): src={src:?}"
         );
     }
 }

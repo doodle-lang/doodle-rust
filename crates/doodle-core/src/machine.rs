@@ -165,8 +165,23 @@ pub enum InstanceState {
     Paused,
     /// Finished (E§7.2 `Completed`).
     Completed,
+    /// An uncaught Doodle exception reached the outermost drive boundary (E§3.3/§9).
+    /// Terminal and distinct from `Faulted`, so `state()` alone tells a program's own
+    /// error from an engine fault; the exception + trace stay observable post-mortem.
+    Raised,
     /// Stopped by a limit, cancellation, or internal fault (E§9, §10).
     Faulted,
+}
+
+impl InstanceState {
+    /// Whether this is a terminal state — the driven unit is finished and the
+    /// instance is not re-drivable (E§3.3; REPL re-drive is S-33/M9b).
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            InstanceState::Completed | InstanceState::Raised | InstanceState::Faulted
+        )
+    }
 }
 
 /// The core execution state (machine-design §8): the walkable frame stack and the
@@ -436,9 +451,9 @@ impl Instance {
         self.machine.frames.is_empty()
     }
 
-    /// The current frame-stack depth (for tail-call tests: a tail loop keeps this
-    /// bounded — constant memory).
-    #[cfg(test)]
+    /// The current frame-stack depth. The drive loop reads it to anchor `Step*`
+    /// directives by frame depth (E§8.5); a tail loop keeps it bounded (constant
+    /// memory), which the PTC tests assert.
     pub(crate) fn frame_depth(&self) -> usize {
         self.machine.frames.len()
     }
@@ -464,10 +479,12 @@ impl Instance {
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:
-    /// `!self.is_halted()`. Returns `Err` if the transition stopped the drive —
-    /// an uncaught raise or an engine fault (the drive loop maps each to its
-    /// [`Outcome`](crate::drive::Outcome)).
-    pub(crate) fn step(&mut self) -> Result<(), Halt> {
+    /// `!self.is_halted()`. `Ok(Some(depth))` means the transition crossed a
+    /// **statement-level safe point** (E§7.4) at that frame depth — where the drive
+    /// loop may pause a `Step*` directive; `Ok(None)` means no safe point this
+    /// transition. `Err` stopped the drive — an uncaught raise or an engine fault
+    /// (the drive loop maps each to its [`Outcome`](crate::drive::Outcome)).
+    pub(crate) fn step(&mut self) -> Result<Option<usize>, Halt> {
         step::step(
             &self.resolved,
             &mut self.heap,

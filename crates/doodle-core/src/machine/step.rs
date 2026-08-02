@@ -21,22 +21,31 @@ use num_bigint::BigInt;
 
 /// Performs one machine transition (machine-design §8), evaluating resource limits
 /// at each statement-level safe point (E§7.4, §10.2). Precondition: `machine` has at
-/// least one frame (the caller checks `is_halted` first). Returns `Err` if the
-/// transition stopped the drive — an uncaught raise or an engine fault.
+/// least one frame (the caller checks `is_halted` first). `Ok(Some(depth))` means the
+/// transition crossed a statement-level safe point at that frame depth (where the
+/// drive loop may pause a `Step*`); `Ok(None)` means none. `Err` stopped the drive.
 pub(crate) fn step(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
     namespace: &Namespace,
-) -> Result<(), Halt> {
+) -> Result<Option<usize>, Halt> {
     // A non-local transfer in flight takes over the transition (§12): unwind toward
-    // the exit's target instead of running continuations normally. Unwinding is
-    // finite cleanup toward a target (bounded by the stack it already paid for on
-    // the way in), so it does not itself hit safe points — the next normal step,
-    // once the unwind settles, does.
+    // the exit's target instead of running continuations normally. Intervening cleanup
+    // steps hit no safe point, but the **settling** transition — where the exit pops
+    // its target frame and returns control to a shallower frame (a `return` reaching
+    // its home callable, a `break` reaching its consumer) — is a return safe point at
+    // the post-pop depth, exactly like a fall-through `ReturnBarrier`. Reporting it
+    // lets `StepOut` stop the instant the frame returns and keeps the limit checks
+    // consistent across the two return paths (E§7.4).
     if machine.unwind.is_some() {
-        unwind::step(resolved, heap, machine)?;
-        return Ok(());
+        return match unwind::step(resolved, heap, machine)? {
+            Some(depth) => {
+                limits::safe_point(heap, machine, namespace)?;
+                Ok(Some(depth))
+            }
+            None => Ok(None),
+        };
     }
     // Pop the top frame's top continuation; the borrow ends before we dispatch,
     // so a transition is free to push work back onto the same (or a new) frame.
@@ -56,8 +65,13 @@ pub(crate) fn step(
     );
     let depth_before = machine.frames.len();
     dispatch(resolved, heap, machine, namespace, cont)?;
+    // The frame depth where a safe point fired this transition (for `Step*` anchoring),
+    // or `None`. A statement safe point and a call-entry safe point never coincide in
+    // one transition (a `Seq`/`ReturnBarrier` step pushes no frame), so at most one fires.
+    let mut safe_point_depth = None;
     if stmt_safe_point {
         limits::safe_point(heap, machine, namespace)?;
+        safe_point_depth = Some(machine.frames.len());
     }
     // A call or block invocation just pushed a frame — a **non-tail** entry (a tail
     // call reuses a frame in place, §11): the call-entry safe point, and the only
@@ -66,8 +80,9 @@ pub(crate) fn step(
     if depth > depth_before {
         limits::safe_point(heap, machine, namespace)?;
         machine.check_stack_depth(depth)?;
+        safe_point_depth = Some(depth);
     }
-    Ok(())
+    Ok(safe_point_depth)
 }
 
 /// Executes one popped continuation — or, when `None`, returns from a drained
