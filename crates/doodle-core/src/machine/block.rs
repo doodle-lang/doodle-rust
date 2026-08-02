@@ -49,7 +49,7 @@ pub(crate) fn is_block_invocation(
     let FrameKind::Callable { cal } = &machine.frames[owner].kind else {
         return false;
     };
-    let info = &resolved.callables[heap.callable(*cal).callable as usize];
+    let info = &resolved.callables[heap.callable(*cal).source_id() as usize];
     info.params.iter().any(|p| p.is_block && p.slot == slot)
 }
 

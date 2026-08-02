@@ -14,7 +14,7 @@ use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::{Halt, Machine, Value, arith, block, call, compare, limits, types, unwind};
-use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
+use crate::ast::{BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use num_bigint::BigInt;
@@ -265,6 +265,23 @@ fn eval(
         Node::BoolLit(b) => Value::Bool(*b),
         Node::NilLit => Value::Nil,
         Node::BytesLit(bytes) => Value::Bytes(heap.alloc_bytes(bytes.as_slice().into())),
+        // A **non-interpolated** string literal allocates its NFC string value. The
+        // decoded text can be non-NFC (e.g. a `\u{301}` combining escape), and every
+        // heap string is NFC (L§4.4), so normalize before allocating. Interpolation
+        // (`{expr}`) needs the L§15 Stringable dispatcher — M4.
+        Node::StrLit(parts) => {
+            if parts.iter().any(|p| matches!(p, StrPart::Interp(_))) {
+                unimplemented!("string interpolation needs the Stringable dispatcher (M4)");
+            }
+            let mut text = String::new();
+            for part in parts {
+                if let StrPart::Text(run) = part {
+                    text.push_str(run);
+                }
+            }
+            let nfc = crate::unicode::nfc(&text).into_owned();
+            Value::Str(heap.alloc_string(nfc.into_boxed_str()))
+        }
         Node::BigIntLit { radix, digits } => {
             let n = BigInt::parse_bytes(digits.as_bytes(), u32::from(*radix))
                 .expect("lexer-validated bignum digits");

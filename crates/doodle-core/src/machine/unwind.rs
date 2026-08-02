@@ -250,7 +250,7 @@ fn do_return(
     }
     let fell_off = match machine.frames[home].kind {
         FrameKind::Callable { cal } => {
-            let id = heap.callable(cal).callable as usize;
+            let id = heap.callable(cal).source_id() as usize;
             resolved.callables[id].kind == BodyKind::Func && value.is_none()
         }
         _ => false,
@@ -261,7 +261,7 @@ fn do_return(
         let FrameKind::Callable { cal } = home_frame.kind else {
             unreachable!("fell_off implies a callable home");
         };
-        let id = heap.callable(cal).callable as usize;
+        let id = heap.callable(cal).source_id() as usize;
         return Err(Raise::new(
             ExceptionKind::FunctionFellOffEnd,
             "this function reached its end without producing a value",
@@ -312,7 +312,7 @@ fn consumer_is_proc(
 ) -> bool {
     match &machine.frames[consumer].kind {
         FrameKind::Callable { cal } => matches!(
-            resolved.callables[heap.callable(*cal).callable as usize].kind,
+            resolved.callables[heap.callable(*cal).source_id() as usize].kind,
             BodyKind::Proc
         ),
         _ => false,

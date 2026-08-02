@@ -20,9 +20,9 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind, Local};
 use super::step::take_value;
-use super::{Machine, Value, block, control, local};
+use super::{Machine, Value, block, control, intrinsic, local};
 use crate::ast::{Arg, Node, NodeId, Param};
-use crate::heap::{CalObj, Heap};
+use crate::heap::{CalObj, CallableTarget, Heap};
 use crate::resolve::{BodyKind, ParamInfo, Resolution, ResolvedModule};
 use crate::span::Span;
 
@@ -137,7 +137,13 @@ fn apply(
             span,
         ));
     };
-    let callable_id = heap.callable(cal).callable as usize;
+    // A host intrinsic foreign function runs its callback **inline** (E§5.2) — it
+    // never becomes a callable frame — so it dispatches here, before any frame or
+    // tail-reuse machinery. A source callable takes the frame path below.
+    if let CallableTarget::Intrinsic(id) = heap.callable(cal).target {
+        return intrinsic::apply(resolved, heap, machine, call, id, arg_values);
+    }
+    let callable_id = heap.callable(cal).source_id() as usize;
     let info = &resolved.callables[callable_id];
     let params = &info.params;
     let body = info.body;
@@ -227,7 +233,7 @@ fn reuses_current_frame(
 ) -> bool {
     match &machine.frames.last().expect("a frame is active").kind {
         FrameKind::Callable { cal } => {
-            resolved.callables[heap.callable(*cal).callable as usize].kind == callee_kind
+            resolved.callables[heap.callable(*cal).source_id() as usize].kind == callee_kind
         }
         FrameKind::Block { .. } | FrameKind::ModuleTopLevel => false,
     }
@@ -366,7 +372,7 @@ pub(crate) fn make_callable(
         .collect();
     let cal = heap.alloc_callable(CalObj {
         module: resolved.canonical_id,
-        callable: callable_id as u32,
+        target: CallableTarget::Source(callable_id as u32),
         captures,
     });
     Value::Callable(cal)
@@ -386,7 +392,7 @@ pub(crate) fn return_from_callable(
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
         FrameKind::Callable { cal } => {
-            let id = heap.callable(cal).callable as usize;
+            let id = heap.callable(cal).source_id() as usize;
             match resolved.callables[id].kind {
                 // A procedure yields no value; discard the body's final transient value.
                 BodyKind::Proc => machine.reg = None,

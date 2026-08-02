@@ -9,30 +9,20 @@
 //! and the overall `=== N passed, N failed, N skipped ===` line, exiting
 //! non-zero only on a FAIL (a mismatch, or a malformed test file).
 //!
-//! As of M2a.12 the machine runs the demo subset, so `mode: run` tests execute
-//! (driving the program, matching `expect-raise`); a run test whose transcript
-//! needs a capability that has not landed yet — `expect-out` needs `print` (M2b) —
-//! still SKIPs, keyed on its expectations rather than the stage scalar.
+//! As of M2b.2 the machine runs the demo subset and the `print` intrinsic is
+//! registered before load (S-43), so `mode: run` tests execute fully — driving the
+//! program and matching both `expect-raise` (the uncaught exception) and `expect-out`
+//! (the captured output). A run test above the implemented stage still SKIPs.
 
 mod directive;
 mod matcher;
 mod model;
 
 use doodle_core::stage::implemented_through;
-use model::{Expectation, Test};
+use model::Test;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-
-/// The name of a not-yet-registered host capability a test's transcript needs, if
-/// any — so the runner skips it (rather than fails it) until that capability lands.
-/// At M2a the only such case is `expect-out`, which needs `print` (M2b).
-fn needed_capability(test: &Test) -> Option<&'static str> {
-    test.expectations
-        .iter()
-        .any(|e| matches!(e, Expectation::Out { .. }))
-        .then_some("print")
-}
 
 fn main() -> ExitCode {
     let root = std::env::args()
@@ -87,11 +77,6 @@ fn run(root: &Path) -> Result<usize, String> {
                 }
                 let stage_ready =
                     implemented_through().is_some_and(|impl_stage| impl_stage >= test.required);
-                // A run test whose transcript needs a not-yet-registered capability
-                // is skipped on its *expectations*, not the stage scalar: `expect-out`
-                // needs `print` (M2b). Keeping this separate from the stage gate lets
-                // raise-only run tests execute now while output tests wait.
-                let needs = needed_capability(&test);
                 let header = format!(
                     "{}  [{}]  mode={:?} stage={:?}",
                     test.id,
@@ -104,9 +89,6 @@ fn run(root: &Path) -> Result<usize, String> {
                         "SKIP  {header}  ({} expectation(s), matched once its stage lands)",
                         test.expectations.len()
                     );
-                    skipped += 1;
-                } else if let Some(capability) = needs {
-                    println!("SKIP  {header}  (needs `{capability}`, arrives at M2b)");
                     skipped += 1;
                 } else {
                     match matcher::execute(&test, &source) {

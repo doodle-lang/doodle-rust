@@ -24,6 +24,7 @@ mod error;
 mod frame;
 mod gc;
 mod handle;
+mod intrinsic;
 mod limits;
 mod local;
 mod ring;
@@ -35,6 +36,7 @@ pub use boundary::{Kind, ValueError};
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
 pub use handle::{Handle, HandleError};
+pub use intrinsic::{HostError, Intrinsic, IntrinsicCtx, Registry, print as print_intrinsic};
 pub(crate) use types::BuiltinType;
 
 use crate::drive::{Config, ConfigError, Limits};
@@ -201,6 +203,14 @@ pub(crate) struct Machine {
     /// root, so a value the host retains survives collection. Lives here (rather than
     /// on the `Instance`) so `gc::collect` roots it alongside the other machine state.
     handles: HandleTable,
+    /// The host-registered intrinsic foreign functions (E§5.1, S-43), frozen at load.
+    /// Consulted when a call's callee is an intrinsic (`call.rs` → `intrinsic::apply`).
+    /// Its inline defaults hold no heap references, so it is not a GC root.
+    intrinsics: intrinsic::Registry,
+    /// The captured output sink (the instance's "standard output"): `print` and other
+    /// output intrinsics append here, and the host reads it via [`Instance::output`].
+    /// Bytes, not heap values — not a GC root.
+    output: Vec<u8>,
 }
 
 impl Machine {
@@ -263,18 +273,33 @@ impl Instance {
     }
 
     /// Loads a resolved module into a fresh `Ready` instance with the
-    /// [`Default`](Limits) resource limits. See [`load_with_limits`](Self::load_with_limits).
+    /// [`Default`](Limits) resource limits and no intrinsics. See [`load_full`](Self::load_full).
     pub fn load(module: ResolvedModule) -> Self {
-        Self::load_with_limits(module, Limits::default())
+        Self::load_full(module, Limits::default(), intrinsic::Registry::new())
+    }
+
+    /// Loads a resolved module under the given resource limits (E§10.2), no
+    /// intrinsics. See [`load_full`](Self::load_full).
+    pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
+        Self::load_full(module, limits, intrinsic::Registry::new())
+    }
+
+    /// Loads a resolved module with host-registered intrinsic foreign functions
+    /// (E§5.1, S-43) and the [`Default`](Limits) limits. `registry` holds the
+    /// intrinsics the host registered **before** this load (E§5.5); they seed as
+    /// read-only global names after the program's declarations and the built-in
+    /// type values, so a program's own declaration of the same name shadows one.
+    pub fn load_with_intrinsics(module: ResolvedModule, registry: intrinsic::Registry) -> Self {
+        Self::load_full(module, Limits::default(), registry)
     }
 
     /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
-    /// under the given resource limits (E§10.2). Each module-level name gets an
-    /// **uninitialized** binding cell (its `let`/`const` fills it when it executes;
-    /// a read before then is a use-before-defined error). The module top level
-    /// becomes an ordinary, drivable `ModuleTopLevel` frame whose pending work
-    /// sequences its statements.
-    pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
+    /// under the given resource limits (E§10.2) and intrinsic registry (S-43). Each
+    /// module-level name gets an **uninitialized** binding cell (its `let`/`const`
+    /// fills it when it executes; a read before then is a use-before-defined error).
+    /// The module top level becomes an ordinary, drivable `ModuleTopLevel` frame
+    /// whose pending work sequences its statements.
+    fn load_full(module: ResolvedModule, limits: Limits, intrinsics: intrinsic::Registry) -> Self {
         debug_assert!(
             matches!(
                 module.ast.node(module.root),
@@ -283,11 +308,13 @@ impl Instance {
             "load: a resolved module's root must be the `Module` node"
         );
         let mut heap = Heap::new();
-        // Module globals first (their `let`/`const`/`to`/`fn` fill their cells in
-        // execution order — the temporal dead zone, M2a.4a), then the built-in
-        // type-value prelude appended after, so a user global of the same name
-        // wins the linear `find_cell` scan (control.rs). Each built-in cell is
-        // seeded (not TDZ) with its type value — these names are always defined.
+        let canonical_id = module.canonical_id;
+        // Namespace order (S-43): module globals first (their `let`/`const`/`to`/`fn`
+        // fill their cells in execution order — the temporal dead zone, M2a.4a), then
+        // the built-in type-value prelude, then the host intrinsics — each later group
+        // appended after, so an earlier binding of the same name wins the linear
+        // `find_cell` scan (control.rs): a user global shadows a type value or an
+        // intrinsic, matching the M5 prelude star-import this seeding will become.
         let mut namespace: Vec<(Box<str>, CellIdx)> = module
             .globals
             .iter()
@@ -296,6 +323,19 @@ impl Instance {
         for &(name, builtin) in types::BUILTINS {
             let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { builtin }));
             namespace.push((name.into(), heap.alloc_cell(Some(ty))));
+        }
+        for (i, intrinsic) in intrinsics.iter().enumerate() {
+            // Each intrinsic interns to one foreign `CalObj` (its registration index is
+            // the `CallableTarget::Intrinsic` id) held by a read-only global cell.
+            let cal = heap.alloc_callable(crate::heap::CalObj {
+                module: canonical_id,
+                target: crate::heap::CallableTarget::Intrinsic(i as u32),
+                captures: Vec::new(),
+            });
+            namespace.push((
+                intrinsic.name.clone(),
+                heap.alloc_cell(Some(Value::Callable(cal))),
+            ));
         }
         // The module top level's construct-body locals may be cell-boxed (a `fn`
         // captured one, §7), so build its slots like any frame — no params, no
@@ -329,6 +369,8 @@ impl Instance {
                 fuel: FusedCounter::new(&limits),
                 gc_threshold: limits::GC_MIN_BYTES,
                 handles: HandleTable::new(),
+                intrinsics,
+                output: Vec::new(),
                 limits,
             },
             namespace,
@@ -346,6 +388,13 @@ impl Instance {
     /// for effect and yields Void.
     pub fn result(&self) -> Option<Value> {
         self.machine.reg
+    }
+
+    /// The instance's captured output — the bytes written by output intrinsics
+    /// (`print`, E§5.2) in execution order. The host's view of "standard output";
+    /// deterministic given deterministic execution (E§11).
+    pub fn output(&self) -> &[u8] {
+        &self.machine.output
     }
 
     /// Interns the current result value as a fresh host handle (engine spec E§4.2),

@@ -3,16 +3,15 @@
 //!
 //! Static stages (`lex`/`parse`/`full`) run the front end and match diagnostics
 //! against `expect-static-error` / `expect-warning` (see [`run_static`]). The `run`
-//! stage (M2a.12) drives the machine and matches `expect-raise` against the uncaught
-//! exception (see [`run_dynamic`]); a run test whose transcript needs `print`
-//! (`expect-out`) is skipped by the caller until M2b, so only `expect-raise` reaches
-//! the run arm here. A run expectation at a static stage (or vice versa) is a
-//! mis-authored test and fails loudly.
+//! stage drives the machine (see [`run_dynamic`]) and matches both `expect-raise`
+//! (the uncaught exception) and `expect-out` (the captured output — the `print`
+//! intrinsic is registered before load, S-43/M2b.2). A run expectation at a static
+//! stage (or vice versa) is a mis-authored test and fails loudly.
 
 use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{Directive, Outcome, run};
-use doodle_core::machine::Instance;
+use doodle_core::machine::{Instance, Registry, print_intrinsic};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::{LineIndex, Position, normalize};
@@ -31,10 +30,9 @@ pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
 }
 
 /// Executes a `mode: run` test: load the program, drive it to completion, and match
-/// its outcome against the test's `expect-raise` expectations (conformance/README.md
-/// § `mode: run`). The caller skips a run test needing an unregistered capability
-/// (any `expect-out`, which needs `print`, M2b), so only `expect-raise` and
-/// clean-completion tests reach here at M2a.
+/// its outcome against the test's `expect-raise` expectations and its captured
+/// output against `expect-out` (conformance/README.md § `mode: run`). The `print`
+/// intrinsic is registered before load (S-43), so `expect-out` tests execute at M2b.
 fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
     let nfc = normalize(source);
     let index = LineIndex::new(nfc.as_ref());
@@ -52,9 +50,57 @@ fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
         return Err(resolve_errors);
     }
 
-    let mut instance = Instance::load(resolved.module);
+    let mut instance = Instance::load_with_intrinsics(resolved.module, demo_registry());
     let outcome = run(&mut instance, Directive::RunToCompletion);
-    match_run_outcome(test, &outcome, nfc.as_ref(), &index)
+    // Check the outcome (raise/completion) and the captured output independently, so
+    // a fixture asserting both, or either alone, gets every mismatch reported.
+    let mut reasons = Vec::new();
+    if let Err(mut e) = match_run_outcome(test, &outcome, nfc.as_ref(), &index) {
+        reasons.append(&mut e);
+    }
+    if let Err(mut e) = match_output(test, instance.output()) {
+        reasons.append(&mut e);
+    }
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(reasons)
+    }
+}
+
+/// The registry the runner drives with: the demo intrinsics a `mode: run` fixture may
+/// use. At M2b that is `print` (S-43); more join as they land.
+fn demo_registry() -> Registry {
+    let mut registry = Registry::new();
+    registry
+        .register(print_intrinsic())
+        .expect("print registers cleanly into a fresh registry");
+    registry
+}
+
+/// Matches captured output against the test's `expect-out` lines. Each `expect-out`
+/// directive is one printed line; `print` emits its argument followed by a newline,
+/// so the expected transcript is the lines each newline-terminated, in order. A run
+/// fixture with **no** `expect-out` expects an **empty** transcript — a program that
+/// prints anything then FAILs (spurious output is a determinism-visible bug,
+/// conformance/README.md), so the empty case is not special-cased away.
+fn match_output(test: &Test, actual: &[u8]) -> Result<(), Vec<String>> {
+    let expected: String = test
+        .expectations
+        .iter()
+        .filter_map(|e| match e {
+            Expectation::Out { text } => Some(format!("{text}\n")),
+            _ => None,
+        })
+        .collect();
+    let actual = String::from_utf8_lossy(actual);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(vec![format!(
+            "expected output {expected:?}, got {actual:?}"
+        )])
+    }
 }
 
 /// The messages of every error-severity diagnostic (empty when the load is clean).
