@@ -163,10 +163,8 @@ impl HandleTable {
         Ok(())
     }
 
-    /// The value a handle names, with the boundary generation check (E§4.2). Typed
-    /// host readers (`as_int`, `kind_of`, …) build on this at M2b; at M2a it is the
-    /// reader the handle tests use, so it is test-only until then.
-    #[cfg(test)]
+    /// The value a handle names, with the boundary generation check (E§4.2). The
+    /// typed host readers (`as_int`, `kind_of`, …, `machine/boundary.rs`) build on it.
     pub(crate) fn resolve(&self, handle: Handle) -> Result<Value, HandleError> {
         let index = self.live_index(handle)?;
         let Slot::Occupied { value, .. } = &self.slots[index] else {

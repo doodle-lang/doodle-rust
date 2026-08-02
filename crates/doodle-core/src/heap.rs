@@ -273,6 +273,16 @@ impl Heap {
         self.lists.get(idx.0)
     }
 
+    /// Appends `value` to the list at `idx`, charging one value width so a growing
+    /// list cannot escape the heap limit (the accounting-integrity rule that is why
+    /// there is no raw `&mut ListObj` accessor — see the module header). This is the
+    /// accounting-aware mutator the boundary `list_append` (E§4.3) and list literals
+    /// build on.
+    pub fn list_push(&mut self, idx: ListIdx, value: Value) {
+        self.bytes_allocated += VALUE_BYTES;
+        self.lists.get_mut(idx.0).items.push(value);
+    }
+
     /// Borrows the bignum at `idx`.
     pub fn bigint(&self, idx: BigIntIdx) -> &BigIntObj {
         self.bigints.get(idx.0)
@@ -404,6 +414,25 @@ mod tests {
             heap.bytes_allocated(),
             4 + 3 + 2 * VALUE_BYTES + 3 * OBJECT_OVERHEAD
         );
+    }
+
+    #[test]
+    fn list_push_charges_one_value_width_and_the_sweep_reclaims_it_exactly() {
+        let mut heap = Heap::new();
+        let l = heap.alloc_list(Vec::new()); // empty: overhead only
+        assert_eq!(heap.bytes_allocated(), OBJECT_OVERHEAD);
+        // Each in-place append charges exactly one value width, so a list that grows
+        // element-by-element cannot escape the heap limit (the accounting-integrity
+        // rule the module header names — without this, a growing list stays "free").
+        heap.list_push(l, Value::Int(1));
+        heap.list_push(l, Value::Int(2));
+        assert_eq!(heap.bytes_allocated(), OBJECT_OVERHEAD + 2 * VALUE_BYTES);
+        // The sweep subtracts `list_payload` (= items.len() * VALUE_BYTES), so the
+        // pushes' charge and the reclamation must agree: with no roots the list is
+        // garbage and the heap returns to empty (a mismatch trips the sweep's
+        // `freed <= bytes_allocated` assert or leaves a nonzero residue).
+        heap.collect(|_| {});
+        assert_eq!(heap.bytes_allocated(), 0);
     }
 
     #[test]

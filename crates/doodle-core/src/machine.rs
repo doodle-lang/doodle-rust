@@ -15,6 +15,7 @@
 
 mod arith;
 mod block;
+mod boundary;
 mod call;
 mod compare;
 mod cont;
@@ -30,6 +31,7 @@ mod step;
 mod types;
 mod unwind;
 
+pub use boundary::{Kind, ValueError};
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
 pub use handle::{Handle, HandleError};
