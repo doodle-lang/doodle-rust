@@ -9,10 +9,10 @@
 //! closure), its direct/cell-boxed `locals`, and the `Value`s stashed in its
 //! continuations. Plus the register, the unwind record's carried value, the ring's
 //! callables, the **host handle table** (§16, M2a.11), and every namespace binding
-//! cell. A frame's `block_param`, `Block` static link, and `Consumer` hold frame
-//! indices/serials — not heap references — so they root nothing. Roots that join
-//! later as their state lands: the dynamic-parameter stack (M4), and
-//! suspended-capability args + the drive stack (M2b).
+//! cell, plus a **parked capability request**'s bound arguments while `Suspended`
+//! (§14, M2b.4). A frame's `block_param`, `Block` static link, and `Consumer` hold
+//! frame indices/serials — not heap references — so they root nothing. Roots that join
+//! later as their state lands: the dynamic-parameter stack (M4) and the drive stack (M2b.5).
 
 use super::Machine;
 use super::control::Namespace;
@@ -57,6 +57,13 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine, namespace: &Namespace)
         }
         for (_, cell) in namespace {
             tracer.cell(*cell);
+        }
+        // A parked capability request's bound arguments (§14): reachable while the
+        // instance is `Suspended`, so a collection at that safe point keeps them alive.
+        if let Some(pending) = &machine.pending {
+            for value in &pending.args {
+                tracer.value(*value);
+            }
         }
     });
 }

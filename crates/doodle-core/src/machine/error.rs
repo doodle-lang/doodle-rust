@@ -60,6 +60,11 @@ pub enum ExceptionKind {
     /// it cannot — an `fn` whose tail call turns out, at run time, to be a
     /// procedure (the fn-tail-`to` case, S-55).
     FunctionFellOffEnd,
+    /// A host `resolve(Raise)` rejected a suspending-capability call (E§7.5): the host
+    /// signalled the capability failed. **Provisional (M2b.4):** the host-raised value
+    /// is rendered into the message; carrying it as the exception value `rescue` binds
+    /// arrives with exceptions-as-values (M4, E§9).
+    HostRaised,
 }
 
 /// A Doodle exception reaching a drive boundary (E§9).

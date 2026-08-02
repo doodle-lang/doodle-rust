@@ -6,8 +6,12 @@
 //! so they double as the "drive-directive determinism" check (E§7.7): the same
 //! program reaches the same terminal under a step-through as under a fast run.
 
-use doodle_core::drive::{Directive, EngineFault, LimitKind, Limits, Outcome, resolve, run};
-use doodle_core::machine::{Instance, InstanceState};
+use doodle_core::drive::{
+    CapabilityId, Directive, EngineFault, LimitKind, Limits, Outcome, Resolution, resolve, run,
+};
+use doodle_core::machine::{
+    Instance, InstanceState, Registry, print_intrinsic, read_line_intrinsic,
+};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
 use doodle_core::source::normalize;
@@ -38,6 +42,32 @@ fn load(src: &str, limits: Limits) -> Instance {
         resolved.diagnostics
     );
     Instance::load_with_limits(resolved.module, limits)
+}
+
+/// Loads `src` with the `print` and `read_line` intrinsics registered — `print`
+/// (index 0) is a synchronous `to`, `read_line` (index 1) a suspending `fn` capability.
+fn instance_with_caps(src: &str) -> Instance {
+    use doodle_core::diag::Severity;
+    let nfc = normalize(src);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = resolve_module(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let mut registry = Registry::new();
+    registry.register(print_intrinsic()).unwrap();
+    registry.register(read_line_intrinsic()).unwrap();
+    Instance::load_with_intrinsics(resolved.module, registry)
 }
 
 /// Drives `inst` to a terminal outcome under a fixed `directive`, re-driving past each
@@ -143,6 +173,88 @@ fn stepping_through_reaches_the_same_terminal_as_a_fast_run() {
     assert!(matches!(fast_outcome, Outcome::Completed(None)));
     assert!(matches!(step_outcome, Outcome::Completed(None)));
     assert_eq!(fast.state(), stepped.state());
+}
+
+// ---- suspending capabilities (M2b.4) ----
+
+#[test]
+fn a_capability_suspends_with_its_identity_and_resolves_with_a_value() {
+    // `read_line()` suspends; the request names read_line's capability id (registry
+    // index 1 — print is 0) and carries no args. Resolving with a value makes it the
+    // call's result, which `print` then emits.
+    let mut inst = instance_with_caps("print(read_line())\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let Outcome::Suspended(request) = outcome else {
+        panic!("expected Suspended, got {outcome:?}");
+    };
+    assert_eq!(request.capability, CapabilityId(1));
+    assert!(request.args.is_empty());
+    assert_eq!(inst.state(), InstanceState::Suspended);
+
+    let line = inst.make_string(b"hello").unwrap();
+    let resumed = resolve(&mut inst, Resolution::Value(line));
+    assert!(matches!(resumed, Outcome::Completed(None)), "{resumed:?}");
+    assert_eq!(inst.output(), b"hello\n");
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn a_capability_resolved_with_a_raise_surfaces_raised() {
+    let mut inst = instance_with_caps("print(read_line())\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    let reason = inst.make_string(b"end of input").unwrap();
+    let outcome = resolve(&mut inst, Resolution::Raise(reason));
+    assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
+    assert_eq!(inst.state(), InstanceState::Raised);
+    // The host rejected the call, so `print` never ran.
+    assert_eq!(inst.output(), b"");
+}
+
+#[test]
+fn resolving_with_a_stale_handle_faults_terminally() {
+    // A stale resolution handle is a host-contract violation: the drive returns
+    // Faulted AND the instance is left terminally Faulted (not a resumable Suspended
+    // half-state) — a Faulted outcome always implies state() == Faulted (E§3.3).
+    let mut inst = instance_with_caps("print(read_line())\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    let stale = inst.make_int(0);
+    inst.release(stale).unwrap(); // now names a freed slot
+    let outcome = resolve(&mut inst, Resolution::Value(stale));
+    assert!(matches!(outcome, Outcome::Faulted(_)), "{outcome:?}");
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn a_scripted_capability_replays_to_the_same_terminal() {
+    // Replay determinism (E§11): the same program + the same resolution sequence
+    // reconstructs the same output/terminal on a fresh instance.
+    fn drive_with_line(line: &[u8]) -> (Vec<u8>, bool) {
+        let mut inst = instance_with_caps("print(read_line())\nprint(read_line())\n");
+        // Start with `run`; every subsequent Suspended is continued with `resolve`.
+        let mut outcome = run(&mut inst, Directive::RunToCompletion);
+        loop {
+            match outcome {
+                Outcome::Suspended(_) => {
+                    let h = inst.make_string(line).unwrap();
+                    outcome = resolve(&mut inst, Resolution::Value(h));
+                }
+                Outcome::Completed(_) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        (
+            inst.output().to_vec(),
+            inst.state() == InstanceState::Completed,
+        )
+    }
+    assert_eq!(drive_with_line(b"x"), drive_with_line(b"x"));
+    assert_eq!(drive_with_line(b"x").0, b"x\nx\n");
 }
 
 #[test]

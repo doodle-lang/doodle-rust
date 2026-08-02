@@ -153,12 +153,24 @@ pub enum ConfigError {
     },
 }
 
-/// A capability request carried by [`Outcome::Suspended`] (engine spec E§7.5).
-///
-/// Shell for M0: the capability identity and its bound argument handles are
-/// added when foreign-function registration lands (E§5, M2b).
-#[derive(Clone, Copy, Debug)]
-pub struct CapabilityRequest;
+/// Identifies the registered capability a [`CapabilityRequest`] is for (engine spec
+/// E§7.5). Its value is the capability's registration index — **stable across runs**
+/// (S-43 registration order is replay-identity input), so a host matches a request to
+/// the capability it registered and a recording replays deterministically (E§11).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct CapabilityId(pub u32);
+
+/// A capability request carried by [`Outcome::Suspended`] (engine spec E§7.5): which
+/// capability was called and its bound arguments as **host-owned** handles (S-17 — the
+/// host reads them and must [`release`](Instance::release) them). The host fulfils the
+/// request and continues with [`resolve`].
+#[derive(Clone, Debug)]
+pub struct CapabilityRequest {
+    /// Which registered capability was called.
+    pub capability: CapabilityId,
+    /// Its bound arguments (positional order), each a fresh host-owned handle.
+    pub args: Vec<Handle>,
+}
 
 /// How a host resolves a [`Suspended`](Outcome::Suspended) capability (E§7.3): the
 /// value the capability produced (which becomes the call's result) or an exception to
@@ -203,32 +215,52 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
     drive(instance, directive)
 }
 
-/// Continues a `Suspended` `instance` with the host's `resolution` (E§7.3).
-///
-/// The suspend→resolve resume path (injecting the value / raising at the parked call
-/// site) lands with suspending capabilities at **M2b.4**; at M2b.3 nothing suspends,
-/// so this only enforces the phase guard: `resolve` on an instance with no pending
-/// suspension is a host-contract violation (debug-asserted; `Faulted(Internal)` in
-/// release).
+/// Continues a `Suspended` `instance` with the host's `resolution` (E§7.3/§7.5): the
+/// value the capability produced becomes the call's result and the drive resumes under
+/// the directive in force; a raise surfaces at the capability call site (leaving the
+/// instance `Raised`). `resolve` on an instance with no pending suspension is a
+/// host-contract violation (debug-asserted; `Faulted(Internal)` in release).
 pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
-    let _ = resolution;
     debug_assert!(
         matches!(instance.state(), InstanceState::Suspended),
         "resolve() requires a Suspended instance (got {:?}); it continues a pending \
          capability request (E§7.3/§7.5)",
         instance.state()
     );
-    // No capability can suspend yet (M2b.4), so there is never a pending request to
-    // resolve; the guard makes the misuse loud rather than silently proceeding.
-    Outcome::Faulted(EngineFault::Internal)
+    if !matches!(instance.state(), InstanceState::Suspended) {
+        return Outcome::Faulted(EngineFault::Internal);
+    }
+    match resolution {
+        // The capability's value becomes the call's result; resume the drive so the
+        // caller's waiting continuation consumes it, under the directive in force.
+        Resolution::Value(handle) => match instance.resume_with_value(handle) {
+            Ok(()) => drive(instance, instance.resume_directive()),
+            // A stale resolution handle is a host-contract violation (a non-resumable
+            // engine fault): the suspension was cleared, so leave the instance terminally
+            // `Faulted` — a `Faulted` outcome always implies `state() == Faulted` (E§3.3).
+            Err(_) => fault(instance),
+        },
+        // The host rejected the capability: raise at its call site. No handlers yet
+        // (`try`/`rescue` is M4), so it reaches the boundary → the terminal `Raised`
+        // state (E§3.3), like any uncaught raise.
+        Resolution::Raise(handle) => match instance.resume_with_raise(handle) {
+            Ok((exception, trace)) => {
+                instance.set_state(InstanceState::Raised);
+                Outcome::Raised(exception, trace)
+            }
+            Err(_) => fault(instance),
+        },
+    }
 }
 
 /// The core drive loop: steps `instance` to a stopping [`Outcome`] under `directive`,
-/// pausing a `Step*` at the next matching safe point. Shared by [`run`] (and, at
-/// M2b.4, the resume side of [`resolve`]).
+/// pausing a `Step*` at the next matching safe point and suspending at a capability
+/// call. Shared by [`run`] and the resume side of [`resolve`].
 fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
-    // Anchor `Step*` depth judgments at the frame depth we resume from (E§8.5).
+    // Anchor `Step*` depth judgments at the frame depth we resume from (E§8.5), and
+    // remember the directive so a `resolve` after a suspend resumes under it (E§7.3).
     let anchor_depth = instance.frame_depth();
+    instance.set_directive(directive);
     instance.set_state(InstanceState::Running);
     loop {
         if instance.is_halted() {
@@ -240,6 +272,13 @@ fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
         }
         match instance.step() {
             Ok(safe_point) => {
+                // A capability call parked a request (E§7.5, MD §14): suspend, no state
+                // torn down. Checked before the pause decision (they cannot coincide —
+                // a capability call is not a statement-level safe point).
+                if instance.is_suspended() {
+                    instance.set_state(InstanceState::Suspended);
+                    return Outcome::Suspended(instance.capability_request());
+                }
                 if let Some(depth) = safe_point
                     && should_pause(directive, anchor_depth, depth)
                 {
@@ -262,6 +301,14 @@ fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
             }
         }
     }
+}
+
+/// Terminally faults `instance` on a host-contract violation (e.g. a stale resolution
+/// handle): sets the state to `Faulted` so a returned `Faulted` outcome always implies
+/// `state() == Faulted` (E§3.3 outcome↔state correspondence).
+fn fault(instance: &mut Instance) -> Outcome {
+    instance.set_state(InstanceState::Faulted);
+    Outcome::Faulted(EngineFault::Internal)
 }
 
 /// Whether a safe point at frame `depth` stops the given `directive`, anchored at the

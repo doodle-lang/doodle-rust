@@ -4,6 +4,7 @@
 //! the result register directly (which the integration tests in `tests/` cannot).
 
 use super::*;
+use crate::span::ModuleId;
 
 /// Builds an instance from Doodle source through the real front end, asserting
 /// the program loads clean (no lex/parse/resolve diagnostics).

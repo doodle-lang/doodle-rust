@@ -29,6 +29,21 @@ use crate::heap::Heap;
 use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
 use crate::span::Span;
 
+/// A parked capability request (engine spec E§7.5, MD §14): a call to a **suspending
+/// capability** reached `apply`, so the machine stores the capability's identity + its
+/// bound arguments here and the drive loop returns `Suspended`. **No state is torn
+/// down** — the caller's continuation waits for the result the host supplies via
+/// `resolve`. A GC root while parked (its `args` stay reachable, MD §15).
+pub(crate) struct PendingRequest {
+    /// The capability's identity — its registry index, stable across runs so
+    /// resolutions record and replay (E§7.5/§11, S-43 registration order).
+    pub capability: u32,
+    /// The bound argument values, in parameter order (surfaced to the host as handles).
+    pub args: Vec<Value>,
+    /// The capability call site, for the `resolve(Raise)` trace.
+    pub span: Span,
+}
+
 /// A parameter of an intrinsic foreign function (E§5.1). Its `default`, if present,
 /// is an **inline** value (no heap reference — the registry is built before the heap
 /// exists); a heap-backed foreign default is deferred to S-42/M7.
@@ -52,9 +67,21 @@ pub(crate) struct ForeignParam {
 /// not hand-written callbacks — the general host-callback FFI is the C ABI (M7).
 pub(crate) type IntrinsicFn = fn(&mut IntrinsicCtx) -> Result<Option<Value>, Raise>;
 
+/// How a foreign function is fulfilled (engine spec E§5.1): a **synchronous** callback
+/// run inline (§5.2), or a **suspending capability** that yields to the host (§5.3).
+#[derive(Clone, Debug)]
+pub(crate) enum ForeignBody {
+    /// Run the callback inline and continue (E§5.2).
+    Sync(IntrinsicFn),
+    /// Suspend: park a capability request and return `Suspended`; the host supplies the
+    /// result via `resolve` (E§5.3/§7.5). The capability identity is the registry index.
+    Capability,
+}
+
 /// A registered intrinsic foreign function (E§5.1): its name, kind (`to`/`fn`),
-/// parameters, and callback. Opaque to hosts — built via an engine-provided
-/// constructor like [`print`] and handed to [`Registry::register`].
+/// parameters, and body (a synchronous callback or a suspending capability). Opaque to
+/// hosts — built via an engine-provided constructor like [`print`]/[`read_line`] and
+/// handed to [`Registry::register`].
 #[derive(Clone, Debug)]
 pub struct Intrinsic {
     /// The global name it is seeded under.
@@ -65,8 +92,8 @@ pub struct Intrinsic {
     pub(crate) kind: BodyKind,
     /// Ordinary parameters, then at most one trailing block parameter (L§8.2).
     pub(crate) params: Vec<ForeignParam>,
-    /// The host callback.
-    pub(crate) callback: IntrinsicFn,
+    /// The synchronous callback or suspending-capability body.
+    pub(crate) body: ForeignBody,
 }
 
 /// Why registering an intrinsic failed (a host-API error, E§5.5/§5.1 S-43). Loud by
@@ -122,6 +149,12 @@ impl Registry {
     fn get(&self, id: u32) -> &Intrinsic {
         &self.intrinsics[id as usize]
     }
+
+    /// The kind (`to`/`fn`) of the capability at index `id` — read on `resolve` to
+    /// decide whether the resolution value becomes the call's result or a `to`'s Void.
+    pub(crate) fn kind_of(&self, id: u32) -> BodyKind {
+        self.intrinsics[id as usize].kind
+    }
 }
 
 /// The activation of a synchronous intrinsic call (E§5.2): the bound arguments, the
@@ -136,10 +169,12 @@ pub struct IntrinsicCtx<'a> {
     pub output: &'a mut Vec<u8>,
 }
 
-/// Applies an intrinsic call inline (E§5.2): binds the call-site arguments to the
-/// intrinsic's parameters (L§8.3), invokes the callback, and leaves its result in the
-/// register (`None` = Void for a `to`). Called from [`call::apply`](super::call) when
-/// the callee is a [`CallableTarget::Intrinsic`](crate::heap::CallableTarget).
+/// Applies an intrinsic call (E§5.1): binds the call-site arguments to the intrinsic's
+/// parameters (L§8.3), then either runs a **synchronous** callback inline and leaves its
+/// result in the register (`None` = Void for a `to`, E§5.2), or **suspends** — parking a
+/// capability request the drive loop surfaces as `Suspended` (E§5.3/§7.5). Called from
+/// [`call::apply`](super::call) when the callee is a
+/// [`CallableTarget::Intrinsic`](crate::heap::CallableTarget).
 pub(crate) fn apply(
     resolved: &ResolvedModule,
     heap: &mut Heap,
@@ -149,10 +184,10 @@ pub(crate) fn apply(
     arg_values: Vec<Value>,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(call);
-    // Read the callback (Copy) and the binding shape out of the registry first, so the
+    // Read the body (Copy) and the binding shape out of the registry first, so the
     // registry borrow ends before the callback mutates the output sink below.
     let intrinsic = machine.intrinsics.get(id);
-    let callback = intrinsic.callback;
+    let body = intrinsic.body.clone();
     let kind = intrinsic.kind;
     let has_block_param = intrinsic.params.iter().any(|p| p.is_block);
     let args = bind_foreign_arguments(resolved, call, &intrinsic.params, &arg_values, span)?;
@@ -171,19 +206,34 @@ pub(crate) fn apply(
         ));
     }
 
-    let mut ctx = IntrinsicCtx {
-        args: &args,
-        heap,
-        output: &mut machine.output,
-    };
-    let result = callback(&mut ctx)?;
-    debug_assert!(
-        kind != BodyKind::Func || result.is_some(),
-        "a `fn` intrinsic must return a value"
-    );
-    // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
-    machine.reg = if kind == BodyKind::Proc { None } else { result };
-    Ok(())
+    match body {
+        ForeignBody::Sync(callback) => {
+            let mut ctx = IntrinsicCtx {
+                args: &args,
+                heap,
+                output: &mut machine.output,
+            };
+            let result = callback(&mut ctx)?;
+            debug_assert!(
+                kind != BodyKind::Func || result.is_some(),
+                "a `fn` intrinsic must return a value"
+            );
+            // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
+            machine.reg = if kind == BodyKind::Proc { None } else { result };
+            Ok(())
+        }
+        // Suspend (E§5.3/§7.5, MD §14): park the request; the drive loop returns
+        // `Suspended`. No state is torn down — the caller's continuation waits, and
+        // `resolve` supplies the result (or a raise). The register is left untouched.
+        ForeignBody::Capability => {
+            machine.pending = Some(PendingRequest {
+                capability: id,
+                args,
+                span,
+            });
+            Ok(())
+        }
+    }
 }
 
 /// Binds call-site arguments to an intrinsic's ordinary parameters (L§8.3), returning
@@ -254,12 +304,24 @@ pub fn print() -> Intrinsic {
             default: None,
             is_block: false,
         }],
-        callback: |ctx| {
+        body: ForeignBody::Sync(|ctx| {
             let text = render(ctx.heap, ctx.args[0]);
             ctx.output.extend_from_slice(text.as_bytes());
             ctx.output.push(b'\n');
             Ok(None)
-        },
+        }),
+    }
+}
+
+/// The demo suspending capability `read_line` (E§5.3, §7.5): a `fn` taking no arguments
+/// that **suspends** — the host supplies the line via `resolve(Value)` (or fails it via
+/// `resolve(Raise)`). The canonical scripted capability for the M2b drive tests.
+pub fn read_line() -> Intrinsic {
+    Intrinsic {
+        name: "read_line".into(),
+        kind: BodyKind::Func,
+        params: Vec::new(),
+        body: ForeignBody::Capability,
     }
 }
 
@@ -268,8 +330,9 @@ pub fn print() -> Intrinsic {
 /// must be **deterministic** (E§11): integers/bignums render exactly, floats use a
 /// fixed shortest-round-trip format, and no address/ordering leaks in. Compound
 /// values (list/bytes/records/…) get a provisional angle-bracket tag until the real
-/// dispatcher lands.
-fn render(heap: &Heap, value: Value) -> String {
+/// dispatcher lands. Crate-visible so `resolve(Raise)` can render a host-raised value
+/// into its message (`machine.rs`).
+pub(crate) fn render(heap: &Heap, value: Value) -> String {
     match value {
         Value::Nil => "nil".to_string(),
         Value::Bool(true) => "true".to_string(),
@@ -314,7 +377,7 @@ mod tests {
             name: "answer".into(),
             kind: BodyKind::Func,
             params: Vec::new(),
-            callback: |_ctx| Ok(Some(Value::Int(42))),
+            body: ForeignBody::Sync(|_ctx| Ok(Some(Value::Int(42)))),
         }
     }
 
@@ -368,7 +431,7 @@ mod tests {
             name: "Int".into(),
             kind: BodyKind::Func,
             params: Vec::new(),
-            callback: |_| Ok(Some(Value::Nil)),
+            body: ForeignBody::Sync(|_| Ok(Some(Value::Nil))),
         };
         assert_eq!(
             r.register(shadow_int),

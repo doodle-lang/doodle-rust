@@ -31,126 +31,30 @@ mod ring;
 mod step;
 mod types;
 mod unwind;
+mod value;
 
 pub use boundary::{Kind, ValueError};
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
 pub use handle::{Handle, HandleError};
-pub use intrinsic::{HostError, Intrinsic, IntrinsicCtx, Registry, print as print_intrinsic};
+pub use intrinsic::{
+    HostError, Intrinsic, IntrinsicCtx, Registry, print as print_intrinsic,
+    read_line as read_line_intrinsic,
+};
 pub(crate) use types::BuiltinType;
+pub use value::{
+    BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
+};
 
-use crate::drive::{Config, ConfigError, Limits};
+use crate::drive::{Config, ConfigError, Directive, Limits};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
-use crate::span::ModuleId;
 use crate::unicode::{UNICODE_VERSION, UnicodeVersion};
 use cont::Cont;
 use frame::Frame;
 use handle::HandleTable;
 use limits::FusedCounter;
 use std::sync::Arc;
-
-macro_rules! heap_index {
-    ($($name:ident: $doc:literal,)+) => {
-        $(
-            #[doc = $doc]
-            #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-            pub struct $name(pub u32);
-        )+
-    };
-}
-
-heap_index! {
-    BigIntIdx: "Index of a heap bignum in the bigint slab (machine-design §4).",
-    StrIdx: "Index of a string in the string slab (machine-design §4).",
-    BytesIdx: "Index of a byte string in the bytes slab (machine-design §4).",
-    ListIdx: "Index of a list in the list slab (machine-design §4).",
-    DictIdx: "Index of a dict in the dict slab (machine-design §4).",
-    RecIdx: "Index of a record in the record slab (machine-design §4).",
-    CalIdx: "Index of a callable in the callable slab (machine-design §4).",
-    TypeIdx: "Index of a type value in the type slab (machine-design §4).",
-    FrnIdx: "Index of a foreign value in the foreign slab (machine-design §4).",
-}
-
-/// Index of a binding **cell** in the shared cells slab (machine-design §6/§7).
-/// A cell is a machine-internal box — a module binding or (later) a closure
-/// upvalue — **not** a `Value` variant, so it has no place in the `Value`-oriented
-/// index macro above.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct CellIdx(pub u32);
-
-/// A Doodle value (language spec L§4) in the machine's `Copy` representation
-/// (machine-design §3).
-///
-/// Heap-backed variants hold a `u32` slab index (machine-design §4), never a
-/// Rust reference. **No `PartialEq`**: value equality is the semantic function
-/// of L§4.13 (structural, cycle-safe, cross-numeric-kind), implemented
-/// explicitly when the machine core lands; a derived bitwise `==` would be a
-/// footgun. `Void` (the L§6.11 procedure-result sentinel) is deliberately not a
-/// variant — the result register is `Option<Value>` with `None` = Void, so a
-/// Void can never be stored into a data structure by construction.
-#[derive(Clone, Copy, Debug)]
-pub enum Value {
-    /// `nil` (L§4.9).
-    Nil,
-    /// A boolean (L§4.1).
-    Bool(bool),
-    /// A machine-word integer — the small-int fast path (L§4.2).
-    Int(i64),
-    /// A heap bignum, for integers outside `i64` range (L§4.2).
-    BigInt(BigIntIdx),
-    /// A double-precision float (L§4.3).
-    Float(f64),
-    /// A string (L§4.4).
-    Str(StrIdx),
-    /// A byte string (L§4.5).
-    Bytes(BytesIdx),
-    /// A list (L§4.6).
-    List(ListIdx),
-    /// A dict (L§4.7).
-    Dict(DictIdx),
-    /// A record — value or reference; the heap header says which (L§4.14).
-    Record(RecIdx),
-    /// A callable: `to`, `fn`, or lambda (L§6).
-    Callable(CalIdx),
-    /// A module value (L§9).
-    Module(ModuleId),
-    /// A type value: built-in types, record types, and protocols (L§10, L§11).
-    Type(TypeIdx),
-    /// A foreign (host) value (engine spec E§4.5).
-    Foreign(FrnIdx),
-}
-
-impl Value {
-    /// Returns the integer if this is an `Int`, else `None`.
-    pub fn as_int(self) -> Option<i64> {
-        match self {
-            Value::Int(n) => Some(n),
-            _ => None,
-        }
-    }
-
-    /// Returns the boolean if this is a `Bool`, else `None`.
-    pub fn as_bool(self) -> Option<bool> {
-        match self {
-            Value::Bool(b) => Some(b),
-            _ => None,
-        }
-    }
-
-    /// Returns the float if this is a `Float`, else `None`.
-    pub fn as_float(self) -> Option<f64> {
-        match self {
-            Value::Float(x) => Some(x),
-            _ => None,
-        }
-    }
-
-    /// Whether this value is `Nil`.
-    pub fn is_nil(self) -> bool {
-        matches!(self, Value::Nil)
-    }
-}
 
 /// The lifecycle state of an [`Instance`] (engine spec E§3.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -226,6 +130,13 @@ pub(crate) struct Machine {
     /// output intrinsics append here, and the host reads it via [`Instance::output`].
     /// Bytes, not heap values — not a GC root.
     output: Vec<u8>,
+    /// The parked capability request while the instance is `Suspended` (E§7.5, MD §14);
+    /// `None` in normal execution. Set by a capability call's `apply` (`intrinsic.rs`)
+    /// and consumed by `resolve` (`drive.rs`). Its `args` are GC roots while parked.
+    pending: Option<intrinsic::PendingRequest>,
+    /// The directive the current drive runs under, remembered across a suspend so
+    /// `resolve` resumes under the same directive (E§7.3).
+    directive: Directive,
 }
 
 impl Machine {
@@ -386,6 +297,8 @@ impl Instance {
                 handles: HandleTable::new(),
                 intrinsics,
                 output: Vec::new(),
+                pending: None,
+                directive: Directive::RunToCompletion,
                 limits,
             },
             namespace,
@@ -410,6 +323,87 @@ impl Instance {
     /// deterministic given deterministic execution (E§11).
     pub fn output(&self) -> &[u8] {
         &self.machine.output
+    }
+
+    /// Whether the instance has parked a capability request — it is mid-suspension
+    /// (E§7.5). The drive loop checks this after each step to return `Suspended`.
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.machine.pending.is_some()
+    }
+
+    /// Records the directive the current drive runs under, for a later `resolve` to
+    /// resume under it (E§7.3).
+    pub(crate) fn set_directive(&mut self, directive: Directive) {
+        self.machine.directive = directive;
+    }
+
+    /// The directive to resume a suspended drive under (E§7.3).
+    pub(crate) fn resume_directive(&self) -> Directive {
+        self.machine.directive
+    }
+
+    /// Builds the capability request for the parked suspension (E§7.5): the capability
+    /// identity and its bound arguments as fresh **host-owned** handles (S-17 — the
+    /// host releases them). Leaves the pending request in place (consumed by `resolve`).
+    pub(crate) fn capability_request(&mut self) -> crate::drive::CapabilityRequest {
+        let (capability, values) = {
+            let pending = self.machine.pending.as_ref().expect("a parked request");
+            (pending.capability, pending.args.clone())
+        };
+        let args = values
+            .into_iter()
+            .map(|value| self.machine.handles.intern(value))
+            .collect();
+        crate::drive::CapabilityRequest {
+            capability: crate::drive::CapabilityId(capability),
+            args,
+        }
+    }
+
+    /// Resolves a suspension with the host's value (E§7.5): sets the register to it (or
+    /// Void for a `to` capability), clears the pending request. `resolve` then resumes
+    /// the drive so the caller's continuation consumes the result.
+    pub(crate) fn resume_with_value(&mut self, handle: Handle) -> Result<(), HandleError> {
+        // Take the pending request first, so a stale resolution handle (a host-contract
+        // violation) still clears the suspension — the drive then faults it terminally
+        // rather than leaving a resumable half-state (`resolve`, E§3.3).
+        let pending = self.machine.pending.take().expect("a parked request");
+        let value = self.machine.handles.resolve(handle)?;
+        // A `to` capability yields Void regardless of the resolution value (E§7.5).
+        self.machine.reg = if self.machine.intrinsics.kind_of(pending.capability)
+            == crate::resolve::BodyKind::Proc
+        {
+            None
+        } else {
+            Some(value)
+        };
+        Ok(())
+    }
+
+    /// Resolves a suspension with a host raise (E§7.5): clears the pending request and
+    /// builds the exception + trace to surface as `Raised` at the capability call site.
+    /// **Provisional (M2b.4):** the host-raised value is rendered into the message; the
+    /// value-carrying exception that `rescue` binds arrives with exceptions-as-values
+    /// (M4, E§9). Errors on a stale handle.
+    pub(crate) fn resume_with_raise(
+        &mut self,
+        handle: Handle,
+    ) -> Result<(Exception, Trace), HandleError> {
+        // Take the pending request first (see `resume_with_value`): a stale handle must
+        // still clear the suspension so the drive can fault it terminally.
+        let pending = self.machine.pending.take().expect("a parked request");
+        let value = self.machine.handles.resolve(handle)?;
+        let rendered = intrinsic::render(&self.heap, value);
+        let exception = Exception {
+            kind: ExceptionKind::HostRaised,
+            message: format!("a capability call was rejected by the host: {rendered}"),
+        };
+        Ok((
+            exception,
+            Trace {
+                raised_at: Some(pending.span),
+            },
+        ))
     }
 
     /// Interns the current result value as a fresh host handle (engine spec E§4.2),
