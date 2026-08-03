@@ -150,6 +150,16 @@ pub(crate) enum Cont {
         /// The index of the argument now in the register.
         index: u32,
     },
+    /// A list literal's element at `index` is now in the register: stash it, then
+    /// evaluate the next element or allocate the list once the last is in (L§4.6).
+    ListGotElem {
+        /// The `List` literal node.
+        list: NodeId,
+        /// The element values evaluated so far, in order.
+        values: Vec<Value>,
+        /// The index of the element now in the register.
+        index: u32,
+    },
     /// A parameter default's value is now in the register: write it into the
     /// callee frame's slot (defaults are evaluated in the callee activation, L§8.2).
     BindDefault {
@@ -193,6 +203,7 @@ impl Cont {
                 values.iter().copied().for_each(&mut f);
             }
             Cont::BlockGotArg { values, .. } => values.iter().copied().for_each(f),
+            Cont::ListGotElem { values, .. } => values.iter().copied().for_each(f),
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
             | Cont::Eval { .. }

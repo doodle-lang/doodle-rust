@@ -69,7 +69,11 @@ pub(crate) fn safe_point(
     // fault) — whichever is lower. Then re-arm the threshold at the survivors' next
     // doubling (floored at GC_MIN_BYTES), so a large *live* set is not swept every
     // safe point.
-    if heap.bytes_allocated() > machine.gc_threshold.min(machine.limits.heap_bytes) {
+    // (In a GC-stress test, `gc_every_safe_point` collects unconditionally — the re-arm
+    // is then irrelevant, the flag overrides it at the next safe point.)
+    if machine.gc_every_safe_point
+        || heap.bytes_allocated() > machine.gc_threshold.min(machine.limits.heap_bytes)
+    {
         gc::collect(heap, machine, namespace);
         machine.gc_threshold = heap
             .bytes_allocated()

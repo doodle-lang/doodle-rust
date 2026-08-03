@@ -70,7 +70,13 @@ pub(crate) enum Consumer {
         /// The invoking frame's `serial` (integrity check).
         serial: u64,
     },
-    // `TailReused` (M2a.7) and `Native { drive_depth }` (§14/M2b) join later.
+    /// A **native** consumer (E§5.4/§7.6, MD §14): the block was invoked by a native
+    /// block-consuming function through a reentrant drive, so its consumer is on the
+    /// far side of the host boundary — there is no consumer *frame*. At M2b.5a a
+    /// `break`/`return` reaching it raises (not yet supported); M2b.5b adds the
+    /// boundary depth here and makes it the S-46 `NonLocalExit` transfer.
+    Native,
+    // `TailReused` (M2a.7) joins later.
 }
 
 /// A bound `do name` block parameter (machine-design §8/§10): a machine-internal

@@ -25,6 +25,7 @@ mod frame;
 mod gc;
 mod handle;
 mod intrinsic;
+mod lifecycle;
 mod limits;
 mod local;
 mod ring;
@@ -38,7 +39,7 @@ pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace};
 pub use handle::{Handle, HandleError};
 pub use intrinsic::{
-    HostError, Intrinsic, IntrinsicCtx, Registry, print as print_intrinsic,
+    HostError, Intrinsic, IntrinsicCtx, Registry, each as each_intrinsic, print as print_intrinsic,
     read_line as read_line_intrinsic,
 };
 pub(crate) use types::BuiltinType;
@@ -46,7 +47,7 @@ pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };
 
-use crate::drive::{Config, ConfigError, Directive, Limits};
+use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::unicode::{UNICODE_VERSION, UnicodeVersion};
@@ -55,6 +56,16 @@ use frame::Frame;
 use handle::HandleTable;
 use limits::FusedCounter;
 use std::sync::Arc;
+
+/// The maximum **reentrant-drive nesting depth** (MD §14). Each level runs a nested
+/// drive on the host's Rust stack (~10 KB/level), so this caps native recursion well
+/// below the smallest realistic host stack (~1 MiB): a program that recurses through a
+/// native block-consumer faults with `StackDepth` here rather than overflowing the Rust
+/// stack (which would abort the host process). A **provisional** flat bound — a
+/// stack-size-aware or host-configured reentrancy limit is future work (M3/M7, when the
+/// wasm/C-ABI host stack sizes are known); a genuinely-deep native `each`/`map` nest of
+/// this magnitude is pathological, so no real program trips it.
+const MAX_REENTRY_DEPTH: u32 = 64;
 
 /// The lifecycle state of an [`Instance`] (engine spec E§3.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,6 +148,29 @@ pub(crate) struct Machine {
     /// The directive the current drive runs under, remembered across a suspend so
     /// `resolve` resumes under the same directive (E§7.3).
     directive: Directive,
+    /// A fault raised **inside a reentrant nested drive** (a limit tripped while a
+    /// native block-consumer ran its block, or the deferred S-15 nested-suspend), parked
+    /// here because the Raise-typed intrinsic `apply` chain cannot carry an
+    /// `EngineFault`. `step` surfaces it as its `Err(Halt::Fault)` after the outer
+    /// transition returns. `None` in normal execution.
+    reentry_fault: Option<EngineFault>,
+    /// The bound arguments of **in-flight synchronous foreign calls** (MD §15): while a
+    /// callback runs — and, for a native block-consumer, while its reentrant nested drive
+    /// runs and may collect — its arguments are held only on the host's Rust stack, so
+    /// they are rooted here (a flat stack; a call pushes on entry and pops on return) or
+    /// a collection during the nested drive would free them.
+    foreign_roots: Vec<Value>,
+    /// The current **reentrant-drive nesting depth** (MD §14): each reentrant block
+    /// invocation (`intrinsic::invoke_block`) runs a nested drive on the **host's Rust
+    /// stack**, so a program that recurses through a native block-consumer grows the Rust
+    /// stack, not just `frames`. This bounds that recursion below the Rust stack limit so
+    /// it faults with `StackDepth` rather than overflowing the native stack (a host abort).
+    reentry_depth: u32,
+    /// GC-stress test knob (machine-design §15): when set, `safe_point` collects at
+    /// **every** safe point — including those inside a reentrant nested drive — so a test
+    /// can force a collection at the exact window a value is rooted only transiently
+    /// (e.g. a native `each`'s list via `foreign_roots`). Always `false` in production.
+    gc_every_safe_point: bool,
 }
 
 impl Machine {
@@ -145,6 +179,41 @@ impl Machine {
         let serial = self.frame_serial;
         self.frame_serial += 1;
         serial
+    }
+
+    /// Takes any fault parked by a reentrant nested drive (`step` surfaces it, MD §14).
+    pub(crate) fn take_reentry_fault(&mut self) -> Option<EngineFault> {
+        self.reentry_fault.take()
+    }
+
+    /// Roots the arguments of an entering synchronous foreign call (MD §15), returning
+    /// the prior stack length to [`pop_foreign_roots`](Self::pop_foreign_roots) on return.
+    pub(crate) fn push_foreign_roots(&mut self, values: &[Value]) -> usize {
+        let base = self.foreign_roots.len();
+        self.foreign_roots.extend_from_slice(values);
+        base
+    }
+
+    /// Un-roots a returning foreign call's arguments (truncating to `base`).
+    pub(crate) fn pop_foreign_roots(&mut self, base: usize) {
+        self.foreign_roots.truncate(base);
+    }
+
+    /// Whether entering another reentrant drive would exceed the native-stack nesting
+    /// bound (MD §14) — a program recursing through a native block-consumer must fault,
+    /// not overflow the Rust stack.
+    pub(crate) fn reentry_would_overflow(&self) -> bool {
+        self.reentry_depth >= MAX_REENTRY_DEPTH
+    }
+
+    /// Enters a reentrant drive (increments the nesting depth); pair with [`exit_reentry`].
+    pub(crate) fn enter_reentry(&mut self) {
+        self.reentry_depth += 1;
+    }
+
+    /// Leaves a reentrant drive (decrements the nesting depth).
+    pub(crate) fn exit_reentry(&mut self) {
+        self.reentry_depth -= 1;
     }
 
     /// Records a tail-elided frame in the ring (machine-design §11).
@@ -217,6 +286,17 @@ impl Instance {
     /// type values, so a program's own declaration of the same name shadows one.
     pub fn load_with_intrinsics(module: ResolvedModule, registry: intrinsic::Registry) -> Self {
         Self::load_full(module, Limits::default(), registry)
+    }
+
+    /// Loads a resolved module with host-registered intrinsics (S-43) under the given
+    /// resource limits (E§10.2) — [`load_with_intrinsics`](Self::load_with_intrinsics)
+    /// and [`load_with_limits`](Self::load_with_limits) combined.
+    pub fn load_with_intrinsics_and_limits(
+        module: ResolvedModule,
+        limits: Limits,
+        registry: intrinsic::Registry,
+    ) -> Self {
+        Self::load_full(module, limits, registry)
     }
 
     /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
@@ -299,6 +379,10 @@ impl Instance {
                 output: Vec::new(),
                 pending: None,
                 directive: Directive::RunToCompletion,
+                reentry_fault: None,
+                foreign_roots: Vec::new(),
+                reentry_depth: 0,
+                gc_every_safe_point: false,
                 limits,
             },
             namespace,
@@ -323,87 +407,6 @@ impl Instance {
     /// deterministic given deterministic execution (E§11).
     pub fn output(&self) -> &[u8] {
         &self.machine.output
-    }
-
-    /// Whether the instance has parked a capability request — it is mid-suspension
-    /// (E§7.5). The drive loop checks this after each step to return `Suspended`.
-    pub(crate) fn is_suspended(&self) -> bool {
-        self.machine.pending.is_some()
-    }
-
-    /// Records the directive the current drive runs under, for a later `resolve` to
-    /// resume under it (E§7.3).
-    pub(crate) fn set_directive(&mut self, directive: Directive) {
-        self.machine.directive = directive;
-    }
-
-    /// The directive to resume a suspended drive under (E§7.3).
-    pub(crate) fn resume_directive(&self) -> Directive {
-        self.machine.directive
-    }
-
-    /// Builds the capability request for the parked suspension (E§7.5): the capability
-    /// identity and its bound arguments as fresh **host-owned** handles (S-17 — the
-    /// host releases them). Leaves the pending request in place (consumed by `resolve`).
-    pub(crate) fn capability_request(&mut self) -> crate::drive::CapabilityRequest {
-        let (capability, values) = {
-            let pending = self.machine.pending.as_ref().expect("a parked request");
-            (pending.capability, pending.args.clone())
-        };
-        let args = values
-            .into_iter()
-            .map(|value| self.machine.handles.intern(value))
-            .collect();
-        crate::drive::CapabilityRequest {
-            capability: crate::drive::CapabilityId(capability),
-            args,
-        }
-    }
-
-    /// Resolves a suspension with the host's value (E§7.5): sets the register to it (or
-    /// Void for a `to` capability), clears the pending request. `resolve` then resumes
-    /// the drive so the caller's continuation consumes the result.
-    pub(crate) fn resume_with_value(&mut self, handle: Handle) -> Result<(), HandleError> {
-        // Take the pending request first, so a stale resolution handle (a host-contract
-        // violation) still clears the suspension — the drive then faults it terminally
-        // rather than leaving a resumable half-state (`resolve`, E§3.3).
-        let pending = self.machine.pending.take().expect("a parked request");
-        let value = self.machine.handles.resolve(handle)?;
-        // A `to` capability yields Void regardless of the resolution value (E§7.5).
-        self.machine.reg = if self.machine.intrinsics.kind_of(pending.capability)
-            == crate::resolve::BodyKind::Proc
-        {
-            None
-        } else {
-            Some(value)
-        };
-        Ok(())
-    }
-
-    /// Resolves a suspension with a host raise (E§7.5): clears the pending request and
-    /// builds the exception + trace to surface as `Raised` at the capability call site.
-    /// **Provisional (M2b.4):** the host-raised value is rendered into the message; the
-    /// value-carrying exception that `rescue` binds arrives with exceptions-as-values
-    /// (M4, E§9). Errors on a stale handle.
-    pub(crate) fn resume_with_raise(
-        &mut self,
-        handle: Handle,
-    ) -> Result<(Exception, Trace), HandleError> {
-        // Take the pending request first (see `resume_with_value`): a stale handle must
-        // still clear the suspension so the drive can fault it terminally.
-        let pending = self.machine.pending.take().expect("a parked request");
-        let value = self.machine.handles.resolve(handle)?;
-        let rendered = intrinsic::render(&self.heap, value);
-        let exception = Exception {
-            kind: ExceptionKind::HostRaised,
-            message: format!("a capability call was rejected by the host: {rendered}"),
-        };
-        Ok((
-            exception,
-            Trace {
-                raised_at: Some(pending.span),
-            },
-        ))
     }
 
     /// Interns the current result value as a fresh host handle (engine spec E§4.2),
@@ -464,6 +467,14 @@ impl Instance {
     #[cfg(test)]
     pub(crate) fn force_collect(&mut self) {
         gc::collect(&mut self.heap, &self.machine, &self.namespace);
+    }
+
+    /// Makes every safe point collect (machine-design §15) — including those inside a
+    /// reentrant nested drive, which the between-`step` `force_collect` idiom cannot
+    /// reach — so a GC-stress test can collect at a transiently-rooted window.
+    #[cfg(test)]
+    pub(crate) fn collect_at_every_safe_point(&mut self) {
+        self.machine.gc_every_safe_point = true;
     }
 
     /// The number of live heap objects across all slabs (for GC tests).

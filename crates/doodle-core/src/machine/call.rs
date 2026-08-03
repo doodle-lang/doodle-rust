@@ -56,6 +56,7 @@ pub(crate) fn got_callee(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
+    namespace: &control::Namespace,
     call: NodeId,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(call);
@@ -76,16 +77,19 @@ pub(crate) fn got_callee(
             frame.conts.push(Cont::Eval { node: first_expr });
             Ok(())
         }
-        None => apply(resolved, heap, machine, call, callee, Vec::new()),
+        None => apply(resolved, heap, machine, namespace, call, callee, Vec::new()),
     }
 }
 
 /// The argument at `index` is now in the register: stash it, then evaluate the
-/// next argument or apply once the last is in.
+/// next argument or apply once the last is in. (The parameters mirror the
+/// `CallGotArg` continuation's fields plus the standard step context.)
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn got_arg(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
+    namespace: &control::Namespace,
     call: NodeId,
     callee: Value,
     mut values: Vec<Value>,
@@ -110,7 +114,7 @@ pub(crate) fn got_arg(
             frame.conts.push(Cont::Eval { node: next_expr });
             Ok(())
         }
-        None => apply(resolved, heap, machine, call, callee, values),
+        None => apply(resolved, heap, machine, namespace, call, callee, values),
     }
 }
 
@@ -125,6 +129,7 @@ fn apply(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
+    namespace: &control::Namespace,
     call: NodeId,
     callee: Value,
     arg_values: Vec<Value>,
@@ -141,7 +146,7 @@ fn apply(
     // never becomes a callable frame — so it dispatches here, before any frame or
     // tail-reuse machinery. A source callable takes the frame path below.
     if let CallableTarget::Intrinsic(id) = heap.callable(cal).target {
-        return intrinsic::apply(resolved, heap, machine, call, id, arg_values);
+        return intrinsic::apply(resolved, heap, machine, namespace, call, id, arg_values);
     }
     let callable_id = heap.callable(cal).source_id() as usize;
     let info = &resolved.callables[callable_id];

@@ -1002,8 +1002,8 @@ fn gc_stress_determinism_gate_over_limit_faults() {
     }
 }
 
-/// Loads `src` with the `print` intrinsic registered, so a test can observe whether
-/// a side-effecting call has run (via captured output).
+/// Loads `src` with the `print` and `each` intrinsics registered, so a test can observe
+/// a side-effecting call (via captured output) and drive a native block-consumer.
 fn load_source_with_print(src: &str) -> Instance {
     use crate::diag::Severity;
     let nfc = crate::source::normalize(src);
@@ -1024,7 +1024,26 @@ fn load_source_with_print(src: &str) -> Instance {
     );
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
+    registry.register(each_intrinsic()).unwrap();
     Instance::load_with_intrinsics(resolved.module, registry)
+}
+
+#[test]
+fn each_keeps_heap_valued_elements_rooted_across_collection() {
+    // Collect at EVERY safe point — including those **inside** `each`'s reentrant drive,
+    // where the list of strings is rooted only by `foreign_roots` (MD §15). (A
+    // between-`step` `force_collect` cannot reach them: the whole `each` runs within one
+    // top-level step.) If that rooting were removed, the strings would be swept mid-drive
+    // and `print` would read freed memory; the output proves they survive.
+    let mut inst = load_source_with_print("each([\"a\", \"b\", \"c\"]) do (x)\nprint(x)\nend\n");
+    inst.collect_at_every_safe_point();
+    let mut steps = 0;
+    while !inst.is_halted() {
+        inst.step().expect("unexpected raise under forced GC");
+        steps += 1;
+        assert!(steps < 100_000, "each did not halt");
+    }
+    assert_eq!(inst.output(), b"a\nb\nc\n");
 }
 
 #[test]

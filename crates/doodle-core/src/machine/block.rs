@@ -198,6 +198,53 @@ fn block_apply(
     Ok(())
 }
 
+/// Invokes a received block from a **native** block-consuming function (E§5.4/§7.6,
+/// MD §14): binds `arg_values` positionally to the block's parameters and pushes a
+/// [`FrameKind::Block`] frame whose consumer is the native `boundary` (there is no
+/// consumer frame — the consumer is across the host boundary). The reentrant nested
+/// drive ([`intrinsic::invoke_block`](super::intrinsic)) then runs this frame. Block
+/// parameters have no defaults, so the count must match exactly.
+pub(crate) fn invoke_native(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    desc: BlockDescriptor,
+    arg_values: &[Value],
+    span: Span,
+) -> Result<(), Raise> {
+    let block_id = desc.callable as usize;
+    let block_info = &resolved.callables[block_id];
+    if arg_values.len() != block_info.params.len() {
+        return Err(Raise::new(
+            ExceptionKind::ArgumentError,
+            format!(
+                "this block takes {} argument(s), but was invoked with {}",
+                block_info.params.len(),
+                arg_values.len()
+            ),
+            span,
+        ));
+    }
+    let mut slots = vec![None; block_info.slot_count as usize];
+    for (pi, &val) in block_info.params.iter().zip(arg_values) {
+        slots[pi.slot as usize] = Some(val);
+    }
+    let body = block_info.body;
+    // A block does not capture (static links, §7); its own locals may still be
+    // cell-boxed (a nested `fn` captured one), so build slots.
+    let locals = local::build(resolved, heap, block_id, &slots, &[]);
+    let serial = machine.next_frame_serial();
+    machine.frames.push(Frame::block(
+        desc.defining,
+        desc.defining_serial,
+        Consumer::Native,
+        locals,
+        body,
+        serial,
+    ));
+    Ok(())
+}
+
 /// Builds the [`BlockDescriptor`] for a call's trailing `do … end` argument and
 /// checks it against the callee's parameters (§8.3/§8.5): a block argument to a
 /// callee with no block parameter, or a missing block argument for a callee that

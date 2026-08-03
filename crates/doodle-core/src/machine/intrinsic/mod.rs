@@ -22,9 +22,12 @@
 //! value (the registry is built before the heap exists, so it can hold no heap ref).
 
 use super::call::bind_arguments;
+use super::control::Namespace;
 use super::error::{ExceptionKind, Raise};
-use super::{Machine, Value};
-use crate::ast::{Node, NodeId};
+use super::frame::BlockDescriptor;
+use super::{Halt, Machine, Value, block, step};
+use crate::ast::NodeId;
+use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
 use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
 use crate::span::Span;
@@ -157,16 +160,127 @@ impl Registry {
     }
 }
 
-/// The activation of a synchronous intrinsic call (E§5.2): the bound arguments, the
-/// heap (to read them), and the instance's output sink. Reentrant driving and block
-/// invocation join here at M2b.5.
+/// The activation of a synchronous intrinsic call (E§5.2, MD §14): the bound
+/// arguments, the machine/heap state (to read arguments, emit output, and drive a
+/// received block **reentrantly**), and the received block argument, if any. Fields
+/// are private; a callback reaches them through the crate-internal methods.
 pub struct IntrinsicCtx<'a> {
+    resolved: &'a ResolvedModule,
+    heap: &'a mut Heap,
+    machine: &'a mut Machine,
+    namespace: &'a Namespace,
+    args: Vec<Value>,
+    block: Option<BlockDescriptor>,
+    call_span: Span,
+}
+
+/// The outcome of one reentrant block invocation ([`IntrinsicCtx::invoke_block`]).
+pub(crate) enum BlockResult {
+    /// The block completed (fell off its end, or `continue`d). Its yielded value is in
+    /// the register; M2b.5a's only consumer (`each`) discards it (a value-carrying
+    /// payload for a `map`-style consumer joins later).
+    Completed,
+    /// The nested drive parked a fault (a limit tripped inside it, or the deferred
+    /// S-15 nested-suspend): the caller must stop; `step` will surface the fault.
+    Halted,
+}
+
+impl IntrinsicCtx<'_> {
     /// The bound argument values, in parameter order.
-    pub args: &'a [Value],
+    pub(crate) fn args(&self) -> &[Value] {
+        &self.args
+    }
+
     /// The heap, for reading argument values (e.g. a string's bytes).
-    pub heap: &'a Heap,
-    /// The instance's captured output (host stdout); `print` appends here.
-    pub output: &'a mut Vec<u8>,
+    pub(crate) fn heap(&self) -> &Heap {
+        self.heap
+    }
+
+    /// The call site's span, for a diagnostic a callback raises.
+    pub(crate) fn span(&self) -> Span {
+        self.call_span
+    }
+
+    /// Appends `bytes` to the instance's captured output (`print`'s sink).
+    pub(crate) fn emit(&mut self, bytes: &[u8]) {
+        self.machine.output.extend_from_slice(bytes);
+    }
+
+    /// Invokes this intrinsic's received block **reentrantly** with `args` (E§5.4/§7.6,
+    /// MD §14): pushes the block frame at a native boundary and runs a nested drive on
+    /// the shared heap stack to the block's completion. Returns the block's yielded
+    /// value ([`BlockResult::Completed`]), propagates a raise (`Err`), or reports a
+    /// parked fault ([`BlockResult::Halted`]). **M2b.5a:** a `break`/`return` that exits
+    /// the block *across* this native boundary is not yet supported — it raises
+    /// [`ExceptionKind::Unsupported`] pending the S-46 `NonLocalExit` mechanism (M2b.5b).
+    pub(crate) fn invoke_block(&mut self, args: Vec<Value>) -> Result<BlockResult, Raise> {
+        // A reentrant drive nests on the host's Rust stack (MD §14): bound the depth so a
+        // program recursing through this native consumer faults (`StackDepth`) rather than
+        // overflowing the native stack. Park the fault and return `Halted` (like a nested
+        // limit) so the callback stops without pushing a deeper frame.
+        if self.machine.reentry_would_overflow() {
+            self.machine.reentry_fault = Some(EngineFault::LimitExceeded(LimitKind::StackDepth));
+            return Ok(BlockResult::Halted);
+        }
+        self.machine.enter_reentry();
+        let result = self.invoke_block_inner(args);
+        self.machine.exit_reentry();
+        result
+    }
+
+    /// The reentrant nested-drive loop (guarded by [`invoke_block`]).
+    fn invoke_block_inner(&mut self, args: Vec<Value>) -> Result<BlockResult, Raise> {
+        let desc = self
+            .block
+            .expect("invoke_block: this intrinsic received no block");
+        let block_span = self
+            .resolved
+            .ast
+            .span(self.resolved.callables[desc.callable as usize].decl);
+        let boundary = self.machine.frames.len();
+        block::invoke_native(
+            self.resolved,
+            self.heap,
+            self.machine,
+            desc,
+            &args,
+            block_span,
+        )?;
+        loop {
+            // The block frame (and anything it pushed) drained back to the boundary.
+            if self.machine.frames.len() <= boundary {
+                return match self.machine.unwind {
+                    None => Ok(BlockResult::Completed),
+                    // A `break`/`return` reached the native boundary — S-46 (M2b.5b).
+                    Some(_) => {
+                        self.machine.unwind = None;
+                        Err(Raise::new(
+                            ExceptionKind::Unsupported,
+                            "a `break`/`return` out of a native block-consuming function is not \
+                             yet supported (S-46, arrives at M2b.5b)",
+                            block_span,
+                        ))
+                    }
+                };
+            }
+            match step::step(self.resolved, self.heap, self.machine, self.namespace) {
+                Ok(_) => {
+                    // A capability suspended inside the nested drive — S-15 (M3).
+                    // Deferred: clear it and fault the drive.
+                    if self.machine.pending.is_some() {
+                        self.machine.pending = None;
+                        self.machine.reentry_fault = Some(EngineFault::Internal);
+                        return Ok(BlockResult::Halted);
+                    }
+                }
+                Err(Halt::Raise(raise)) => return Err(raise),
+                Err(Halt::Fault(fault)) => {
+                    self.machine.reentry_fault = Some(fault);
+                    return Ok(BlockResult::Halted);
+                }
+            }
+        }
+    }
 }
 
 /// Applies an intrinsic call (E§5.1): binds the call-site arguments to the intrinsic's
@@ -179,47 +293,55 @@ pub(crate) fn apply(
     resolved: &ResolvedModule,
     heap: &mut Heap,
     machine: &mut Machine,
+    namespace: &Namespace,
     call: NodeId,
     id: u32,
     arg_values: Vec<Value>,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(call);
     // Read the body (Copy) and the binding shape out of the registry first, so the
-    // registry borrow ends before the callback mutates the output sink below.
+    // registry borrow ends before the callback mutates the machine below.
     let intrinsic = machine.intrinsics.get(id);
     let body = intrinsic.body.clone();
     let kind = intrinsic.kind;
-    let has_block_param = intrinsic.params.iter().any(|p| p.is_block);
+    let param_infos = param_infos(&intrinsic.params);
     let args = bind_foreign_arguments(resolved, call, &intrinsic.params, &arg_values, span)?;
-
-    // Parity with source callables (block.rs): a `do … end` block passed to a callee
-    // that takes no block argument raises. Intrinsic block parameters are invoked
-    // reentrantly (M2b.5), so at M2b.2 no intrinsic has one and any block reaches this.
-    let Node::Call { block, .. } = resolved.ast.node(call) else {
-        unreachable!("intrinsic::apply over a non-Call node");
-    };
-    if block.is_some() && !has_block_param {
-        return Err(Raise::new(
-            ExceptionKind::ArgumentError,
-            "this call passes a `do … end` block, but the callee takes no block",
-            span,
-        ));
-    }
+    // Bind the `do … end` block argument to the intrinsic's block parameter, checking
+    // consistency (§8.3/§8.5) — reusing the source-callable path: a block passed to a
+    // block-less intrinsic raises, and a block parameter with no block raises. `each`
+    // (M2b.5) receives a block here and invokes it reentrantly (`invoke_block`).
+    let block = block::bind_block_argument(resolved, machine, call, &param_infos, span)?;
 
     match body {
         ForeignBody::Sync(callback) => {
-            let mut ctx = IntrinsicCtx {
-                args: &args,
-                heap,
-                output: &mut machine.output,
+            // Root the call's arguments while the callback runs (MD §15): a native
+            // block-consumer's reentrant drive may collect, and the args are otherwise
+            // held only on the Rust stack. Popped on return (including on a raise).
+            let root_base = machine.push_foreign_roots(&args);
+            let result = {
+                let mut ctx = IntrinsicCtx {
+                    resolved,
+                    heap,
+                    machine,
+                    namespace,
+                    args,
+                    block,
+                    call_span: span,
+                };
+                callback(&mut ctx)
             };
-            let result = callback(&mut ctx)?;
-            debug_assert!(
-                kind != BodyKind::Func || result.is_some(),
-                "a `fn` intrinsic must return a value"
-            );
-            // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
-            machine.reg = if kind == BodyKind::Proc { None } else { result };
+            machine.pop_foreign_roots(root_base);
+            let result = result?;
+            // A reentrant nested drive may have parked a fault (`invoke_block`); `step`
+            // surfaces it, so do not overwrite it with a spurious result.
+            if machine.reentry_fault.is_none() {
+                debug_assert!(
+                    kind != BodyKind::Func || result.is_some(),
+                    "a `fn` intrinsic must return a value"
+                );
+                // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
+                machine.reg = if kind == BodyKind::Proc { None } else { result };
+            }
             Ok(())
         }
         // Suspend (E§5.3/§7.5, MD §14): park the request; the drive loop returns
@@ -236,6 +358,21 @@ pub(crate) fn apply(
     }
 }
 
+/// The [`ParamInfo`] view of an intrinsic's parameters (slot = index), for the shared
+/// argument- and block-binding helpers.
+fn param_infos(params: &[ForeignParam]) -> Vec<ParamInfo> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ParamInfo {
+            name: p.name.clone(),
+            slot: i as u16,
+            is_block: p.is_block,
+            has_default: p.default.is_some(),
+        })
+        .collect()
+}
+
 /// Binds call-site arguments to an intrinsic's ordinary parameters (L§8.3), returning
 /// the values in parameter order. Reuses [`bind_arguments`] for the positional/
 /// keyword/too-many/unknown-keyword/duplicate logic (parity with Doodle calls), then
@@ -248,22 +385,9 @@ fn bind_foreign_arguments(
     arg_values: &[Value],
     span: Span,
 ) -> Result<Vec<Value>, Raise> {
-    debug_assert!(
-        !params.iter().any(|p| p.is_block),
-        "a foreign block parameter is invoked reentrantly (M2b.5), not bound as a value"
-    );
     // ParamInfo drives `bind_arguments`; slot = parameter index, so `slots` comes back
     // in parameter order.
-    let param_infos: Vec<ParamInfo> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| ParamInfo {
-            name: p.name.clone(),
-            slot: i as u16,
-            is_block: p.is_block,
-            has_default: p.default.is_some(),
-        })
-        .collect();
+    let param_infos = param_infos(params);
     let (slots, filled) = bind_arguments(
         resolved,
         call,
@@ -274,6 +398,11 @@ fn bind_foreign_arguments(
     )?;
     let mut args = Vec::with_capacity(params.len());
     for (i, p) in params.iter().enumerate() {
+        // The trailing block parameter is bound separately (invoked reentrantly, MD §14),
+        // never as an ordinary value here.
+        if p.is_block {
+            continue;
+        }
         let value = match slots[i] {
             Some(v) => v,
             None => match (filled[i], p.default) {
@@ -305,9 +434,60 @@ pub fn print() -> Intrinsic {
             is_block: false,
         }],
         body: ForeignBody::Sync(|ctx| {
-            let text = render(ctx.heap, ctx.args[0]);
-            ctx.output.extend_from_slice(text.as_bytes());
-            ctx.output.push(b'\n');
+            let text = render(ctx.heap(), ctx.args()[0]);
+            ctx.emit(text.as_bytes());
+            ctx.emit(b"\n");
+            Ok(None)
+        }),
+    }
+}
+
+/// The demo native block-consuming intrinsic `each` (E§5.4/§7.6, MD §14): a `to` taking
+/// a `List` and a trailing block, invoking the block **reentrantly** once per element
+/// (exit criterion 4). A raise inside the block propagates; a `break`/`return` out of it
+/// is M2b.5b (S-46). The first native higher-order primitive — the shape `repeat`/`map`
+/// take, and proof a native consumer is expressible over the reentrant-drive API.
+pub fn each() -> Intrinsic {
+    Intrinsic {
+        name: "each".into(),
+        kind: BodyKind::Proc,
+        params: vec![
+            ForeignParam {
+                name: "list".into(),
+                default: None,
+                is_block: false,
+            },
+            ForeignParam {
+                name: "body".into(),
+                default: None,
+                is_block: true,
+            },
+        ],
+        body: ForeignBody::Sync(|ctx| {
+            let Value::List(idx) = ctx.args()[0] else {
+                return Err(Raise::new(
+                    ExceptionKind::TypeMismatch,
+                    "`each` needs a list to iterate",
+                    ctx.span(),
+                ));
+            };
+            // Iterate a **fixed count** (the length at entry) over the live heap list —
+            // which stays rooted through `each`'s `foreign_roots` entry (MD §15), so the
+            // block's reentrant drive may collect. The fixed count bounds a block that
+            // appends; `.get` guards a block that shrinks the list.
+            let count = ctx.heap().list(idx).items.len();
+            for i in 0..count {
+                let Some(&element) = ctx.heap().list(idx).items.get(i) else {
+                    break; // the block shrank the list past here
+                };
+                match ctx.invoke_block(vec![element])? {
+                    // The block completed (or `continue`d): go to the next element.
+                    BlockResult::Completed => {}
+                    // A nested fault was parked (a limit inside the block, or S-15): stop;
+                    // `step` surfaces it after this call returns.
+                    BlockResult::Halted => break,
+                }
+            }
             Ok(None)
         }),
     }
@@ -365,134 +545,4 @@ fn render_float(x: f64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::drive::{Directive, Outcome, run};
-    use crate::machine::Instance;
-    use crate::span::ModuleId;
-
-    /// An `fn` intrinsic returning `42`, for testing value-yielding foreign calls.
-    fn answer() -> Intrinsic {
-        Intrinsic {
-            name: "answer".into(),
-            kind: BodyKind::Func,
-            params: Vec::new(),
-            body: ForeignBody::Sync(|_ctx| Ok(Some(Value::Int(42)))),
-        }
-    }
-
-    /// Loads `src` (which must load clean) with `registry`, driving it to completion
-    /// and returning the instance so the caller can read its output/outcome.
-    fn run_with(src: &str, registry: Registry) -> (Instance, Outcome) {
-        use crate::diag::Severity;
-        let nfc = crate::source::normalize(src);
-        let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
-        assert!(
-            !parsed
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == Severity::Error),
-            "parse error(s): {:?}",
-            parsed.diagnostics
-        );
-        let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
-        assert!(
-            resolved.diagnostics.is_empty(),
-            "resolve diagnostic(s): {:?}",
-            resolved.diagnostics
-        );
-        let mut inst = Instance::load_with_intrinsics(resolved.module, registry);
-        let outcome = run(&mut inst, Directive::RunToCompletion);
-        (inst, outcome)
-    }
-
-    fn registry_with(intrinsics: Vec<Intrinsic>) -> Registry {
-        let mut r = Registry::new();
-        for i in intrinsics {
-            r.register(i).unwrap();
-        }
-        r
-    }
-
-    #[test]
-    fn register_rejects_a_duplicate_name() {
-        let mut r = Registry::new();
-        r.register(print()).unwrap();
-        assert_eq!(
-            r.register(print()),
-            Err(HostError::DuplicateIntrinsic("print".into()))
-        );
-    }
-
-    #[test]
-    fn register_rejects_a_builtin_type_value_name() {
-        let mut r = Registry::new();
-        let shadow_int = Intrinsic {
-            name: "Int".into(),
-            kind: BodyKind::Func,
-            params: Vec::new(),
-            body: ForeignBody::Sync(|_| Ok(Some(Value::Nil))),
-        };
-        assert_eq!(
-            r.register(shadow_int),
-            Err(HostError::CollidesWithBuiltin("Int".into()))
-        );
-    }
-
-    #[test]
-    fn print_renders_its_argument_and_appends_a_newline() {
-        let (inst, outcome) = run_with("print(1 + 2)\n", registry_with(vec![print()]));
-        assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
-        assert_eq!(inst.output(), b"3\n");
-    }
-
-    #[test]
-    fn print_renders_each_demo_scalar_kind() {
-        let (inst, _) = run_with(
-            "print(nil)\nprint(true)\nprint(-7)\nprint(1.5)\nprint(\"hi\")\n",
-            registry_with(vec![print()]),
-        );
-        assert_eq!(inst.output(), b"nil\ntrue\n-7\n1.5\nhi\n");
-    }
-
-    #[test]
-    fn an_fn_intrinsic_yields_a_value_the_call_consumes() {
-        let (inst, _) = run_with("print(answer())\n", registry_with(vec![print(), answer()]));
-        assert_eq!(inst.output(), b"42\n");
-    }
-
-    #[test]
-    fn a_user_declaration_shadows_an_intrinsic() {
-        // The program declares its own `print` (a no-op `to`), so the intrinsic never
-        // runs — a user global is found first in the namespace scan (S-43 order).
-        let (inst, outcome) = run_with(
-            "to print(x)\nx\nend\nprint(\"hi\")\n",
-            registry_with(vec![print()]),
-        );
-        assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
-        assert_eq!(inst.output(), b"", "the intrinsic print was shadowed");
-    }
-
-    #[test]
-    fn a_missing_argument_raises() {
-        let (_, outcome) = run_with("print()\n", registry_with(vec![print()]));
-        assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
-    }
-
-    #[test]
-    fn a_block_passed_to_a_block_less_intrinsic_raises() {
-        // Parity with a source callable that takes no block (block.rs): passing a
-        // `do … end` to `print` raises rather than silently dropping the block.
-        let (_, outcome) = run_with("print(1) do\n1\nend\n", registry_with(vec![print()]));
-        assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
-    }
-
-    #[test]
-    fn a_to_intrinsic_result_used_as_a_value_raises() {
-        // `print` is a `to` (Void); consuming its result in an expression raises at
-        // the consuming site (the runtime Void backstop — the resolver's static
-        // voidcheck only knows current-module `to`s, not intrinsics).
-        let (_, outcome) = run_with("print(1) + 1\n", registry_with(vec![print()]));
-        assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
-    }
-}
+mod tests;

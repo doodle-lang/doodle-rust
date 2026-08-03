@@ -10,7 +10,7 @@ use doodle_core::drive::{
     CapabilityId, Directive, EngineFault, LimitKind, Limits, Outcome, Resolution, resolve, run,
 };
 use doodle_core::machine::{
-    Instance, InstanceState, Registry, print_intrinsic, read_line_intrinsic,
+    Instance, InstanceState, Registry, each_intrinsic, print_intrinsic, read_line_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -64,10 +64,38 @@ fn instance_with_caps(src: &str) -> Instance {
         "{:?}",
         resolved.diagnostics
     );
+    Instance::load_with_intrinsics(resolved.module, caps_registry())
+}
+
+/// print (0), read_line (1), each (2) — the demo intrinsics the drive tests use.
+fn caps_registry() -> Registry {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    registry.register(each_intrinsic()).unwrap();
+    registry
+}
+
+/// Resolves `src` clean and returns the resolved module (for a custom `Instance` build).
+fn resolve_clean(src: &str) -> doodle_core::resolve::ResolvedModule {
+    use doodle_core::diag::Severity;
+    let nfc = normalize(src);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = resolve_module(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    resolved.module
 }
 
 /// Drives `inst` to a terminal outcome under a fixed `directive`, re-driving past each
@@ -255,6 +283,118 @@ fn a_scripted_capability_replays_to_the_same_terminal() {
     }
     assert_eq!(drive_with_line(b"x"), drive_with_line(b"x"));
     assert_eq!(drive_with_line(b"x").0, b"x\nx\n");
+}
+
+// ---- reentrant native block-consumer: `each` (M2b.5a) ----
+
+#[test]
+fn each_invokes_the_block_once_per_element() {
+    let mut inst = instance_with_caps("each([1, 2, 3]) do (x)\nprint(x)\nend\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"1\n2\n3\n");
+}
+
+#[test]
+fn each_over_an_empty_list_runs_the_block_zero_times() {
+    let mut inst = instance_with_caps("each([]) do (x)\nprint(x)\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.output(), b"");
+}
+
+#[test]
+fn continue_in_an_each_block_ends_that_iteration() {
+    // `continue` ends the block invocation early, so `print` is skipped for x == 2;
+    // `each` proceeds to the next element (a normal Completed, not a NonLocalExit).
+    let mut inst =
+        instance_with_caps("each([1, 2, 3]) do (x)\nif x == 2 then continue end\nprint(x)\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.output(), b"1\n3\n");
+}
+
+#[test]
+fn a_raise_inside_an_each_block_propagates() {
+    let mut inst = instance_with_caps("each([1, 2]) do (x)\n1 / 0\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn each_needs_a_list_to_iterate() {
+    let mut inst = instance_with_caps("each(5) do (x)\nprint(x)\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn a_limit_tripped_inside_an_each_block_faults() {
+    // The reentry-fault channel (MD §14): a step budget exhausted inside the nested
+    // drive surfaces as `Faulted` after the native `each` returns — a limit is
+    // instance-global and cannot flow through the Raise-typed callback chain.
+    let limits = Limits {
+        step_budget: 300,
+        ..Limits::default()
+    };
+    let module = resolve_clean("each([1]) do (x)\nloop do\n1\nend\nend\n");
+    let mut inst = Instance::load_with_intrinsics_and_limits(module, limits, caps_registry());
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn reentrant_recursion_through_each_faults_instead_of_overflowing_the_stack() {
+    // A program that recurses through the native `each`: each level nests a reentrant
+    // drive on the host's Rust stack. Bounded (MD §14) so it faults with StackDepth
+    // rather than aborting the host process by overflowing the native stack.
+    let mut inst = instance_with_caps("to r(x)\neach([x]) do (y)\nr(y)\nend\nend\nr(1)\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StackDepth))
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn break_out_of_an_each_block_is_unsupported_at_5a() {
+    // S-46 (M2b.5b) makes this a real `break` that completes the `each` call; at 5a it
+    // raises `Unsupported` — a tracked expected behavior until 5b lands.
+    let mut inst = instance_with_caps("each([1, 2]) do (x)\nbreak\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn return_across_an_each_block_is_unsupported_at_5a() {
+    // A `return` from inside the block targets the enclosing `f`, crossing the native
+    // boundary — S-46 (M2b.5b); at 5a it raises `Unsupported`.
+    let mut inst = instance_with_caps("fn f()\neach([1]) do (x)\nreturn 5\nend\n0\nend\nf()\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
 }
 
 #[test]

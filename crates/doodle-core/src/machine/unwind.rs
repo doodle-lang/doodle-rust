@@ -108,22 +108,36 @@ pub(crate) fn exit_apply(
         (Node::Break(_), ExitTarget::ThisLoop(node)) => Unwind::LoopBreak { loop_node: node },
         (Node::Continue(_), ExitTarget::ThisLoop(node)) => Unwind::LoopContinue { loop_node: node },
         (Node::Continue(_), ExitTarget::ThisBlock) => Unwind::BlockContinue { value },
-        (Node::Break(_), ExitTarget::ConsumerCall) => {
-            let (consumer, consumer_serial) = current_block_consumer(machine);
-            if value.is_some() && consumer_is_proc(resolved, heap, machine, consumer) {
+        (Node::Break(_), ExitTarget::ConsumerCall) => match current_block_consumer(machine) {
+            Consumer::DoodleCall {
+                frame: consumer,
+                serial: consumer_serial,
+            } => {
+                if value.is_some() && consumer_is_proc(resolved, heap, machine, consumer) {
+                    return Err(Raise::new(
+                        ExceptionKind::NoValueDestination,
+                        "this `break` gives a value, but the block-consuming call is a procedure, \
+                         which yields none",
+                        span,
+                    ));
+                }
+                Unwind::BlockBreak {
+                    value,
+                    consumer,
+                    consumer_serial,
+                }
+            }
+            // A `break` out of a block invoked by a native block-consuming function
+            // crosses the host boundary — S-46 (M2b.5b). Not yet supported.
+            Consumer::Native => {
                 return Err(Raise::new(
-                    ExceptionKind::NoValueDestination,
-                    "this `break` gives a value, but the block-consuming call is a procedure, \
-                     which yields none",
+                    ExceptionKind::Unsupported,
+                    "a `break` out of a native block-consuming function is not yet supported \
+                     (S-46, arrives at M2b.5b)",
                     span,
                 ));
             }
-            Unwind::BlockBreak {
-                value,
-                consumer,
-                consumer_serial,
-            }
-        }
+        },
         _ => unreachable!("resolver-annotated exit kind/target mismatch"),
     };
     machine.unwind = Some(unwind);
@@ -309,20 +323,19 @@ fn home_callable(machine: &Machine) -> usize {
     }
 }
 
-/// The consumer of the current block frame (who invoked it) — the `break` target.
-fn current_block_consumer(machine: &Machine) -> (usize, u64) {
-    let FrameKind::Block {
-        consumer: Consumer::DoodleCall { frame, serial },
-        ..
-    } = &machine
+/// The consumer of the current block frame (who invoked it) — the `break` target: a
+/// Doodle frame, or a **native** boundary (a block invoked by a native block-consuming
+/// function, MD §14).
+fn current_block_consumer(machine: &Machine) -> Consumer {
+    let FrameKind::Block { consumer, .. } = &machine
         .frames
         .last()
         .expect("block break with no frame")
         .kind
     else {
-        unreachable!("a block `break` outside a block frame with a Doodle consumer");
+        unreachable!("a block `break` outside a block frame");
     };
-    (*frame, *serial)
+    *consumer
 }
 
 /// Whether the frame at `consumer` runs a procedure (a `to`) — for the open S-10

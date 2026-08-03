@@ -65,6 +65,10 @@ pub enum ExceptionKind {
     /// is rendered into the message; carrying it as the exception value `rescue` binds
     /// arrives with exceptions-as-values (M4, E§9).
     HostRaised,
+    /// A machine feature is not yet implemented on this path. **Temporary (M2b.5a):** a
+    /// `break`/`return` crossing a native block-consuming function raises this until the
+    /// S-46 `NonLocalExit` mechanism lands (M2b.5b) and makes it a real transfer.
+    Unsupported,
 }
 
 /// A Doodle exception reaching a drive boundary (E§9).

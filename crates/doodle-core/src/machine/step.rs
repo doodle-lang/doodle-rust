@@ -65,6 +65,13 @@ pub(crate) fn step(
     );
     let depth_before = machine.frames.len();
     dispatch(resolved, heap, machine, namespace, cont)?;
+    // A reentrant nested drive (a native block-consumer running its block) faulted —
+    // a limit tripped, or the deferred S-15 nested-suspend. It parks the fault because
+    // the Raise-typed `apply` chain cannot carry an `EngineFault`; surface it here as
+    // this transition's fault (MD §14).
+    if let Some(fault) = machine.take_reentry_fault() {
+        return Err(Halt::Fault(fault));
+    }
     // The frame depth where a safe point fired this transition (for `Step*` anchoring),
     // or `None`. A statement safe point and a call-entry safe point never coincide in
     // one transition (a `Seq`/`ReturnBarrier` step pushes no frame), so at most one fires.
@@ -140,18 +147,27 @@ fn dispatch(
             control::loop_reloop(resolved, machine, node);
             Ok(())
         }
-        Some(Cont::CallGotCallee { call }) => call::got_callee(resolved, heap, machine, call),
+        Some(Cont::CallGotCallee { call }) => {
+            call::got_callee(resolved, heap, machine, namespace, call)
+        }
         Some(Cont::CallGotArg {
             call,
             callee,
             values,
             index,
-        }) => call::got_arg(resolved, heap, machine, call, callee, values, index),
+        }) => call::got_arg(
+            resolved, heap, machine, namespace, call, callee, values, index,
+        ),
         Some(Cont::BlockGotArg {
             call,
             values,
             index,
         }) => block::got_block_arg(resolved, heap, machine, call, values, index),
+        Some(Cont::ListGotElem {
+            list,
+            values,
+            index,
+        }) => list_got_elem(resolved, heap, machine, list, values, index),
         Some(Cont::BindDefault { slot, default }) => {
             call::bind_default(resolved, heap, machine, slot, default)
         }
@@ -264,6 +280,38 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
     }
 }
 
+/// A list literal's element at `index` is now in the register: stash it, then evaluate
+/// the next element or allocate the list once the last is in (L§4.6).
+fn list_got_elem(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    list: NodeId,
+    mut values: Vec<Value>,
+    index: u32,
+) -> Result<(), Raise> {
+    values.push(take_value(machine, resolved.ast.span(list))?);
+    let Node::List(elements) = resolved.ast.node(list) else {
+        unreachable!("ListGotElem over a non-List node");
+    };
+    match elements.get(index as usize + 1) {
+        Some(&next) => {
+            let frame = machine.frames.last_mut().expect("a frame is active");
+            frame.conts.push(Cont::ListGotElem {
+                list,
+                values,
+                index: index + 1,
+            });
+            frame.conts.push(Cont::Eval { node: next });
+            Ok(())
+        }
+        None => {
+            machine.reg = Some(Value::List(heap.alloc_list(values)));
+            Ok(())
+        }
+    }
+}
+
 /// Evaluates one expression, either producing a value into the register (a leaf)
 /// or scheduling continuations that will (a compound operator). Returns `Err` if
 /// reading a name raised.
@@ -302,6 +350,21 @@ fn eval(
                 .expect("lexer-validated bignum digits");
             arith::int_value(n, heap)
         }
+        // A list literal `[a, b, …]` (L§4.6): evaluate its elements left to right, then
+        // allocate the list; an empty `[]` allocates immediately.
+        Node::List(elements) => match elements.first() {
+            None => Value::List(heap.alloc_list(Vec::new())),
+            Some(&first) => {
+                let frame = machine.frames.last_mut().expect("eval with no frame");
+                frame.conts.push(Cont::ListGotElem {
+                    list: node,
+                    values: Vec::new(),
+                    index: 0,
+                });
+                frame.conts.push(Cont::Eval { node: first });
+                return Ok(());
+            }
+        },
         Node::Ident(_) => control::read_ref(resolved, heap, machine, namespace, node)?,
         // `if` in expression position: same machinery as the statement form; the
         // selected branch's value stays in the register for the consumer (L§6.8).

@@ -65,5 +65,11 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine, namespace: &Namespace)
                 tracer.value(*value);
             }
         }
+        // The arguments of in-flight synchronous foreign calls (§15): held only on the
+        // host's Rust stack (e.g. a native `each`'s list while its reentrant drive runs),
+        // so a collection during that drive must keep them alive.
+        for value in &machine.foreign_roots {
+            tracer.value(*value);
+        }
     });
 }
