@@ -7,7 +7,8 @@
 //! program reaches the same terminal under a step-through as under a fast run.
 
 use doodle_core::drive::{
-    CapabilityId, Directive, EngineFault, LimitKind, Limits, Outcome, Resolution, resolve, run,
+    CapabilityId, Directive, EngineFault, LimitKind, Limits, Outcome, PauseReason, Resolution,
+    resolve, run, run_slice,
 };
 use doodle_core::machine::{
     Instance, InstanceState, Registry, each_intrinsic, print_intrinsic, read_line_intrinsic,
@@ -480,6 +481,181 @@ fn step_into_descends_into_a_call_but_step_over_does_not() {
         "StepInto ({into_pauses}) should pause more than StepOver ({over_pauses}) — it \
          descends into f's body"
     );
+}
+
+// ---- bounded-run fuel + Paused(SliceEnd) (M3.1, S-40) ----
+
+#[test]
+fn a_fuel_bounded_drive_pauses_at_sliceend_and_resumes_to_the_same_terminal() {
+    // S-40: `run_slice(fuel)` runs at most `fuel` statement safe points, then yields
+    // `Paused(SliceEnd)`; re-driving resumes to the **same terminal** as one unbounded
+    // run (E§7.7) — slicing changes only where it yields, not what executes.
+    let src = "let a = 1\nlet b = 2\nlet c = 3\nlet d = 4\n";
+    let mut fast = instance(src);
+    assert!(matches!(
+        run(&mut fast, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+
+    let mut sliced = instance(src);
+    let mut pauses = 0;
+    loop {
+        match run_slice(&mut sliced, Directive::RunToCompletion, Some(1)) {
+            Outcome::Paused(PauseReason::SliceEnd) => {
+                pauses += 1;
+                assert!(pauses < 1000, "slice loop did not terminate");
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(
+        pauses >= 1,
+        "a tiny fuel produced slice-end pauses, got {pauses}"
+    );
+    assert_eq!(fast.state(), sliced.state());
+    assert_eq!(sliced.state(), InstanceState::Completed);
+}
+
+#[test]
+fn completion_wins_the_exact_fuel_boundary() {
+    // When a drive's fuel exactly covers the program's remaining safe points — including
+    // the frame-drain step that both spends the last fuel and finishes the program — the
+    // outcome is `Completed`, not a spurious `Paused(SliceEnd)` on an already-empty stack
+    // (completion is a fact about past work; a slice end bounds future work, of which
+    // there is none). Count the safe points via fuel=1 slices, then drive with exactly
+    // that many + 1 (the completing step).
+    let src = "let a = 1\nlet b = 2\n";
+    let mut counter = instance(src);
+    let mut pauses = 0u64;
+    loop {
+        match run_slice(&mut counter, Directive::RunToCompletion, Some(1)) {
+            Outcome::Paused(PauseReason::SliceEnd) => pauses += 1,
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let exact = pauses + 1;
+    let mut inst = instance(src);
+    let outcome = run_slice(&mut inst, Directive::RunToCompletion, Some(exact));
+    assert!(
+        matches!(outcome, Outcome::Completed(None)),
+        "fuel={exact} (exact): {outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn zero_fuel_yields_sliceend_before_running_anything() {
+    // `Some(0)` is a fully-spent slice: it yields `Paused(SliceEnd)` before executing a
+    // single safe point (it must not silently run unbounded), and re-driving makes progress.
+    let mut inst = instance("let a = 1\nlet b = 2\n");
+    assert!(matches!(
+        run_slice(&mut inst, Directive::RunToCompletion, Some(0)),
+        Outcome::Paused(PauseReason::SliceEnd)
+    ));
+    assert_eq!(inst.state(), InstanceState::Paused);
+    // A real slice from here still completes.
+    let mut pauses = 0;
+    loop {
+        match run_slice(&mut inst, Directive::RunToCompletion, Some(1)) {
+            Outcome::Paused(PauseReason::SliceEnd) => {
+                pauses += 1;
+                assert!(pauses < 1000);
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn an_unbounded_fuel_never_slice_ends() {
+    // `None` fuel (the `run` default) runs to a real stop, never `SliceEnd`.
+    let mut inst = instance("let a = 1\nlet b = 2\n");
+    assert!(matches!(
+        run_slice(&mut inst, Directive::RunToCompletion, None),
+        Outcome::Completed(None)
+    ));
+}
+
+#[test]
+fn slice_end_is_a_resumable_pause_distinct_from_the_step_budget_fault() {
+    // Exhausting the per-call slice fuel is a resumable `Paused(SliceEnd)` (state stays
+    // Paused); exhausting the lifetime step budget is a terminal `Faulted(StepBudget)`.
+    let mut sliced = instance("loop do\n1\nend\n");
+    assert!(matches!(
+        run_slice(&mut sliced, Directive::RunToCompletion, Some(5)),
+        Outcome::Paused(PauseReason::SliceEnd)
+    ));
+    assert_eq!(sliced.state(), InstanceState::Paused);
+
+    let limits = Limits {
+        step_budget: 50,
+        ..Limits::default()
+    };
+    let mut bounded = load("loop do\n1\nend\n", limits);
+    assert!(matches!(
+        run(&mut bounded, Directive::RunToCompletion),
+        Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
+    ));
+    assert_eq!(bounded.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn the_step_budget_is_enforced_regardless_of_slice_size() {
+    // S-20: the lifetime step budget counts safe points, not slices — an infinite loop
+    // under a fixed budget faults `StepBudget` whether driven unbounded or in tiny
+    // slices; slicing cannot let it run past the budget.
+    fn drive_to_terminal(fuel: Option<u64>) -> Outcome {
+        let limits = Limits {
+            step_budget: 40,
+            ..Limits::default()
+        };
+        let mut inst = load("loop do\n1\nend\n", limits);
+        loop {
+            match run_slice(&mut inst, Directive::RunToCompletion, fuel) {
+                Outcome::Paused(PauseReason::SliceEnd) => continue,
+                other => return other,
+            }
+        }
+    }
+    for fuel in [None, Some(1), Some(3), Some(7)] {
+        let outcome = drive_to_terminal(fuel);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
+            ),
+            "fuel {fuel:?}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn slicing_does_not_change_program_output_even_across_a_nested_drive() {
+    // Determinism (E§7.7): a program's output is identical whether run unbounded or in
+    // tiny slices. This also covers a native block-consumer (`each`): its reentrant drive
+    // cannot pause, so a slice exhausted mid-`each` overruns to the call's end — but the
+    // program still executes exactly the same and produces the same output.
+    let src = "each([1, 2, 3, 4, 5]) do (x)\nprint(x)\nend\n";
+    let mut fast = instance_with_caps(src);
+    assert!(matches!(
+        run(&mut fast, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+
+    let mut sliced = instance_with_caps(src);
+    loop {
+        match run_slice(&mut sliced, Directive::RunToCompletion, Some(2)) {
+            Outcome::Paused(PauseReason::SliceEnd) => continue,
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(fast.output(), sliced.output());
+    assert_eq!(fast.output(), b"1\n2\n3\n4\n5\n");
 }
 
 // ---- observation surface (M2b.7, E§8.1/§8.2) ----

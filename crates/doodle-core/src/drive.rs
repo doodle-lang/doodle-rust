@@ -53,6 +53,10 @@ pub enum PauseReason {
     RaiseTrap,
     /// The host requested a pause.
     HostPause,
+    /// The drive call's **bounded-run fuel** was spent (S-40, E§7.3): a resumable
+    /// slice boundary, distinct from a host `HostPause` request — the pump's yield
+    /// point. Re-drive (`run`/`run_slice`) to continue; state is intact.
+    SliceEnd,
 }
 
 /// Identifies an installed breakpoint.
@@ -197,6 +201,15 @@ pub enum Resolution {
 /// violation — debug-asserted, and a returned `Faulted(Internal)` in release rather
 /// than undefined behavior.
 pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
+    run_slice(instance, directive, None)
+}
+
+/// Like [`run`], but **bounded**: runs at most `fuel` statement safe points (S-40, AD6)
+/// before returning [`Paused`](Outcome::Paused)`(`[`PauseReason::SliceEnd`]`)`, the
+/// pump's yield point. `None` fuel is unbounded (identical to [`run`]). The drive stops
+/// earlier for any other reason (completion, raise, suspend, a `Step*` pause, a fault);
+/// slice size never changes *what* executes, only where it yields (E§7.7).
+pub fn run_slice(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Outcome {
     debug_assert!(
         matches!(
             instance.state(),
@@ -212,7 +225,7 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
     ) {
         return Outcome::Faulted(EngineFault::Internal);
     }
-    drive(instance, directive)
+    drive(instance, directive, fuel)
 }
 
 /// Continues a `Suspended` `instance` with the host's `resolution` (E§7.3/§7.5): the
@@ -221,6 +234,17 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
 /// instance `Raised`). `resolve` on an instance with no pending suspension is a
 /// host-contract violation (debug-asserted; `Faulted(Internal)` in release).
 pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
+    resolve_slice(instance, resolution, None)
+}
+
+/// Like [`resolve`], but **bounded**: the resumed drive runs at most `fuel` statement
+/// safe points before `Paused(SliceEnd)` (S-40) — the pump resolves a capability and
+/// resumes one slice. `None` is unbounded (identical to [`resolve`]).
+pub fn resolve_slice(
+    instance: &mut Instance,
+    resolution: Resolution,
+    fuel: Option<u64>,
+) -> Outcome {
     debug_assert!(
         matches!(instance.state(), InstanceState::Suspended),
         "resolve() requires a Suspended instance (got {:?}); it continues a pending \
@@ -234,7 +258,7 @@ pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
         // The capability's value becomes the call's result; resume the drive so the
         // caller's waiting continuation consumes it, under the directive in force.
         Resolution::Value(handle) => match instance.resume_with_value(handle) {
-            Ok(()) => drive(instance, instance.resume_directive()),
+            Ok(()) => drive(instance, instance.resume_directive(), fuel),
             // A stale resolution handle is a host-contract violation (a non-resumable
             // engine fault): the suspension was cleared, so leave the instance terminally
             // `Faulted` — a `Faulted` outcome always implies `state() == Faulted` (E§3.3).
@@ -256,11 +280,13 @@ pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
 /// The core drive loop: steps `instance` to a stopping [`Outcome`] under `directive`,
 /// pausing a `Step*` at the next matching safe point and suspending at a capability
 /// call. Shared by [`run`] and the resume side of [`resolve`].
-fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
-    // Anchor `Step*` depth judgments at the frame depth we resume from (E§8.5), and
-    // remember the directive so a `resolve` after a suspend resumes under it (E§7.3).
+fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Outcome {
+    // Anchor `Step*` depth judgments at the frame depth we resume from (E§8.5), remember
+    // the directive so a `resolve` after a suspend resumes under it (E§7.3), and arm this
+    // call's bounded-run fuel (S-40; `None` = unbounded).
     let anchor_depth = instance.frame_depth();
     instance.set_directive(directive);
+    instance.arm_slice(fuel);
     instance.set_state(InstanceState::Running);
     loop {
         if instance.is_halted() {
@@ -270,11 +296,23 @@ fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
             // a returning `fn` (a reentrant callable return, E§7.6, M2b.5).
             return Outcome::Completed(None);
         }
+        // The drive call's slice fuel is spent (S-40): yield here, resumable — including
+        // the `fuel == Some(0)` case (yield before running anything) and mid-drive
+        // exhaustion (the previous step's safe point flagged it). Checked **after**
+        // `is_halted`, so a program that finishes on the same safe point that spends the
+        // last fuel still wins `Completed` at the exact boundary (completion is a fact
+        // about past work; a slice end is a bound on future work — there is none left).
+        if instance.sliced_out() {
+            instance.set_state(InstanceState::Paused);
+            return Outcome::Paused(PauseReason::SliceEnd);
+        }
         match instance.step() {
             Ok(safe_point) => {
                 // A capability call parked a request (E§7.5, MD §14): suspend, no state
                 // torn down. Checked before the pause decision (they cannot coincide —
-                // a capability call is not a statement-level safe point).
+                // a capability call is not a statement-level safe point). A slice
+                // exhausted on this same step is honored on the next loop turn (a suspend
+                // wins — the instance is `Suspended`, resumed via `resolve`).
                 if instance.is_suspended() {
                     instance.set_state(InstanceState::Suspended);
                     return Outcome::Suspended(instance.capability_request());

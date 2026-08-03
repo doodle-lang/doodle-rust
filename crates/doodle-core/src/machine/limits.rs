@@ -24,23 +24,71 @@ pub(crate) const GC_MIN_BYTES: u64 = 1 << 20;
 /// is not swept on every safe point (machine-design §15).
 const GC_GROWTH: u64 = 2;
 
-/// The fused safe-point counter (MD §9): a single value decremented once per
-/// statement-level safe point, so the hot path is one decrement-and-branch. At
-/// M2a.9 its only contributor is the **step budget**; slice fuel and the
-/// distance-to-next-armed-event fuse in when slicing and observation land, each
-/// re-arming `remaining` to the running minimum. Reaching zero enters the slow
-/// path — at M2a.9 the only slow-path outcome is `LimitExceeded(StepBudget)`.
+/// The fused safe-point counter (MD §9, AD6): the safe-point limits, checked with a
+/// decrement-and-branch per statement-level safe point. Two contributors now — the
+/// lifetime **step budget** (E§10.2) and the per-drive-call **slice fuel** (S-40); the
+/// distance-to-next-armed-event (breakpoints) fuses in at M6. Their **minimum** bounds
+/// a drive: whichever reaches zero first stops it — the step budget with a
+/// `LimitExceeded(StepBudget)` fault, the slice fuel with a resumable `Paused(SliceEnd)`.
 pub(crate) struct FusedCounter {
-    /// Safe points still permitted before the step budget is exhausted.
-    remaining: u64,
+    /// Lifetime step-budget safe points still permitted (E§10.2); `0` → `StepBudget`.
+    budget: u64,
+    /// The current drive call's slice fuel — safe points it may run before yielding
+    /// `Paused(SliceEnd)` (S-40). `None` is an **unbounded** (no-fuel) drive call, which
+    /// never counts down or flags.
+    slice: Option<u64>,
+    /// Set when the current slice's fuel reaches `0` (S-40): the top-level drive loop
+    /// pauses at the next safe point. A nested drive cannot pause, so it runs on and this
+    /// is honored when control returns to the top level. Cleared by [`arm_slice`].
+    ///
+    /// [`arm_slice`]: FusedCounter::arm_slice
+    exhausted: bool,
 }
 
 impl FusedCounter {
-    /// A counter armed to `limits.step_budget`.
+    /// A counter armed to `limits.step_budget`, with an unbounded initial slice.
     pub(crate) fn new(limits: &Limits) -> Self {
         FusedCounter {
-            remaining: limits.step_budget,
+            budget: limits.step_budget,
+            slice: None,
+            exhausted: false,
         }
+    }
+
+    /// Arms the slice fuel for one drive call (S-40): `Some(n)` bounds it to `n` safe
+    /// points and yields `Paused(SliceEnd)` when spent; `None` runs unbounded. `Some(0)`
+    /// is already spent (yields `SliceEnd` before running any safe point). The lifetime
+    /// step budget is untouched.
+    pub(crate) fn arm_slice(&mut self, fuel: Option<u64>) {
+        self.slice = fuel;
+        self.exhausted = fuel == Some(0);
+    }
+
+    /// Whether the current slice's fuel is spent (S-40) — the top-level drive loop's
+    /// signal to pause with `Paused(SliceEnd)`.
+    pub(crate) fn sliced_out(&self) -> bool {
+        self.exhausted
+    }
+
+    /// Spends one statement safe point against both counters (AD6). Faults if the
+    /// lifetime step budget is out; otherwise decrements the budget and — for a
+    /// **bounded** slice — the slice fuel, flagging `exhausted` when it just reached `0`.
+    /// An **unbounded** slice (`None`) never counts down or flags. This is only the
+    /// counter accounting; the drive loop turns the flag into a `Paused(SliceEnd)`.
+    fn spend(&mut self) -> Result<(), EngineFault> {
+        if self.budget == 0 {
+            return Err(EngineFault::LimitExceeded(LimitKind::StepBudget));
+        }
+        self.budget -= 1;
+        if let Some(slice) = self.slice.as_mut()
+            && *slice > 0
+        {
+            *slice -= 1;
+            if *slice == 0 {
+                self.exhausted = true;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -58,12 +106,14 @@ pub(crate) fn safe_point(
     machine: &mut Machine,
     namespace: &Namespace,
 ) -> Result<(), EngineFault> {
-    // Fused counter (MD §9): one decrement-and-branch. Exhaustion is the step
-    // budget — the engine owns no clock, so this is how a host bounds runtime.
-    if machine.fuel.remaining == 0 {
-        return Err(EngineFault::LimitExceeded(LimitKind::StepBudget));
-    }
-    machine.fuel.remaining -= 1;
+    // Spend one safe point against the fused step-budget + slice-fuel counter (AD6): a
+    // `StepBudget` fault if the lifetime budget is out, else flag a `SliceEnd` if the
+    // slice fuel just ran out. The slice fuel **does not gate execution** here — the
+    // statement at this safe point still runs, and GC/heap limits below still fire, so a
+    // sliced run executes exactly what an unbounded run does (the pause happens *between*
+    // safe points, in the drive loop) and never perturbs the heap (E§7.7). A nested drive
+    // cannot pause, so it runs on with the flag set until control returns to the top.
+    machine.fuel.spend()?;
     // Collect when accounted bytes cross the GC threshold (routine growth) or the
     // heap limit (the last-ditch collect MD §15 requires before the limit can
     // fault) — whichever is lower. Then re-arm the threshold at the survivors' next

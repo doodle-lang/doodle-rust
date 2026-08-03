@@ -28,6 +28,18 @@ impl Instance {
         self.machine.directive
     }
 
+    /// Arms the slice fuel for the drive call about to start (S-40): `Some(n)` runs at
+    /// most `n` statement safe points before `Paused(SliceEnd)`; `None` runs unbounded.
+    pub(crate) fn arm_slice(&mut self, fuel: Option<u64>) {
+        self.machine.fuel.arm_slice(fuel);
+    }
+
+    /// Whether the current drive slice's fuel is spent (S-40) — the drive loop's signal
+    /// to return `Paused(SliceEnd)`.
+    pub(crate) fn sliced_out(&self) -> bool {
+        self.machine.fuel.sliced_out()
+    }
+
     /// Builds the capability request for the parked suspension (E§7.5): the capability
     /// identity and its bound arguments as fresh **host-owned** handles (S-17 — the
     /// host releases them). Leaves the pending request in place (consumed by `resolve`).
