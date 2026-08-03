@@ -25,7 +25,7 @@ use super::call::bind_arguments;
 use super::control::Namespace;
 use super::error::{ExceptionKind, Raise};
 use super::frame::BlockDescriptor;
-use super::{Halt, Machine, Value, block, step};
+use super::{Halt, Machine, Value, block, step, unwind};
 use crate::ast::NodeId;
 use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
@@ -177,9 +177,15 @@ pub struct IntrinsicCtx<'a> {
 /// The outcome of one reentrant block invocation ([`IntrinsicCtx::invoke_block`]).
 pub(crate) enum BlockResult {
     /// The block completed (fell off its end, or `continue`d). Its yielded value is in
-    /// the register; M2b.5a's only consumer (`each`) discards it (a value-carrying
-    /// payload for a `map`-style consumer joins later).
+    /// the register; `each` discards it (a value-carrying payload for a `map`-style
+    /// consumer joins later). Not a `NonLocalExit` — `continue`/fall-off target the
+    /// block itself (E§7.6), so the callback runs its next iteration.
     Completed,
+    /// A `break`/`return` exited the block to a target **outside** the native call
+    /// (E§7.6, S-46): the unwind is parked in `machine.unwind`. The callback must stop
+    /// and return promptly (no result, no further drives); the native call's apply site
+    /// resumes the parked exit ([`unwind::resume_native_boundary`]).
+    NonLocalExit,
     /// The nested drive parked a fault (a limit tripped inside it, or the deferred
     /// S-15 nested-suspend): the caller must stop; `step` will surface the fault.
     Halted,
@@ -208,12 +214,23 @@ impl IntrinsicCtx<'_> {
 
     /// Invokes this intrinsic's received block **reentrantly** with `args` (E§5.4/§7.6,
     /// MD §14): pushes the block frame at a native boundary and runs a nested drive on
-    /// the shared heap stack to the block's completion. Returns the block's yielded
-    /// value ([`BlockResult::Completed`]), propagates a raise (`Err`), or reports a
-    /// parked fault ([`BlockResult::Halted`]). **M2b.5a:** a `break`/`return` that exits
-    /// the block *across* this native boundary is not yet supported — it raises
-    /// [`ExceptionKind::Unsupported`] pending the S-46 `NonLocalExit` mechanism (M2b.5b).
+    /// the shared heap stack to the block's completion. Returns [`BlockResult::Completed`]
+    /// on a normal completion (fall-off or `continue`); [`BlockResult::NonLocalExit`]
+    /// when a `break`/`return` exits the block across this native boundary (S-46), the
+    /// unwind left parked for the apply site to resume; propagates a raise (`Err`); or
+    /// reports a parked fault ([`BlockResult::Halted`]).
     pub(crate) fn invoke_block(&mut self, args: Vec<Value>) -> Result<BlockResult, Raise> {
+        // A prior invocation exited across this native boundary (an S-46 `NonLocalExit`
+        // is parked) and the callback drove the block **again** instead of returning
+        // promptly. That is a host-contract violation (E§7.6, S-16 family): driving after
+        // a non-local exit would run Doodle code the exit was leaving. Fault rather than
+        // silently skip the block body. (Engine-authored intrinsics like `each` comply;
+        // this backstops a misbehaving host callback once the C-ABI FFI lands, M7.)
+        if self.machine.unwind.is_some() {
+            self.machine.unwind = None;
+            self.machine.reentry_fault = Some(EngineFault::Internal);
+            return Ok(BlockResult::Halted);
+        }
         // A reentrant drive nests on the host's Rust stack (MD §14): bound the depth so a
         // program recursing through this native consumer faults (`StackDepth`) rather than
         // overflowing the native stack. Park the fault and return `Halted` (like a nested
@@ -249,19 +266,14 @@ impl IntrinsicCtx<'_> {
         loop {
             // The block frame (and anything it pushed) drained back to the boundary.
             if self.machine.frames.len() <= boundary {
-                return match self.machine.unwind {
-                    None => Ok(BlockResult::Completed),
-                    // A `break`/`return` reached the native boundary — S-46 (M2b.5b).
-                    Some(_) => {
-                        self.machine.unwind = None;
-                        Err(Raise::new(
-                            ExceptionKind::Unsupported,
-                            "a `break`/`return` out of a native block-consuming function is not \
-                             yet supported (S-46, arrives at M2b.5b)",
-                            block_span,
-                        ))
-                    }
-                };
+                return Ok(match self.machine.unwind {
+                    None => BlockResult::Completed,
+                    // A `break`/`return` reached the native boundary (E§7.6, S-46): the
+                    // unwind stays **parked** for the apply site to resume — either
+                    // completing this call (a `break` targeting it) or unwinding past it
+                    // (a `return`/outer break). The callback must return promptly.
+                    Some(_) => BlockResult::NonLocalExit,
+                });
             }
             match step::step(self.resolved, self.heap, self.machine, self.namespace) {
                 Ok(_) => {
@@ -314,6 +326,9 @@ pub(crate) fn apply(
 
     match body {
         ForeignBody::Sync(callback) => {
+            // This native call's frame depth: a `break` targeting it (S-46) unwinds here
+            // and parks (block::invoke_native records the same depth in Consumer::Native).
+            let boundary = machine.frames.len();
             // Root the call's arguments while the callback runs (MD §15): a native
             // block-consumer's reentrant drive may collect, and the args are otherwise
             // held only on the Rust stack. Popped on return (including on a raise).
@@ -331,17 +346,35 @@ pub(crate) fn apply(
                 callback(&mut ctx)
             };
             machine.pop_foreign_roots(root_base);
-            let result = result?;
-            // A reentrant nested drive may have parked a fault (`invoke_block`); `step`
-            // surfaces it, so do not overwrite it with a spurious result.
-            if machine.reentry_fault.is_none() {
-                debug_assert!(
-                    kind != BodyKind::Func || result.is_some(),
-                    "a `fn` intrinsic must return a value"
-                );
-                // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
-                machine.reg = if kind == BodyKind::Proc { None } else { result };
+            // A reentrant nested drive may have parked a fault (`invoke_block`): a nested
+            // limit, or a host-contract violation. `step` surfaces it, so stop here — do
+            // not propagate the callback's result (a raise it returned is superseded).
+            if machine.reentry_fault.is_some() {
+                return Ok(());
             }
+            // A `break`/`return` in a block this callback drove crossed the native
+            // boundary (S-46): an unwind is parked. The compliant callback returned
+            // promptly with no result (`Ok(None)`); a value, a raise, or a further drive
+            // after the `NonLocalExit` is a host-contract violation (E§7.6) → fault.
+            // Otherwise resume the parked exit at this apply site: a `break` targeting
+            // *this* call completes it (its value becomes the result); a `return`/outer
+            // break stays parked and unwinds past this call in the enclosing drive.
+            if machine.unwind.is_some() {
+                if !matches!(result, Ok(None)) {
+                    machine.unwind = None;
+                    machine.reentry_fault = Some(EngineFault::Internal);
+                    return Ok(());
+                }
+                unwind::resume_native_boundary(machine, boundary, kind)?;
+                return Ok(());
+            }
+            let result = result?;
+            debug_assert!(
+                kind != BodyKind::Func || result.is_some(),
+                "a `fn` intrinsic must return a value"
+            );
+            // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
+            machine.reg = if kind == BodyKind::Proc { None } else { result };
             Ok(())
         }
         // Suspend (E§5.3/§7.5, MD §14): park the request; the drive loop returns
@@ -421,128 +454,12 @@ fn bind_foreign_arguments(
     Ok(args)
 }
 
-/// The demo intrinsic `print` (E§5.2, S-43): a `to` taking one value, rendering it
-/// (the provisional [`render`] stand-in for L§15 Stringable, superseded at M4/M9a),
-/// and appending it plus a newline to the instance's output sink.
-pub fn print() -> Intrinsic {
-    Intrinsic {
-        name: "print".into(),
-        kind: BodyKind::Proc,
-        params: vec![ForeignParam {
-            name: "value".into(),
-            default: None,
-            is_block: false,
-        }],
-        body: ForeignBody::Sync(|ctx| {
-            let text = render(ctx.heap(), ctx.args()[0]);
-            ctx.emit(text.as_bytes());
-            ctx.emit(b"\n");
-            Ok(None)
-        }),
-    }
-}
-
-/// The demo native block-consuming intrinsic `each` (E§5.4/§7.6, MD §14): a `to` taking
-/// a `List` and a trailing block, invoking the block **reentrantly** once per element
-/// (exit criterion 4). A raise inside the block propagates; a `break`/`return` out of it
-/// is M2b.5b (S-46). The first native higher-order primitive — the shape `repeat`/`map`
-/// take, and proof a native consumer is expressible over the reentrant-drive API.
-pub fn each() -> Intrinsic {
-    Intrinsic {
-        name: "each".into(),
-        kind: BodyKind::Proc,
-        params: vec![
-            ForeignParam {
-                name: "list".into(),
-                default: None,
-                is_block: false,
-            },
-            ForeignParam {
-                name: "body".into(),
-                default: None,
-                is_block: true,
-            },
-        ],
-        body: ForeignBody::Sync(|ctx| {
-            let Value::List(idx) = ctx.args()[0] else {
-                return Err(Raise::new(
-                    ExceptionKind::TypeMismatch,
-                    "`each` needs a list to iterate",
-                    ctx.span(),
-                ));
-            };
-            // Iterate a **fixed count** (the length at entry) over the live heap list —
-            // which stays rooted through `each`'s `foreign_roots` entry (MD §15), so the
-            // block's reentrant drive may collect. The fixed count bounds a block that
-            // appends; `.get` guards a block that shrinks the list.
-            let count = ctx.heap().list(idx).items.len();
-            for i in 0..count {
-                let Some(&element) = ctx.heap().list(idx).items.get(i) else {
-                    break; // the block shrank the list past here
-                };
-                match ctx.invoke_block(vec![element])? {
-                    // The block completed (or `continue`d): go to the next element.
-                    BlockResult::Completed => {}
-                    // A nested fault was parked (a limit inside the block, or S-15): stop;
-                    // `step` surfaces it after this call returns.
-                    BlockResult::Halted => break,
-                }
-            }
-            Ok(None)
-        }),
-    }
-}
-
-/// The demo suspending capability `read_line` (E§5.3, §7.5): a `fn` taking no arguments
-/// that **suspends** — the host supplies the line via `resolve(Value)` (or fails it via
-/// `resolve(Raise)`). The canonical scripted capability for the M2b drive tests.
-pub fn read_line() -> Intrinsic {
-    Intrinsic {
-        name: "read_line".into(),
-        kind: BodyKind::Func,
-        params: Vec::new(),
-        body: ForeignBody::Capability,
-    }
-}
-
-/// A **provisional** value renderer for `print` over the demo subset — a stand-in for
-/// the L§15 Stringable dispatcher (real `to_string` protocol dispatch is M4/M9a). It
-/// must be **deterministic** (E§11): integers/bignums render exactly, floats use a
-/// fixed shortest-round-trip format, and no address/ordering leaks in. Compound
-/// values (list/bytes/records/…) get a provisional angle-bracket tag until the real
-/// dispatcher lands. Crate-visible so `resolve(Raise)` can render a host-raised value
-/// into its message (`machine.rs`).
-pub(crate) fn render(heap: &Heap, value: Value) -> String {
-    match value {
-        Value::Nil => "nil".to_string(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::BigInt(idx) => heap.bigint(idx).value.to_string(),
-        Value::Float(x) => render_float(x),
-        Value::Str(idx) => heap.string(idx).utf8.to_string(),
-        Value::Bytes(_) => "<bytes>".to_string(),
-        Value::List(_) => "<list>".to_string(),
-        Value::Dict(_) => "<dict>".to_string(),
-        Value::Record(_) => "<record>".to_string(),
-        Value::Callable(_) => "<callable>".to_string(),
-        Value::Module(_) => "<module>".to_string(),
-        Value::Type(_) => "<type>".to_string(),
-        Value::Foreign(_) => "<foreign>".to_string(),
-    }
-}
-
-/// Deterministic float rendering for the provisional `print` (E§11 fixed float
-/// formatting). Every machine-produced float is finite (S-56); an integer-valued
-/// float still shows a `.0` so it is not mistaken for an integer.
-fn render_float(x: f64) -> String {
-    if x == x.trunc() && x.is_finite() {
-        format!("{x:.1}")
-    } else {
-        // Rust's `{}` for f64 is the shortest round-tripping decimal — deterministic.
-        format!("{x}")
-    }
-}
+/// The provisional demo intrinsics (`print`, `each`, `read_line`) and the value
+/// renderer, built on the mechanism above. Split out for length; re-exported so hosts
+/// and `resolve(Raise)` reach them at the `intrinsic::` path.
+mod builtins;
+pub(crate) use builtins::render;
+pub use builtins::{each, print, read_line};
 
 #[cfg(test)]
 mod tests;

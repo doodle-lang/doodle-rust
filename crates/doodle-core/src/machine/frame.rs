@@ -72,10 +72,15 @@ pub(crate) enum Consumer {
     },
     /// A **native** consumer (E§5.4/§7.6, MD §14): the block was invoked by a native
     /// block-consuming function through a reentrant drive, so its consumer is on the
-    /// far side of the host boundary — there is no consumer *frame*. At M2b.5a a
-    /// `break`/`return` reaching it raises (not yet supported); M2b.5b adds the
-    /// boundary depth here and makes it the S-46 `NonLocalExit` transfer.
-    Native,
+    /// far side of the host boundary — there is no consumer *frame*. A `break`
+    /// targeting it unwinds the stack down to `boundary` (the frame depth the native
+    /// call sits at) and parks there; the reentrant drive relays it as the S-46
+    /// `NonLocalExit(Break)` and the native call's apply site completes the call.
+    Native {
+        /// The frame depth of the native block-consuming call — the block frame sits
+        /// just above it, and a `break` targeting this consumer pops down to here.
+        boundary: usize,
+    },
     // `TailReused` (M2a.7) joins later.
 }
 

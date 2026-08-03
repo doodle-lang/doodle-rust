@@ -375,26 +375,91 @@ fn reentrant_recursion_through_each_faults_instead_of_overflowing_the_stack() {
     assert_eq!(inst.state(), InstanceState::Faulted);
 }
 
+// ---- S-46: non-local exits crossing the native boundary (M2b.5b) ----
+
 #[test]
-fn break_out_of_an_each_block_is_unsupported_at_5a() {
-    // S-46 (M2b.5b) makes this a real `break` that completes the `each` call; at 5a it
-    // raises `Unsupported` — a tracked expected behavior until 5b lands.
-    let mut inst = instance_with_caps("each([1, 2]) do (x)\nbreak\nend\n");
-    assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
-        Outcome::Raised(..)
-    ));
+fn break_ends_the_each_and_completes_the_call() {
+    // A `break` inside the block targets the `each` call (L§7.10), crossing the native
+    // boundary as an S-46 NonLocalExit: the block runs for 1, then `break` at x == 2
+    // stops the iteration and completes `each` normally (3 is never reached).
+    let mut inst = instance_with_caps(
+        "each([1, 2, 3]) do (x)\nprint(x)\nif x == 2 then break end\nend\nprint(99)\n",
+    );
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    // 1, 2 print; break ends `each`; the following statement (99) still runs.
+    assert_eq!(inst.output(), b"1\n2\n99\n");
 }
 
 #[test]
-fn return_across_an_each_block_is_unsupported_at_5a() {
-    // A `return` from inside the block targets the enclosing `f`, crossing the native
-    // boundary — S-46 (M2b.5b); at 5a it raises `Unsupported`.
-    let mut inst = instance_with_caps("fn f()\neach([1]) do (x)\nreturn 5\nend\n0\nend\nf()\n");
-    assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
-        Outcome::Raised(..)
-    ));
+fn return_across_an_each_block_returns_from_the_enclosing_fn() {
+    // A `return` inside the block targets the enclosing `f`, punching through the native
+    // `each` (S-46): `f` yields 1 (the first element) and the trailing `99` never runs.
+    let mut inst =
+        instance_with_caps("fn f()\neach([1, 2, 3]) do (x)\nreturn x\nend\n99\nend\nprint(f())\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"1\n");
+}
+
+#[test]
+fn a_break_in_a_nested_each_targets_only_the_inner_each() {
+    // Composition (S-46 rider 2): the inner `break` ends the *inner* `each` (after y == 3
+    // each time), and the outer `each` continues to its next element — the break resolves
+    // at the innermost native consumer, not the outer one.
+    let mut inst = instance_with_caps(
+        "each([1, 2]) do (x)\neach([3, 4]) do (y)\nprint(y)\nbreak\nend\nprint(x)\nend\n",
+    );
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    // x=1: inner prints 3 then breaks, then print(1); x=2: inner prints 3 then breaks, print(2).
+    assert_eq!(inst.output(), b"3\n1\n3\n2\n");
+}
+
+#[test]
+fn a_return_from_a_nested_each_unwinds_through_both_consumers() {
+    // Composition innermost-out (S-46 rider 2): the `return` crosses *both* native `each`
+    // boundaries to reach `f`, which yields 3 (the first inner element).
+    let mut inst = instance_with_caps(
+        "fn f()\neach([1, 2]) do (x)\neach([3, 4]) do (y)\nreturn y\nend\nend\n0\nend\n\
+         print(f())\n",
+    );
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"3\n");
+}
+
+#[test]
+fn a_valued_break_to_the_procedure_each_raises() {
+    // Parity with a Doodle `to` block-consumer (S-10 open half): `each` is a procedure,
+    // so a valued `break` has no value destination and raises `NoValueDestination`.
+    let mut inst = instance_with_caps("each([1]) do (x)\nbreak 5\nend\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
+    assert_eq!(inst.state(), InstanceState::Raised);
+}
+
+#[test]
+fn stepping_a_break_across_each_reaches_the_same_terminal_as_a_fast_run() {
+    // Drive-directive determinism (E§7.7) over the S-46 path: a `break` crossing the
+    // native boundary reaches the same terminal + output whether stepped or run straight.
+    let src = "each([1, 2, 3]) do (x)\nprint(x)\nif x == 2 then break end\nend\n";
+    let mut fast = instance_with_caps(src);
+    let fast_outcome = run(&mut fast, Directive::RunToCompletion);
+
+    let mut stepped = instance_with_caps(src);
+    let (_, step_outcome) = drive_counting(&mut stepped, Directive::Step);
+
+    assert!(
+        matches!(fast_outcome, Outcome::Completed(None)),
+        "{fast_outcome:?}"
+    );
+    assert!(
+        matches!(step_outcome, Outcome::Completed(None)),
+        "{step_outcome:?}"
+    );
+    assert_eq!(fast.output(), stepped.output());
+    assert_eq!(fast.state(), stepped.state());
 }
 
 #[test]

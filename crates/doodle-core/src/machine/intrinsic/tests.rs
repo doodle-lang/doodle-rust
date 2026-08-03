@@ -17,6 +17,50 @@ fn answer() -> Intrinsic {
     }
 }
 
+/// A block parameter for the misbehaving-consumer intrinsics below.
+fn block_param() -> ForeignParam {
+    ForeignParam {
+        name: "body".into(),
+        default: None,
+        is_block: true,
+    }
+}
+
+/// A **misbehaving** native block-consumer that drives its block **again after a
+/// non-local exit** — the block `break`s (an S-46 `NonLocalExit` parks the unwind),
+/// then this callback invokes it a second time instead of returning promptly. That
+/// violates the E§7.6 host contract (rider 3: no new drives after a `NonLocalExit`);
+/// the engine must fault, not run the block a second time.
+fn redrives_after_a_non_local_exit() -> Intrinsic {
+    Intrinsic {
+        name: "misbehave".into(),
+        kind: BodyKind::Proc,
+        params: vec![block_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let _ = ctx.invoke_block(vec![Value::Int(0)])?; // block `break`s → NonLocalExit
+            let _ = ctx.invoke_block(vec![Value::Int(0)])?; // VIOLATION: drive again
+            Ok(None)
+        }),
+    }
+}
+
+/// A **misbehaving** native block-consumer that **returns a value after a non-local
+/// exit** — the block `break`s (an S-46 `NonLocalExit` parks the unwind), then this
+/// callback returns a result instead of returning promptly with none. That violates
+/// the E§7.6 host contract; the engine must fault rather than let the value stomp the
+/// parked exit's target.
+fn returns_a_value_after_a_non_local_exit() -> Intrinsic {
+    Intrinsic {
+        name: "misbehave".into(),
+        kind: BodyKind::Proc,
+        params: vec![block_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let _ = ctx.invoke_block(vec![Value::Int(0)])?; // block `break`s → NonLocalExit
+            Ok(Some(Value::Int(42))) // VIOLATION: a result after the exit
+        }),
+    }
+}
+
 /// Loads `src` (which must load clean) with `registry`, driving it to completion
 /// and returning the instance so the caller can read its output/outcome.
 fn run_with(src: &str, registry: Registry) -> (Instance, Outcome) {
@@ -130,4 +174,38 @@ fn a_to_intrinsic_result_used_as_a_value_raises() {
     // voidcheck only knows current-module `to`s, not intrinsics).
     let (_, outcome) = run_with("print(1) + 1\n", registry_with(vec![print()]));
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
+}
+
+#[test]
+fn driving_a_block_again_after_a_non_local_exit_faults() {
+    // Host-contract fault (E§7.6, S-46 rider 3): a callback that re-invokes its block
+    // after the block took a non-local exit is a violation → `Faulted(Internal)`, NOT a
+    // `Raised` and NOT a silent second run of the block.
+    use crate::drive::EngineFault;
+    let (inst, outcome) = run_with(
+        "misbehave() do (x)\nbreak\nend\n",
+        registry_with(vec![redrives_after_a_non_local_exit()]),
+    );
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Internal)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), crate::machine::InstanceState::Faulted);
+}
+
+#[test]
+fn returning_a_value_after_a_non_local_exit_faults() {
+    // Host-contract fault (E§7.6): a callback must return promptly with no result once
+    // its block took a non-local exit; returning a value instead faults rather than
+    // stomping the parked exit's target.
+    use crate::drive::EngineFault;
+    let (inst, outcome) = run_with(
+        "misbehave() do (x)\nbreak\nend\n",
+        registry_with(vec![returns_a_value_after_a_non_local_exit()]),
+    );
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Internal)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), crate::machine::InstanceState::Faulted);
 }

@@ -61,6 +61,20 @@ pub(crate) enum Unwind {
         /// The home callable frame's index — the unwind target.
         home: usize,
     },
+    /// `break` in a block invoked by a **native** block-consuming function (E§7.6,
+    /// S-46): the target is the native call on the far side of the host boundary,
+    /// which has no consumer frame. Pop frames down to `boundary`, then leave the
+    /// unwind **parked** — the reentrant nested drive detects it there and relays it
+    /// as `NonLocalExit(Break)`, and the native call's apply site
+    /// ([`resume_native_boundary`]) completes the call with `value`.
+    NativeBreak {
+        /// The value the native consuming call produces (`None` for a bare `break`).
+        value: Option<Value>,
+        /// The native consumer's frame depth — pop down to here, then park.
+        boundary: usize,
+        /// The `break`'s span, for the valued-`break`-to-a-procedure raise (S-10).
+        span: crate::span::Span,
+    },
 }
 
 impl Unwind {
@@ -72,7 +86,8 @@ impl Unwind {
         match self {
             Unwind::BlockContinue { value }
             | Unwind::BlockBreak { value, .. }
-            | Unwind::Return { value, .. } => *value,
+            | Unwind::Return { value, .. }
+            | Unwind::NativeBreak { value, .. } => *value,
             Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } => None,
         }
     }
@@ -128,15 +143,16 @@ pub(crate) fn exit_apply(
                 }
             }
             // A `break` out of a block invoked by a native block-consuming function
-            // crosses the host boundary — S-46 (M2b.5b). Not yet supported.
-            Consumer::Native => {
-                return Err(Raise::new(
-                    ExceptionKind::Unsupported,
-                    "a `break` out of a native block-consuming function is not yet supported \
-                     (S-46, arrives at M2b.5b)",
-                    span,
-                ));
-            }
+            // crosses the host boundary (E§7.6, S-46): unwind to the native `boundary`
+            // and park there. The value-destination check (a valued `break` to a
+            // procedure consumer, S-10) happens at the apply site, where the native
+            // callee's kind is known ([`resume_native_boundary`]) — its span is carried
+            // here for parity with the [`Consumer::DoodleCall`] raise above.
+            Consumer::Native { boundary } => Unwind::NativeBreak {
+                value,
+                boundary,
+                span,
+            },
         },
         _ => unreachable!("resolver-annotated exit kind/target mismatch"),
     };
@@ -181,6 +197,10 @@ pub(crate) fn step(
         // A `return` can fall off the end of a `fn` (a bare `return`), so it alone
         // may raise as it delivers.
         Unwind::Return { value, home } => do_return(resolved, heap, machine, value, home),
+        Unwind::NativeBreak { boundary, .. } => {
+            native_break(machine, boundary);
+            Ok(None)
+        }
     }
 }
 
@@ -265,6 +285,65 @@ fn block_break(
         machine.frames.pop();
         None
     }
+}
+
+/// `break` targeting a **native** block-consumer (E§7.6, S-46): pop one frame toward
+/// the native `boundary`. There is no consumer frame at the boundary, so this never
+/// pops it — once the stack drains to `boundary` the reentrant nested drive
+/// ([`invoke_block`](super::intrinsic)) sees the still-parked unwind and relays it as
+/// `NonLocalExit(Break)`; the native call's apply site then completes the call
+/// ([`resume_native_boundary`]). The nested drive stops stepping the moment the stack
+/// reaches `boundary`, so this is only reached with a frame above it to pop.
+fn native_break(machine: &mut Machine, boundary: usize) {
+    debug_assert!(
+        machine.frames.len() > boundary,
+        "native_break at/under its boundary — the nested drive should have caught it"
+    );
+    machine.frames.pop();
+}
+
+/// Resolves a parked non-local exit at a native block-consumer's apply site (E§7.6,
+/// S-46), given the native call's `boundary` (frame depth) and `kind`. Precondition:
+/// `machine.unwind` is `Some` (the reentrant nested drive returned `NonLocalExit`).
+///
+/// A `break` targeting *this* call ([`Unwind::NativeBreak`] at `boundary`) **completes
+/// it**: the unwind clears and its value becomes the call's result (Void for a `to`),
+/// returning `true` — the drive resumes normally. A valued `break` to a **procedure**
+/// consumer has no value destination (the open S-10 half), so it raises for parity
+/// with the [`Consumer::DoodleCall`] path. Any other in-flight exit (a `return`, or a
+/// `break` aimed at a construct enclosing this call) is left parked and returns
+/// `false` — it keeps unwinding past this call in the enclosing drive.
+pub(crate) fn resume_native_boundary(
+    machine: &mut Machine,
+    boundary: usize,
+    kind: BodyKind,
+) -> Result<bool, Raise> {
+    let Some(Unwind::NativeBreak {
+        value,
+        boundary: target,
+        span,
+    }) = machine.unwind
+    else {
+        return Ok(false);
+    };
+    if target != boundary {
+        // A `break` aimed at an enclosing native consumer: keep it parked (this only
+        // arises with nested native consumers — the inner apply resumes its own break;
+        // an outer one propagates here). Left in flight for the enclosing drive.
+        return Ok(false);
+    }
+    // Consume the parked unwind before delivering or raising.
+    machine.unwind = None;
+    if value.is_some() && kind == BodyKind::Proc {
+        return Err(Raise::new(
+            ExceptionKind::NoValueDestination,
+            "this `break` gives a value, but the block-consuming call is a procedure, \
+             which yields none",
+            span,
+        ));
+    }
+    machine.reg = value;
+    Ok(true)
 }
 
 /// `return`: pop frames through the home callable inclusive (punching through any

@@ -200,10 +200,11 @@ fn block_apply(
 
 /// Invokes a received block from a **native** block-consuming function (E§5.4/§7.6,
 /// MD §14): binds `arg_values` positionally to the block's parameters and pushes a
-/// [`FrameKind::Block`] frame whose consumer is the native `boundary` (there is no
-/// consumer frame — the consumer is across the host boundary). The reentrant nested
-/// drive ([`intrinsic::invoke_block`](super::intrinsic)) then runs this frame. Block
-/// parameters have no defaults, so the count must match exactly.
+/// [`FrameKind::Block`] frame whose consumer is the native boundary at the current
+/// frame depth (there is no consumer frame — the consumer is across the host
+/// boundary; a `break` targeting it unwinds to this depth and parks). The reentrant
+/// nested drive ([`intrinsic::invoke_block`](super::intrinsic)) then runs this frame.
+/// Block parameters have no defaults, so the count must match exactly.
 pub(crate) fn invoke_native(
     resolved: &ResolvedModule,
     heap: &mut Heap,
@@ -233,11 +234,14 @@ pub(crate) fn invoke_native(
     // A block does not capture (static links, §7); its own locals may still be
     // cell-boxed (a nested `fn` captured one), so build slots.
     let locals = local::build(resolved, heap, block_id, &slots, &[]);
+    // The native consumer sits at the current frame depth: the block frame is pushed
+    // just above it, and a `break` targeting it unwinds back down to here (§12).
+    let boundary = machine.frames.len();
     let serial = machine.next_frame_serial();
     machine.frames.push(Frame::block(
         desc.defining,
         desc.defining_serial,
-        Consumer::Native,
+        Consumer::Native { boundary },
         locals,
         body,
         serial,
