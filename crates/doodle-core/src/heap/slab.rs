@@ -159,11 +159,13 @@ impl<T> Slab<T> {
 
     /// Sweeps the slab (MD §15): frees every occupied slot whose mark is clear
     /// (calling `on_free` with the reclaimed object, so the heap can subtract its
-    /// byte charge), clears the mark on every survivor, and rebuilds the free list
-    /// in **index order** so allocation reuse is identical across runs (a
-    /// determinism gate). The mark phase must have run first; afterward every
-    /// survivor is unmarked, ready for the next cycle.
-    pub fn sweep(&mut self, mut on_free: impl FnMut(&T)) {
+    /// byte charge — and, for foreign values, take the finalizer to queue), clears the
+    /// mark on every survivor, and rebuilds the free list in **index order** so
+    /// allocation reuse is identical across runs (a determinism gate). The mark phase
+    /// must have run first; afterward every survivor is unmarked, ready for the next
+    /// cycle. `on_free` receives the object mutably so a caller may take owned state out
+    /// of it before the slot is recycled.
+    pub fn sweep(&mut self, mut on_free: impl FnMut(&mut T)) {
         let mut free_head = None;
         let mut live = 0u32;
         // Walk indices high→low and prepend each hole, so the rebuilt list runs
@@ -181,7 +183,7 @@ impl<T> Slab<T> {
             if keep {
                 live += 1;
             } else {
-                if let Slot::Occupied { obj, .. } = &self.slots[i] {
+                if let Slot::Occupied { obj, .. } = &mut self.slots[i] {
                     on_free(obj);
                 }
                 self.slots[i] = Slot::Free {
@@ -192,6 +194,17 @@ impl<T> Slab<T> {
         }
         self.free_head = free_head;
         self.live_count = live;
+    }
+
+    /// Visits every **live** object mutably, in slab index order. Used at instance
+    /// destruction to drain foreign finalizers (`Heap::finalize_all`); unlike
+    /// [`sweep`](Slab::sweep) it frees nothing and touches no marks.
+    pub fn each_occupied_mut(&mut self, mut visit: impl FnMut(&mut T)) {
+        for slot in &mut self.slots {
+            if let Slot::Occupied { obj, .. } = slot {
+                visit(obj);
+            }
+        }
     }
 
     /// Whether the slot at `index` currently holds a live object.

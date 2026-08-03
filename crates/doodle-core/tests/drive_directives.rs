@@ -481,3 +481,44 @@ fn step_into_descends_into_a_call_but_step_over_does_not() {
          descends into f's body"
     );
 }
+
+// ---- foreign values in a running program (M2b.6, E§4.5) ----
+
+#[test]
+fn a_foreign_value_is_inert_in_doodle_and_finalizes_at_destroy() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    // A host foreign value injected as a capability result: Doodle receives and holds it,
+    // but it is opaque — arithmetic on it raises (E§4.5). Its finalizer never runs while
+    // the program executes (a finalizer's effects cannot cross into Doodle, so they can't
+    // perturb the deterministic run), only once when the instance is destroyed.
+    let count = Rc::new(Cell::new(0u32));
+    let c = count.clone();
+    let mut inst = instance_with_caps("read_line() + 1\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    let finalizer: doodle_core::heap::Finalizer = Box::new(move |ptr| {
+        assert_eq!(ptr, 42, "the finalizer receives the host ptr");
+        c.set(c.get() + 1);
+    });
+    let foreign = inst.make_foreign(7, 42, Some(finalizer));
+    let outcome = resolve(&mut inst, Resolution::Value(foreign));
+    assert!(
+        matches!(outcome, Outcome::Raised(..)),
+        "arithmetic on a foreign value raises: {outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Raised);
+    assert_eq!(
+        count.get(),
+        0,
+        "the finalizer must not run during the drive"
+    );
+    inst.destroy();
+    assert_eq!(
+        count.get(),
+        1,
+        "the foreign's finalizer ran once at destroy"
+    );
+}

@@ -31,10 +31,15 @@ mod gc;
 mod objects;
 mod slab;
 
-pub use objects::{BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, ListObj, StrObj, TypeObj};
+pub use objects::{
+    BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, Finalizer, ForeignObj, ListObj, StrObj,
+    TypeObj,
+};
 pub use slab::Slab;
 
-use crate::machine::{BigIntIdx, BytesIdx, CalIdx, CellIdx, ListIdx, StrIdx, TypeIdx, Value};
+use crate::machine::{
+    BigIntIdx, BytesIdx, CalIdx, CellIdx, FrnIdx, ListIdx, StrIdx, TypeIdx, Value,
+};
 use num_bigint::BigInt;
 
 /// The byte width charged to [`Heap::bytes_allocated`] per list element. A fixed
@@ -96,6 +101,26 @@ fn type_payload(_: &TypeObj) -> u64 {
     VALUE_BYTES
 }
 
+/// A foreign value's payload: a fixed header (its `tag` + host `ptr`). The optional
+/// finalizer is host state of unknowable size (E§4.5), so — like a pure cache (MD §4)
+/// — it is not charged; counting it would leak host-side nondeterminism into GC
+/// triggering.
+fn foreign_payload(_: &ForeignObj) -> u64 {
+    2 * size_of::<u64>() as u64
+}
+
+/// Runs one foreign value's `finalizer` with the given host `ptr` (E§4.5), **isolating a
+/// panic**. A finalizer is best-effort host cleanup and, by contract, **must not unwind**
+/// (the M7 C-ABI form — an `extern "C"` callback — cannot). This backstops a buggy one:
+/// a panic is caught and dropped so it can neither prevent its **peer** finalizers from
+/// running (which would leak their resources, breaking the never-leak half of
+/// exactly-once) nor escape [`Instance::drop`](crate::machine::Instance) as a
+/// second unwind and abort the host process. The panic having fired means that one
+/// resource may not have been released — a host bug the caught panic does not paper over.
+fn run_finalizer(ptr: u64, finalizer: Finalizer) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || finalizer(ptr)));
+}
+
 /// The per-instance heap (machine-design §4): the object slabs plus the
 /// allocation accounting the GC and heap limit read.
 pub struct Heap {
@@ -106,6 +131,7 @@ pub struct Heap {
     cells: Slab<CellObj>,
     callables: Slab<CalObj>,
     types: Slab<TypeObj>,
+    foreigns: Slab<ForeignObj>,
     /// Accounted heap bytes (MD §4): each object's program-driven payload plus a
     /// fixed [`OBJECT_OVERHEAD`], so object count counts (see the module-level
     /// determinism note). Monotonic under M2a.1 (no reclamation); GC decreases it
@@ -127,6 +153,7 @@ impl Heap {
             cells: Slab::new(),
             callables: Slab::new(),
             types: Slab::new(),
+            foreigns: Slab::new(),
             bytes_allocated: 0,
             alloc_serial: 0,
         }
@@ -258,6 +285,40 @@ impl Heap {
         self.types.get(idx.0)
     }
 
+    /// Allocates a foreign value (E§4.5): a host `tag` + opaque host `ptr` + optional
+    /// [`Finalizer`]. Payload is a fixed header (MD §4); the finalizer is uncounted host
+    /// state.
+    pub fn alloc_foreign(&mut self, tag: u64, ptr: u64, finalizer: Option<Finalizer>) -> FrnIdx {
+        let obj = ForeignObj {
+            tag,
+            ptr,
+            finalizer,
+        };
+        self.charge_object(foreign_payload(&obj));
+        let serial = self.next_serial();
+        FrnIdx(self.foreigns.alloc(obj, serial))
+    }
+
+    /// Borrows the foreign value at `idx`.
+    pub fn foreign(&self, idx: FrnIdx) -> &ForeignObj {
+        self.foreigns.get(idx.0)
+    }
+
+    /// Runs the finalizer of **every live foreign value**, exactly once, at instance
+    /// destruction (E§3.1/§4.5). Each finalizer is **taken** as it runs, so a value
+    /// already finalized by a GC sweep (its finalizer gone, its slot freed) is never
+    /// reached here, and a live value is finalized exactly once. Visited in slab index
+    /// order — finalizers are host-side and never Doodle-observable, so the order does
+    /// not affect determinism (E§11). The foreign objects are left in place (the heap is
+    /// being torn down); this only drains their finalizers.
+    pub(crate) fn finalize_all(&mut self) {
+        self.foreigns.each_occupied_mut(|obj| {
+            if let Some(finalizer) = obj.finalizer.take() {
+                run_finalizer(obj.ptr, finalizer);
+            }
+        });
+    }
+
     /// Total accounted heap bytes (payload + per-object overhead, MD §4). Drives GC
     /// triggering and the heap limit (M2a.9/M2a.10).
     pub fn bytes_allocated(&self) -> u64 {
@@ -274,6 +335,7 @@ impl Heap {
             + self.cells.live_count()
             + self.callables.live_count()
             + self.types.live_count()
+            + self.foreigns.live_count()
     }
 }
 

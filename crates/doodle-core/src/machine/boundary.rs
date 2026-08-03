@@ -128,14 +128,16 @@ fn kind_of_value(value: Value) -> Kind {
 /// generation-check the handle and type-check the value.
 impl Instance {
     /// Interns `value` as a fresh host handle (one reference), keeping it reachable
-    /// across collections and drives. Shared by every `make_*`.
-    fn intern(&mut self, value: Value) -> Handle {
+    /// across collections and drives. Shared by every `make_*` (including the
+    /// foreign-value slice in [`foreign`](super::foreign)).
+    pub(super) fn intern(&mut self, value: Value) -> Handle {
         self.machine.handles.intern(value)
     }
 
     /// The value a handle names, generation-checked (E§4.2), mapping a stale handle
-    /// to [`ValueError::Stale`].
-    fn value_of(&self, handle: Handle) -> Result<Value, ValueError> {
+    /// to [`ValueError::Stale`]. Shared with the foreign-value readers
+    /// ([`foreign`](super::foreign)).
+    pub(super) fn value_of(&self, handle: Handle) -> Result<Value, ValueError> {
         Ok(self.machine.handles.resolve(handle)?)
     }
 
@@ -286,8 +288,9 @@ impl Instance {
     }
 }
 
-/// A [`ValueError::WrongKind`] for `value` where `expected` was required.
-fn wrong_kind(value: Value, expected: Kind) -> ValueError {
+/// A [`ValueError::WrongKind`] for `value` where `expected` was required. Shared with
+/// the foreign-value readers ([`foreign`](super::foreign)).
+pub(super) fn wrong_kind(value: Value, expected: Kind) -> ValueError {
     ValueError::WrongKind {
         expected,
         got: kind_of_value(value),

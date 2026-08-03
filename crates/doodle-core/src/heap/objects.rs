@@ -111,3 +111,43 @@ pub struct TypeObj {
     /// machine detail, not part of the heap's public surface.
     pub(crate) builtin: BuiltinType,
 }
+
+/// A foreign value's finalizer (engine spec E§4.5): a host callback run **exactly
+/// once** when the value is garbage-collected or the instance is destroyed, given the
+/// value's opaque host pointer, to release the underlying resource.
+///
+/// **Provisional in-engine shape (M2b.6, S-42-lite).** A boxed `FnOnce(host_ptr)`, so
+/// a finalizer can own the Rust-side resource it releases and run test-observably. The
+/// C-ABI form — an `extern "C" fn(void*)` — is deferred to the full S-42 host-callback
+/// FFI (M7), which this bridges to (the `u64` is the `void*`). It is host state, never
+/// part of the deterministic Doodle heap: it is not snapshotted (replay re-supplies it
+/// via `make_foreign`) and its effects cannot re-enter the instance (E§4.5).
+pub type Finalizer = Box<dyn FnOnce(u64)>;
+
+/// A foreign (host) value (engine spec E§4.5): an opaque host object exposed to Doodle.
+/// It is **inert data** to Doodle — reference-typed with identity equality (L§4.13), no
+/// fields, no arithmetic — recognized by the host via its `tag` and carrying an opaque
+/// host pointer plus an optional [`Finalizer`]. Its identity is its slab index, like
+/// every heap object.
+pub struct ForeignObj {
+    /// The host type tag: the host discriminates its own foreign values by this.
+    pub tag: u64,
+    /// The opaque host pointer/token, returned verbatim by `foreign_ptr` and handed to
+    /// the finalizer. The engine never dereferences it.
+    pub ptr: u64,
+    /// The finalizer, or `None`. **Taken** when it runs (at GC-death or destroy), so it
+    /// can never run twice (exactly-once, E§4.5).
+    pub finalizer: Option<Finalizer>,
+}
+
+impl std::fmt::Debug for ForeignObj {
+    /// Hand-written (a [`Finalizer`] is not `Debug`): shows the identifying fields and
+    /// whether a finalizer is attached, never the closure itself.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForeignObj")
+            .field("tag", &self.tag)
+            .field("ptr", &self.ptr)
+            .field("has_finalizer", &self.finalizer.is_some())
+            .finish()
+    }
+}

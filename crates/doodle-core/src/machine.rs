@@ -21,6 +21,7 @@ mod compare;
 mod cont;
 mod control;
 mod error;
+mod foreign;
 mod frame;
 mod gc;
 mod handle;
@@ -242,7 +243,26 @@ pub struct Instance {
     state: InstanceState,
 }
 
+/// Releasing an instance's heap runs the finalizer of **every live foreign value**
+/// exactly once (E§3.1/§4.5), whether the host calls [`destroy`](Instance::destroy)
+/// or simply drops the instance — so a host resource behind a foreign value is never
+/// leaked. A foreign value already reclaimed by a GC sweep had its finalizer run then
+/// (and taken), so it is not touched again here.
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.heap.finalize_all();
+    }
+}
+
 impl Instance {
+    /// Destroys the instance (E§3.1): releases its heap, running the finalizer of every
+    /// still-live foreign value (the work happens in [`Drop`], so a plain drop finalizes
+    /// too). After this, all handles into the instance are invalid.
+    pub fn destroy(self) {
+        // `self` drops at the end of this scope, running `Drop` (the finalizers). Named
+        // explicitly so the E§3.1 `destroy` surface exists on the public API.
+    }
+
     /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
     /// Validates the config first (S-41): a requested Unicode version that is not the
     /// engine's build-pinned one is rejected — the engine supports exactly its pinned

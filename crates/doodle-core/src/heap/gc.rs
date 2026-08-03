@@ -16,8 +16,8 @@
 //! value's outgoing references) and the **sweep**.
 
 use super::{
-    Heap, OBJECT_OVERHEAD, bigint_payload, bytes_payload, cal_payload, cell_payload, list_payload,
-    str_payload, type_payload,
+    Heap, OBJECT_OVERHEAD, bigint_payload, bytes_payload, cal_payload, cell_payload,
+    foreign_payload, list_payload, str_payload, type_payload,
 };
 use crate::machine::{CalIdx, CellIdx, Value};
 
@@ -77,14 +77,20 @@ impl Tracer<'_> {
             Value::Type(i) => {
                 self.heap.types.mark(i.0);
             }
+            // A foreign value is an opaque leaf (E§4.5): its host `ptr` is not a heap
+            // reference, so it has no children to scan — mark only. A dead one's
+            // finalizer is taken and queued by the sweep, not here.
+            Value::Foreign(i) => {
+                self.heap.foreigns.mark(i.0);
+            }
             // Non-heap scalars: nothing to mark.
             Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Module(_) => {}
             // Not yet allocatable (no slab exists): such a value cannot be
-            // constructed, so reaching here is a bug. When dicts/records/foreigns
-            // land (M4/M5), add their marking — and child-scanning for the
-            // aggregate kinds — here and in `run`.
-            Value::Dict(_) | Value::Record(_) | Value::Foreign(_) => {
-                unreachable!("GC reached {v:?} — dict/record/foreign are not allocatable yet")
+            // constructed, so reaching here is a bug. When dicts/records land (M4/M5),
+            // add their marking — and child-scanning for the aggregate kinds — here
+            // and in `run`.
+            Value::Dict(_) | Value::Record(_) => {
+                unreachable!("GC reached {v:?} — dict/record are not allocatable yet")
             }
         }
     }
@@ -129,7 +135,8 @@ impl Heap {
     /// Runs one precise, non-moving collection (MD §15). `seed_roots` marks the
     /// root set (the caller enumerates it from the machine state); this then traces
     /// transitively and sweeps every slab, subtracting reclaimed objects from
-    /// `bytes_allocated`.
+    /// `bytes_allocated`. Any **finalizers** of collected foreign values (E§4.5) run
+    /// **after** the sweep completes, host-side and never Doodle-observable.
     pub(crate) fn collect(&mut self, seed_roots: impl FnOnce(&mut Tracer)) {
         {
             let mut tracer = Tracer {
@@ -139,13 +146,23 @@ impl Heap {
             seed_roots(&mut tracer);
             tracer.run();
         }
-        self.sweep_all();
+        let finalizers = self.sweep_all();
+        // Run after the whole collection completes (MD §15): the heap is fully swept and
+        // consistent, and a finalizer cannot re-enter the instance (E§4.5), so this
+        // cannot perturb the deterministic Doodle heap. Each is isolated (a panic in one
+        // must not skip the rest — that would leak their resources, MD §15).
+        for (ptr, finalizer) in finalizers {
+            super::run_finalizer(ptr, finalizer);
+        }
     }
 
     /// Sweeps every slab in index order (MD §15), reclaiming unmarked objects and
     /// subtracting their exact byte charge (overhead + payload, the same formula
-    /// `charge_object` added at allocation) from the heap total.
-    fn sweep_all(&mut self) {
+    /// `charge_object` added at allocation) from the heap total. Returns the
+    /// `(host_ptr, finalizer)` of every reclaimed **foreign** value, taken out of the
+    /// dying object so it runs exactly once (E§4.5) — the caller runs them after the
+    /// collection completes.
+    fn sweep_all(&mut self) -> Vec<(u64, super::Finalizer)> {
         let mut freed = 0u64;
         self.strings
             .sweep(|o| freed += OBJECT_OVERHEAD + str_payload(o));
@@ -161,11 +178,23 @@ impl Heap {
             .sweep(|o| freed += OBJECT_OVERHEAD + cal_payload(o));
         self.types
             .sweep(|o| freed += OBJECT_OVERHEAD + type_payload(o));
+        // A reclaimed foreign value: account it like any object, and take its finalizer
+        // (if any) to run once the collection is done (E§4.5). The finalizer is taken
+        // here, so it can never run again — a later sweep or `destroy` finds the slot
+        // already freed / the finalizer gone.
+        let mut finalizers = Vec::new();
+        self.foreigns.sweep(|o| {
+            freed += OBJECT_OVERHEAD + foreign_payload(o);
+            if let Some(finalizer) = o.finalizer.take() {
+                finalizers.push((o.ptr, finalizer));
+            }
+        });
         debug_assert!(
             freed <= self.bytes_allocated,
             "GC freed more bytes ({freed}) than were charged ({})",
             self.bytes_allocated
         );
         self.bytes_allocated -= freed;
+        finalizers
     }
 }

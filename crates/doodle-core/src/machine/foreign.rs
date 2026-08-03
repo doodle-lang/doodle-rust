@@ -1,0 +1,207 @@
+//! The foreign-value slice of the host↔value boundary API (engine spec E§4.5): the
+//! `make_foreign` constructor and the `foreign_tag`/`foreign_ptr` readers, split from
+//! [`boundary`](super::boundary) for length. A foreign value is an **opaque host
+//! object** Doodle can hold, pass, and store by identity (L§4.13) but not inspect: it
+//! has no fields and no arithmetic (attempting either raises). Its optional finalizer
+//! runs **exactly once** — at the collection that reclaims it, or at
+//! [`destroy`](super::Instance::destroy) if it is still live — to release the
+//! underlying host resource, and is never Doodle-observable (its effects cannot
+//! re-enter the instance, so determinism is preserved, E§11).
+
+use super::boundary::{Kind, ValueError, wrong_kind};
+use super::{Handle, Instance, Value};
+use crate::heap::Finalizer;
+
+impl Instance {
+    /// Constructs a foreign (host) value (E§4.5). `tag` is the host's type
+    /// discriminator; `ptr` is an opaque host pointer returned verbatim by
+    /// [`foreign_ptr`](Self::foreign_ptr) and handed to `finalizer`. The optional
+    /// `finalizer` runs **exactly once** — at the collection that reclaims the value,
+    /// or at [`destroy`](Self::destroy) if it is still live then — to release the
+    /// underlying resource.
+    pub fn make_foreign(&mut self, tag: u64, ptr: u64, finalizer: Option<Finalizer>) -> Handle {
+        let idx = self.heap.alloc_foreign(tag, ptr, finalizer);
+        self.intern(Value::Foreign(idx))
+    }
+
+    /// The host type `tag` of a foreign value (E§4.5). Errors if the value is not a
+    /// foreign value ([`ValueError::WrongKind`]) or its handle is stale.
+    pub fn foreign_tag(&self, handle: Handle) -> Result<u64, ValueError> {
+        match self.value_of(handle)? {
+            Value::Foreign(idx) => Ok(self.heap.foreign(idx).tag),
+            other => Err(wrong_kind(other, Kind::Foreign)),
+        }
+    }
+
+    /// The opaque host `ptr` of a foreign value (E§4.5), returned verbatim. Errors if
+    /// the value is not a foreign value ([`ValueError::WrongKind`]) or its handle is stale.
+    pub fn foreign_ptr(&self, handle: Handle) -> Result<u64, ValueError> {
+        match self.value_of(handle)? {
+            Value::Foreign(idx) => Ok(self.heap.foreign(idx).ptr),
+            other => Err(wrong_kind(other, Kind::Foreign)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::ModuleId;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A `Ready` instance over a trivial clean-loading program — foreign values need only
+    /// the heap + handle table, not a running program.
+    fn instance() -> Instance {
+        use crate::diag::Severity;
+        let nfc = crate::source::normalize("1\n");
+        let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+        assert!(
+            !parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error),
+            "unexpected parse error(s): {:?}",
+            parsed.diagnostics
+        );
+        let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "unexpected resolve diagnostic(s): {:?}",
+            resolved.diagnostics
+        );
+        Instance::load(resolved.module)
+    }
+
+    /// Wraps `f` as a boxed [`Finalizer`] (the coercion to `dyn FnOnce` needs the target
+    /// type, which the return type supplies).
+    fn finalizer(f: impl FnOnce(u64) + 'static) -> Option<Finalizer> {
+        Some(Box::new(f))
+    }
+
+    #[test]
+    fn tag_and_ptr_round_trip_and_report_foreign_kind() {
+        let mut inst = instance();
+        let h = inst.make_foreign(42, 99, None);
+        assert_eq!(inst.kind_of(h), Ok(Kind::Foreign));
+        assert_eq!(inst.foreign_tag(h), Ok(42));
+        assert_eq!(inst.foreign_ptr(h), Ok(99));
+    }
+
+    #[test]
+    fn a_foreign_reader_on_a_non_foreign_reports_wrong_kind() {
+        let mut inst = instance();
+        let i = inst.make_int(1);
+        assert_eq!(
+            inst.foreign_tag(i),
+            Err(ValueError::WrongKind {
+                expected: Kind::Foreign,
+                got: Kind::Int,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unreachable_foreign_runs_its_finalizer_once_at_gc() {
+        let mut inst = instance();
+        let count = Rc::new(Cell::new(0u32));
+        let seen_ptr = Rc::new(Cell::new(0u64));
+        let (c, p) = (count.clone(), seen_ptr.clone());
+        let h = inst.make_foreign(
+            1,
+            77,
+            finalizer(move |ptr| {
+                c.set(c.get() + 1);
+                p.set(ptr);
+            }),
+        );
+        inst.release(h).unwrap(); // now unreachable
+        inst.force_collect();
+        assert_eq!(
+            count.get(),
+            1,
+            "finalizer ran once at the reclaiming collection"
+        );
+        assert_eq!(seen_ptr.get(), 77, "the finalizer received the host ptr");
+        // The slot is freed and its finalizer taken, so a later collection cannot run it
+        // again — exactly-once.
+        inst.force_collect();
+        assert_eq!(count.get(), 1, "not re-run by a subsequent collection");
+    }
+
+    #[test]
+    fn a_retained_foreign_is_not_finalized_at_gc() {
+        let mut inst = instance();
+        let count = Rc::new(Cell::new(0u32));
+        let c = count.clone();
+        // Keep the handle (a GC root), so the value survives collection unfinalized.
+        let _h = inst.make_foreign(1, 0, finalizer(move |_| c.set(c.get() + 1)));
+        inst.force_collect();
+        assert_eq!(count.get(), 0, "a reachable foreign is not finalized");
+    }
+
+    #[test]
+    fn destroy_finalizes_every_live_foreign_once() {
+        let mut inst = instance();
+        let count = Rc::new(Cell::new(0u32));
+        let (c1, c2) = (count.clone(), count.clone());
+        // Two live foreign values (handles held); destroy must finalize both, once each.
+        let _a = inst.make_foreign(1, 10, finalizer(move |_| c1.set(c1.get() + 1)));
+        let _b = inst.make_foreign(2, 20, finalizer(move |_| c2.set(c2.get() + 1)));
+        inst.destroy();
+        assert_eq!(count.get(), 2, "both live finalizers ran once at destroy");
+    }
+
+    #[test]
+    fn a_gc_finalized_foreign_is_not_finalized_again_at_destroy() {
+        let mut inst = instance();
+        let count = Rc::new(Cell::new(0u32));
+        let c = count.clone();
+        let h = inst.make_foreign(1, 0, finalizer(move |_| c.set(c.get() + 1)));
+        inst.release(h).unwrap();
+        inst.force_collect();
+        assert_eq!(count.get(), 1, "finalized at GC");
+        // The value is gone; destroy must not run its finalizer a second time.
+        inst.destroy();
+        assert_eq!(
+            count.get(),
+            1,
+            "destroy does not re-finalize a collected value"
+        );
+    }
+
+    #[test]
+    fn a_foreign_without_a_finalizer_is_inert_at_gc_and_destroy() {
+        let mut inst = instance();
+        let h = inst.make_foreign(1, 0, None);
+        inst.release(h).unwrap();
+        inst.force_collect(); // no finalizer: nothing to run, no panic
+        let _live = inst.make_foreign(2, 0, None);
+        inst.destroy(); // a live no-finalizer foreign: also fine
+    }
+
+    #[test]
+    fn a_panicking_finalizer_is_isolated_from_its_peers() {
+        // A finalizer must not unwind (host contract); a buggy one that does is caught, so
+        // it neither skips its peers' finalizers (which would leak their resources) nor
+        // aborts the process at destroy. Both finalizers here run; the panic is contained.
+        let mut inst = instance();
+        let count = Rc::new(Cell::new(0u32));
+        let (c_panic, c_ok) = (count.clone(), count.clone());
+        let _a = inst.make_foreign(
+            1,
+            0,
+            finalizer(move |_| {
+                c_panic.set(c_panic.get() + 1);
+                panic!("a finalizer that misbehaves");
+            }),
+        );
+        let _b = inst.make_foreign(2, 0, finalizer(move |_| c_ok.set(c_ok.get() + 1)));
+        // Silence the expected panic's default hook so it does not clutter test output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        inst.destroy();
+        std::panic::set_hook(prev);
+        assert_eq!(count.get(), 2, "the panicking finalizer's peer still ran");
+    }
+}
