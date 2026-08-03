@@ -203,12 +203,17 @@ fn apply(
             .frames
             .last_mut()
             .expect("a frame is active")
-            .reuse_as_callable(cal, locals, body, block_param);
+            .reuse_as_callable(cal, locals, body, block_param, call);
     } else {
         let serial = machine.next_frame_serial();
-        machine
-            .frames
-            .push(Frame::callable(cal, locals, body, serial, block_param));
+        machine.frames.push(Frame::callable(
+            cal,
+            locals,
+            body,
+            serial,
+            block_param,
+            call,
+        ));
     }
     // Defaults are evaluated in the callee activation, before the body (LIFO: push
     // in reverse source order so earlier defaults run — and bind — first).

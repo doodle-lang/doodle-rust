@@ -482,6 +482,166 @@ fn step_into_descends_into_a_call_but_step_over_does_not() {
     );
 }
 
+// ---- observation surface (M2b.7, E§8.1/§8.2) ----
+
+#[test]
+fn current_position_points_into_the_source_at_a_pause() {
+    // E§8.1: a paused instance reports where it is as a module id + byte span into the
+    // source; the host renders line/column. The span is in-bounds and non-empty.
+    let src = "let a = 1\nlet b = 2\nlet c = 3\n";
+    let mut inst = instance(src);
+    assert!(matches!(
+        run(&mut inst, Directive::Step),
+        Outcome::Paused(_)
+    ));
+    let pos = inst
+        .current_position()
+        .expect("a paused instance has a position");
+    assert_eq!(pos.module, ModuleId(0));
+    assert!(
+        pos.span.start < pos.span.end && (pos.span.end as usize) <= src.len(),
+        "position span out of bounds: {:?}",
+        pos.span
+    );
+}
+
+#[test]
+fn stack_walk_at_module_top_is_one_frameless_frame() {
+    // At the module top level the stack is a single frame with no callable and no call
+    // site (it was not entered by a Doodle call).
+    let mut inst = instance("let a = 1\nlet b = 2\n");
+    assert!(matches!(
+        run(&mut inst, Directive::Step),
+        Outcome::Paused(_)
+    ));
+    let frames = inst.stack_walk();
+    assert_eq!(frames.len(), 1, "module top is a single frame");
+    assert!(frames[0].callable.is_none(), "module top is not a callable");
+    assert!(frames[0].call_site.is_none(), "module top has no call site");
+    assert_eq!(frames[0].tail_count, 0);
+}
+
+#[test]
+fn stack_walk_inside_a_call_shows_the_callee_and_its_call_site() {
+    // Stepping into `f` puts its frame innermost, carrying a callable handle and the
+    // call-site span of `f()`; the module top stays outermost, frameless.
+    let mut inst = instance("to f()\nlet x = 1\nlet y = 2\nend\nf()\n");
+    // Step in until we are inside `f` (a two-frame stack); release the minted handles
+    // each probe so the walk itself does not leak them. The first probe sees the Ready
+    // instance's lone module frame, then steps in.
+    loop {
+        let frames = inst.stack_walk();
+        let depth = frames.len();
+        for frame in &frames {
+            if let Some(h) = frame.callable {
+                inst.release(h).unwrap();
+            }
+        }
+        if depth >= 2 {
+            break;
+        }
+        let outcome = run(&mut inst, Directive::StepInto);
+        assert!(
+            matches!(outcome, Outcome::Paused(_)),
+            "never entered f: {outcome:?}"
+        );
+    }
+    let frames = inst.stack_walk();
+    assert_eq!(frames.len(), 2, "inside f: f's frame + the module top");
+    assert!(
+        frames[0].callable.is_some(),
+        "innermost frame f is a callable"
+    );
+    assert!(frames[0].call_site.is_some(), "f was entered by a call");
+    assert!(frames[1].callable.is_none(), "module top is frameless");
+    assert!(frames[1].call_site.is_none());
+    for frame in &frames {
+        if let Some(h) = frame.callable {
+            inst.release(h).unwrap();
+        }
+    }
+}
+
+#[test]
+fn current_position_is_never_the_zero_width_origin_across_a_step_through() {
+    // Regression for the end-of-body fallback: a Step that lands as a frame drains to its
+    // return (conts empty, or a bare ReturnBarrier) must not report the (0,0) file-start
+    // glitch — it falls back to a position at the end of the module instead.
+    let src = "to f()\nlet x = 1\nend\nf()\n";
+    let mut inst = instance(src);
+    loop {
+        match run(&mut inst, Directive::StepInto) {
+            Outcome::Paused(_) => {
+                if let Some(pos) = inst.current_position() {
+                    assert!(
+                        !(pos.span.start == 0 && pos.span.end == 0),
+                        "current_position returned the (0,0) origin glitch"
+                    );
+                }
+            }
+            Outcome::Completed(_) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+// ---- cancellation (M2b.7, E§10.1) ----
+
+#[test]
+fn cancel_stops_an_infinite_loop_and_faults_cancelled() {
+    // The stop button (E§10.1): an otherwise-infinite loop is torn down at the next safe
+    // point once cancellation is requested, faulting `Cancelled` — a terminal, non-
+    // resumable state. (Requested before the drive here; a real host may request it from
+    // another thread while the drive runs, via the cloneable token.)
+    let mut inst = instance("loop do\n1\nend\n");
+    inst.cancel_token().cancel();
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn an_unrequested_cancel_token_does_not_affect_a_normal_run() {
+    // Holding a cancel token but never requesting cancellation leaves execution
+    // untouched — the poll is a plain atomic load with no effect (no determinism leak).
+    let mut inst = instance("let a = 1\nlet b = 2\n");
+    let _token = inst.cancel_token();
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn cancelling_a_suspended_instance_faults_when_resumed() {
+    // E§10.1 covers a **suspended** instance too: request cancellation while parked at a
+    // capability, then resume — the drive tears down at the first safe point after the
+    // resume and faults `Cancelled`, so the trailing loop never runs.
+    let mut inst = instance_with_caps("let x = read_line()\nloop do\n1\nend\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    inst.cancel_token().cancel();
+    let line = inst.make_string(b"hi").unwrap();
+    let outcome = resolve(&mut inst, Resolution::Value(line));
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+// (Cancellation *inside* a native consumer's reentrant drive — the S-46 risk-peak
+// teardown — needs a cancel that arrives mid-block, which a cancel-before-`run` cannot
+// reach; it is covered crate-internally by
+// `intrinsic::tests::cancelling_inside_a_native_consumers_reentrant_drive_tears_it_down`,
+// which cancels from a foreign call the block invokes.)
+
 // ---- foreign values in a running program (M2b.6, E§4.5) ----
 
 #[test]

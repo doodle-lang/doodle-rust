@@ -212,6 +212,17 @@ impl IntrinsicCtx<'_> {
         self.machine.output.extend_from_slice(bytes);
     }
 
+    /// **Test-only:** requests cancellation of the instance (E§10.1) from inside this
+    /// foreign call. Lets a test cancel a native consumer's reentrant drive *mid-block*
+    /// (the cancel is polled at the next safe point), which is the only single-threaded
+    /// way to reach the S-46 cancel-across-the-native-boundary teardown.
+    #[cfg(test)]
+    pub(crate) fn request_cancel(&self) {
+        self.machine
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Invokes this intrinsic's received block **reentrantly** with `args` (E§5.4/§7.6,
     /// MD §14): pushes the block frame at a native boundary and runs a nested drive on
     /// the shared heap stack to the block's completion. Returns [`BlockResult::Completed`]

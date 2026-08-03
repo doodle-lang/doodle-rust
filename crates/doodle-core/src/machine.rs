@@ -29,6 +29,7 @@ mod intrinsic;
 mod lifecycle;
 mod limits;
 mod local;
+mod observe;
 mod ring;
 mod step;
 mod types;
@@ -43,6 +44,7 @@ pub use intrinsic::{
     HostError, Intrinsic, IntrinsicCtx, Registry, each as each_intrinsic, print as print_intrinsic,
     read_line as read_line_intrinsic,
 };
+pub use observe::{FrameObservation, Position};
 pub(crate) use types::BuiltinType;
 pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
@@ -57,6 +59,7 @@ use frame::Frame;
 use handle::HandleTable;
 use limits::FusedCounter;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The maximum **reentrant-drive nesting depth** (MD §14). Each level runs a nested
 /// drive on the host's Rust stack (~10 KB/level), so this caps native recursion well
@@ -172,6 +175,11 @@ pub(crate) struct Machine {
     /// can force a collection at the exact window a value is rooted only transiently
     /// (e.g. a native `each`'s list via `foreign_roots`). Always `false` in production.
     gc_every_safe_point: bool,
+    /// The host's cancellation flag (E§10.1): the "stop button", shared with the
+    /// [`CancelToken`]s the host holds. Set from anywhere (another thread, a signal
+    /// handler) and **polled at each safe point** ([`poll_cancel`](Self::poll_cancel));
+    /// once set, the drive arms the cancel unwind (§12) and faults `Cancelled`.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Machine {
@@ -223,6 +231,48 @@ impl Machine {
             callable,
             consuming_serial,
         });
+    }
+
+    /// Polls the host cancel flag at a safe point (E§10.1). If cancellation was
+    /// requested and no transfer is already in flight, **arms the cancel unwind** (§12)
+    /// and returns `true`; the caller (`step`) then yields so the drive runs the
+    /// teardown. The common no-cancel case is a single relaxed atomic load — the whole
+    /// hot-path cost.
+    ///
+    /// A cancel first observed at the safe point that **drains the last frame** (the
+    /// module's completing transition) is *not* armed: the program has fully executed and
+    /// there is nothing left to unwind, so it completes rather than arming a dead unwind
+    /// on a terminal instance (a cancel racing exactly with completion loses to it).
+    pub(crate) fn poll_cancel(&mut self) -> bool {
+        if self.unwind.is_none() && !self.frames.is_empty() && self.cancel.load(Ordering::Relaxed) {
+            self.unwind = Some(unwind::Unwind::Cancel);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A cancellation handle for an instance (engine spec E§10.1): the host's **stop
+/// button**. Cloneable and thread-safe, so the host can request cancellation from
+/// another thread (or a signal handler) while a drive is running — or before one. The
+/// engine polls it at the instance's next safe point, unwinds the stack (running block/
+/// `with` cleanup, as for an exception), and returns
+/// [`Faulted(Cancelled)`](crate::drive::EngineFault::Cancelled); cancellation is **not**
+/// catchable by Doodle code.
+#[derive(Clone)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// Requests cancellation. Idempotent; takes effect at the instance's next safe point
+    /// (or the first safe point of the next drive, if requested while not running).
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether cancellation has been requested through this (or any cloned) token.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -403,6 +453,7 @@ impl Instance {
                 foreign_roots: Vec::new(),
                 reentry_depth: 0,
                 gc_every_safe_point: false,
+                cancel: Arc::new(AtomicBool::new(false)),
                 limits,
             },
             namespace,
@@ -413,6 +464,14 @@ impl Instance {
     /// The current lifecycle state (E§3.3).
     pub fn state(&self) -> InstanceState {
         self.state
+    }
+
+    /// A [`CancelToken`] for this instance (E§10.1): the host's stop button. The token
+    /// is cloneable and thread-safe, so a host may hold it (or a clone) elsewhere — e.g.
+    /// on another thread — and request cancellation while a drive is running. All tokens
+    /// for one instance share its cancel flag.
+    pub fn cancel_token(&self) -> CancelToken {
+        CancelToken(Arc::clone(&self.machine.cancel))
     }
 
     /// The result register: the last value produced, or `None` for Void

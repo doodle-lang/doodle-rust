@@ -293,8 +293,8 @@ fn drive(instance: &mut Instance, directive: Directive) -> Outcome {
                 instance.set_state(InstanceState::Raised);
                 return Outcome::Raised(raise.exception, raise.trace);
             }
-            // A resource limit (or, later, cancellation) at a safe point (E§10.2): a
-            // non-resumable fault.
+            // A resource limit (E§10.2) or host cancellation (E§10.1) at a safe point: a
+            // non-resumable fault (`state()` becomes terminal `Faulted`).
             Err(Halt::Fault(fault)) => {
                 instance.set_state(InstanceState::Faulted);
                 return Outcome::Faulted(fault);

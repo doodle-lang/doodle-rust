@@ -176,6 +176,42 @@ fn a_to_intrinsic_result_used_as_a_value_raises() {
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
 }
 
+/// A test intrinsic that **requests cancellation** when called — for exercising a cancel
+/// that arrives while a native consumer's reentrant drive is running its block.
+fn cancel_now() -> Intrinsic {
+    Intrinsic {
+        name: "cancel_now".into(),
+        kind: BodyKind::Proc,
+        params: Vec::new(),
+        body: ForeignBody::Sync(|ctx| {
+            ctx.request_cancel();
+            Ok(None)
+        }),
+    }
+}
+
+#[test]
+fn cancelling_inside_a_native_consumers_reentrant_drive_tears_it_down() {
+    use crate::drive::EngineFault;
+    use crate::machine::InstanceState;
+    // The block calls `cancel_now()` (arming cancellation), then loops forever. The
+    // loop's safe point — reached *inside* `each`'s reentrant drive — observes the flag,
+    // and the cancel unwind must cross the native boundary: `invoke_block` relays the
+    // parked `Cancel` as a `NonLocalExit`, `resume_native_boundary` declines to consume
+    // it (it is not a `NativeBreak`), and the enclosing drive tears the whole stack down
+    // to `Faulted(Cancelled)`. This exercises the S-46 cancel-across-the-boundary path
+    // (the milestone risk-peak) that a cancel-before-`run` never reaches.
+    let (inst, outcome) = run_with(
+        "each([1]) do (x)\ncancel_now()\nloop do\n1\nend\nend\n",
+        registry_with(vec![each(), cancel_now()]),
+    );
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
 #[test]
 fn driving_a_block_again_after_a_non_local_exit_faults() {
     // Host-contract fault (E§7.6, S-46 rider 3): a callback that re-invokes its block

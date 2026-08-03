@@ -118,6 +118,12 @@ pub(crate) struct Frame {
     /// reuse (machine-design §11). A `10⁷`-iteration tail loop runs in this one
     /// frame with `tail_count == 10⁷`.
     pub(crate) tail_count: u64,
+    /// Where this frame was entered (E§8.2, MD §17): the `Call` node whose
+    /// application pushed it, for `stack_walk`'s call-site position. `None` for the
+    /// module top level (no call site) and for a block invoked by a **native**
+    /// consumer (its invocation is host code, not a Doodle call). Updated on tail
+    /// reuse to the new call.
+    pub(crate) call_site: Option<NodeId>,
 }
 
 impl Frame {
@@ -131,6 +137,7 @@ impl Frame {
             serial,
             block_param: None,
             tail_count: 0,
+            call_site: None,
         }
     }
 
@@ -145,6 +152,7 @@ impl Frame {
         body: NodeId,
         serial: u64,
         block_param: Option<BlockDescriptor>,
+        call_site: NodeId,
     ) -> Self {
         Frame {
             kind: FrameKind::Callable { cal },
@@ -153,6 +161,7 @@ impl Frame {
             serial,
             block_param,
             tail_count: 0,
+            call_site: Some(call_site),
         }
     }
 
@@ -168,12 +177,14 @@ impl Frame {
         locals: Vec<Local>,
         body: NodeId,
         block_param: Option<BlockDescriptor>,
+        call_site: NodeId,
     ) {
         self.kind = FrameKind::Callable { cal };
         self.locals = locals;
         self.conts = callable_conts(body);
         self.block_param = block_param;
         self.tail_count += 1;
+        self.call_site = Some(call_site);
         // `serial` and the stack slot are deliberately preserved (E§8.5).
     }
 
@@ -189,6 +200,7 @@ impl Frame {
         locals: Vec<Local>,
         body: NodeId,
         serial: u64,
+        call_site: Option<NodeId>,
     ) -> Self {
         Frame {
             kind: FrameKind::Block {
@@ -201,6 +213,7 @@ impl Frame {
             serial,
             block_param: None,
             tail_count: 0,
+            call_site,
         }
     }
 }

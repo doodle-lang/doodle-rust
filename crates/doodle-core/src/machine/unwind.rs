@@ -75,6 +75,12 @@ pub(crate) enum Unwind {
         /// The `break`'s span, for the valued-`break`-to-a-procedure raise (S-10).
         span: crate::span::Span,
     },
+    /// **Cancellation** (E§10.1, §12): the host's stop button. Its target is
+    /// *everything* — the unwinder pops every frame (running each frame's block/`with`
+    /// cleanup as for an exception; none exist until M4), and once the stack is empty
+    /// the drive faults [`Cancelled`](crate::drive::EngineFault::Cancelled), a
+    /// non-resumable stop that Doodle code cannot catch. Carries no value.
+    Cancel,
 }
 
 impl Unwind {
@@ -88,7 +94,7 @@ impl Unwind {
             | Unwind::BlockBreak { value, .. }
             | Unwind::Return { value, .. }
             | Unwind::NativeBreak { value, .. } => *value,
-            Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } => None,
+            Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } | Unwind::Cancel => None,
         }
     }
 }
@@ -199,6 +205,14 @@ pub(crate) fn step(
         Unwind::Return { value, home } => do_return(resolved, heap, machine, value, home),
         Unwind::NativeBreak { boundary, .. } => {
             native_break(machine, boundary);
+            Ok(None)
+        }
+        // Cancellation (E§10.1): tear the stack down one frame per transition, running
+        // each frame's block/`with` cleanup as for an exception (none exist until M4, so
+        // a frame pops inertly here). This reports no settling safe point; [`step`] faults
+        // `Cancelled` once the stack is empty.
+        Unwind::Cancel => {
+            machine.frames.pop();
             Ok(None)
         }
     }

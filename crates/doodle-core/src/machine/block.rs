@@ -194,6 +194,7 @@ fn block_apply(
         locals,
         body,
         serial,
+        Some(call),
     ));
     Ok(())
 }
@@ -245,6 +246,9 @@ pub(crate) fn invoke_native(
         locals,
         body,
         serial,
+        // A native consumer invokes the block from host code, not a Doodle call, so this
+        // block frame has no Doodle call-site position (E§8.2).
+        None,
     ));
     Ok(())
 }

@@ -15,6 +15,7 @@ use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::{Halt, Machine, Value, arith, block, call, compare, limits, types, unwind};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart, UnaryOp};
+use crate::drive::EngineFault;
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use num_bigint::BigInt;
@@ -39,7 +40,17 @@ pub(crate) fn step(
     // lets `StepOut` stop the instant the frame returns and keeps the limit checks
     // consistent across the two return paths (E§7.4).
     if machine.unwind.is_some() {
-        return match unwind::step(resolved, heap, machine)? {
+        let cancelling = matches!(machine.unwind, Some(unwind::Unwind::Cancel));
+        let settle = unwind::step(resolved, heap, machine)?;
+        // Cancellation teardown (E§10.1, §12): once the cancel unwind empties the stack,
+        // the whole program is torn down — fault `Cancelled`, a non-resumable stop that
+        // Doodle code cannot catch. (The frames popped inertly at M2b; each will run its
+        // block/`with` cleanup as the unwinder gains those conts at M4.)
+        if cancelling && machine.frames.is_empty() {
+            machine.unwind = None;
+            return Err(Halt::Fault(EngineFault::Cancelled));
+        }
+        return match settle {
             Some(depth) => {
                 limits::safe_point(heap, machine, namespace)?;
                 Ok(Some(depth))
@@ -78,6 +89,12 @@ pub(crate) fn step(
     let mut safe_point_depth = None;
     if stmt_safe_point {
         limits::safe_point(heap, machine, namespace)?;
+        // Cancellation (E§10.1): the host stop button, polled at this safe point. Arming
+        // the cancel unwind takes over the next transition, so do not also offer this as
+        // a `Step*` pause — the drive re-steps straight into the teardown.
+        if machine.poll_cancel() {
+            return Ok(None);
+        }
         safe_point_depth = Some(machine.frames.len());
     }
     // A call or block invocation just pushed a frame — a **non-tail** entry (a tail
@@ -87,6 +104,9 @@ pub(crate) fn step(
     if depth > depth_before {
         limits::safe_point(heap, machine, namespace)?;
         machine.check_stack_depth(depth)?;
+        if machine.poll_cancel() {
+            return Ok(None);
+        }
         safe_point_depth = Some(depth);
     }
     Ok(safe_point_depth)
