@@ -171,6 +171,12 @@ fn floor_div_rem(
 /// `**`: `Int ** non-negative Int` is an exact `Int`; every other case is a
 /// `Float` (L§4.2). `0 ** negative` yields ∞ on the float path, so it raises
 /// (S-56) — the division-by-zero analog.
+///
+/// The float path computes `pow` with the deterministic bundled `libm`, **not**
+/// `f64::powf`: `pow` is transcendental (not IEEE correctly-rounded), so the platform
+/// math library differs in the last bit(s) across targets, which would break replay and
+/// the cross-surface conformance gate (E§11, same reason as `sin`/`cos` — see
+/// `intrinsic/builtins.rs`).
 fn power(a: Num, b: Num, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
     match (a, b) {
         (Num::Int(base), Num::Int(exp)) if !exp.is_negative() => {
@@ -180,7 +186,7 @@ fn power(a: Num, b: Num, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
         (a, b) => {
             let x = num_to_f64(a, span)?;
             let y = num_to_f64(b, span)?;
-            finite(x.powf(y), span)
+            finite(libm::pow(x, y), span)
         }
     }
 }
@@ -362,6 +368,19 @@ mod tests {
         assert_eq!(int_of(i, &h), big("1024"));
         let f = binary(BinaryOp::Pow, Value::Int(2), Value::Int(-1), &mut h, S).unwrap();
         assert_float(f, 0.5);
+    }
+
+    #[test]
+    fn float_power_is_deterministic_via_libm() {
+        // The `**` float path uses the bundled `libm::pow` (not `f64::powf`), so this
+        // exact-bit golden must hold identically on every target (E§11). `2 ** 3.5`
+        // (Int base, Float exp) takes the float path (only `Int ** nonneg-Int` is exact).
+        let mut h = Heap::new();
+        // libm's `pow(2, 3.5)` is one ULP below 8·√2 (11.313708498984761) — the
+        // not-correctly-rounded transcendental result, pinned exactly so a divergent
+        // platform `pow` would fail here rather than silently.
+        let f = binary(BinaryOp::Pow, Value::Int(2), Value::Float(3.5), &mut h, S).unwrap();
+        assert_float(f, 11.31370849898476);
     }
 
     #[test]
