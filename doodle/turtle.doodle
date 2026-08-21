@@ -1,0 +1,204 @@
+# The Doodle turtle library (provisional, M3).
+#
+# Turtle graphics written as ordinary Doodle code over a tiny host boundary: three
+# platform primitives (`draw_line`, `set_turtle`, `clear_canvas`) plus the provisional
+# `sin`/`cos` natives. All turtle state, geometry, and color parsing live *here*, in
+# Doodle — the host is a dumb drawing surface (the "no magic boundaries" philosophy).
+# For M3 this file is prepended to the user's program as one module; the real module
+# system that will `use` it lands at M5.
+#
+# Coordinate convention (a library detail, not a host contract): the origin is the
+# center, x grows right and y grows up; heading is in degrees, 0 points up, and `right`
+# turns clockwise. So a step of `dist` moves by (dist*sin(heading), dist*cos(heading)).
+
+# --- State (module-level bindings the commands mutate) ---
+let turtle_x = 0.0
+let turtle_y = 0.0
+let turtle_heading = 0
+let turtle_pen = true
+let turtle_shown = true
+let turtle_r = 0
+let turtle_g = 0
+let turtle_b = 0
+let turtle_a = 255
+
+# --- Movement ---
+
+# Move `dist` steps along the current heading, drawing the trail. With the pen up the
+# turtle still glides, but invisibly — the line is drawn with alpha 0 rather than the
+# host having a separate pen-up mode.
+to forward(dist)
+  let rad = turtle_heading * 3.141592653589793 / 180
+  let new_x = turtle_x + dist * sin(rad)
+  let new_y = turtle_y + dist * cos(rad)
+  let alpha = 0
+  if turtle_pen then
+    alpha = turtle_a
+  end
+  draw_line(turtle_x, turtle_y, new_x, new_y, turtle_r, turtle_g, turtle_b, alpha)
+  turtle_x = new_x
+  turtle_y = new_y
+end
+
+# Move `dist` steps opposite the heading (drawing like `forward`).
+to back(dist)
+  forward(-dist)
+end
+
+# Turn clockwise by `degrees`, keeping the heading in [0, 360), then pose the marker
+# (no trail).
+to right(degrees)
+  turtle_heading = (turtle_heading + degrees) % 360
+  set_turtle(turtle_x, turtle_y, turtle_heading, turtle_shown)
+end
+
+# Turn counter-clockwise by `degrees`.
+to left(degrees)
+  turtle_heading = (turtle_heading - degrees) % 360
+  set_turtle(turtle_x, turtle_y, turtle_heading, turtle_shown)
+end
+
+# Teleport to the origin facing up, without drawing a trail.
+to home()
+  turtle_x = 0.0
+  turtle_y = 0.0
+  turtle_heading = 0
+  set_turtle(turtle_x, turtle_y, turtle_heading, turtle_shown)
+end
+
+# --- Pen ---
+
+to penup()
+  turtle_pen = false
+end
+
+to pendown()
+  turtle_pen = true
+end
+
+# --- Turtle marker ---
+
+to showturtle()
+  turtle_shown = true
+  set_turtle(turtle_x, turtle_y, turtle_heading, turtle_shown)
+end
+
+to hideturtle()
+  turtle_shown = false
+  set_turtle(turtle_x, turtle_y, turtle_heading, turtle_shown)
+end
+
+# --- Screen ---
+
+# Wipe the drawing and send the turtle home.
+to clear()
+  clear_canvas()
+  home()
+end
+
+# --- Color ---
+
+# Look up a named color, setting the RGB channels (alpha becomes fully opaque). An
+# unknown name leaves the color unchanged — a friendlier "unknown color" error waits on
+# diagnostics/exceptions the demo subset does not have yet.
+to pencolor_named(name)
+  if name == "black" then
+    turtle_r = 0
+    turtle_g = 0
+    turtle_b = 0
+  else if name == "white" then
+    turtle_r = 255
+    turtle_g = 255
+    turtle_b = 255
+  else if name == "red" then
+    turtle_r = 255
+    turtle_g = 0
+    turtle_b = 0
+  else if name == "orange" then
+    turtle_r = 255
+    turtle_g = 165
+    turtle_b = 0
+  else if name == "yellow" then
+    turtle_r = 255
+    turtle_g = 255
+    turtle_b = 0
+  else if name == "green" then
+    turtle_r = 0
+    turtle_g = 128
+    turtle_b = 0
+  else if name == "blue" then
+    turtle_r = 0
+    turtle_g = 0
+    turtle_b = 255
+  else if name == "purple" then
+    turtle_r = 128
+    turtle_g = 0
+    turtle_b = 128
+  else if name == "pink" then
+    turtle_r = 255
+    turtle_g = 192
+    turtle_b = 203
+  else if name == "brown" then
+    turtle_r = 165
+    turtle_g = 42
+    turtle_b = 42
+  else if name == "gray" then
+    turtle_r = 128
+    turtle_g = 128
+    turtle_b = 128
+  else if name == "grey" then
+    turtle_r = 128
+    turtle_g = 128
+    turtle_b = 128
+  else if name == "cyan" then
+    turtle_r = 0
+    turtle_g = 255
+    turtle_b = 255
+  else if name == "magenta" then
+    turtle_r = 255
+    turtle_g = 0
+    turtle_b = 255
+  else
+    return
+  end
+  # A recognized name is fully opaque; an unknown name returned above, untouched.
+  turtle_a = 255
+end
+
+# Set the pen color. Three forms:
+#   pencolor("red")          — a named color
+#   pencolor(0xff8800)       — a packed hex integer, 0xrrggbb
+#   pencolor(r, g, b)        — explicit channels, 0..255, opaque
+#   pencolor(r, g, b, a)     — explicit channels with alpha
+# The "#rrggbb" *string* form waits on string primitives the language does not have yet.
+to pencolor(red, green = nil, blue = nil, alpha = nil)
+  if green == nil then
+    if red is String then
+      pencolor_named(red)
+    else
+      turtle_r = (red // 65536) % 256
+      turtle_g = (red // 256) % 256
+      turtle_b = red % 256
+      turtle_a = 255
+    end
+  else
+    turtle_r = red
+    turtle_g = green
+    turtle_b = blue
+    turtle_a = 255
+    if alpha != nil then
+      turtle_a = alpha
+    end
+  end
+end
+
+# --- Control ---
+
+# Run `body` `times` times — a counted loop, in ordinary Doodle (no native `repeat`).
+to repeat(times, do body)
+  let i = 0
+  while i < times do
+    body()
+    i = i + 1
+  end
+end

@@ -213,6 +213,95 @@ fn cancelling_inside_a_native_consumers_reentrant_drive_tears_it_down() {
 }
 
 #[test]
+fn sin_and_cos_yield_deterministic_floats() {
+    // Exact anchors plus a fixed non-trivial angle, pinning the deterministic `libm`
+    // values (the same on every target). `sin`/`cos` accept Int or Float; the result is
+    // a `Float` (so `0`/`1` render with a `.0`).
+    let (inst, _) = run_with(
+        "print(sin(0))\nprint(cos(0))\nprint(sin(1.0))\nprint(cos(1.0))\n",
+        registry_with(vec![print(), sin(), cos()]),
+    );
+    assert_eq!(
+        inst.output(),
+        b"0.0\n1.0\n0.8414709848078965\n0.5403023058681398\n"
+    );
+}
+
+#[test]
+fn a_proc_reassigns_a_module_level_binding() {
+    // The turtle library keeps its state in module-level `let` bindings that the command
+    // procedures mutate (Decision #7). Confirm a `to` can reassign a module global: two
+    // `bump()` calls must leave `counter` at 2.
+    let (inst, outcome) = run_with(
+        "let counter = 0\nto bump()\ncounter = counter + 1\nend\nbump()\nbump()\nprint(counter)\n",
+        registry_with(vec![print()]),
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"2\n");
+}
+
+#[test]
+fn is_string_and_equals_nil_branch_as_the_color_parser_needs() {
+    // `pencolor` branches on `c is String` (named vs numeric color) and on `arg == nil`
+    // (one-arg vs component form). Confirm both evaluate to the expected booleans.
+    let (inst, _) = run_with(
+        "print(\"red\" is String)\nprint(3 is String)\nprint(nil == nil)\nprint(7 == nil)\n",
+        registry_with(vec![print()]),
+    );
+    assert_eq!(inst.output(), b"true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn a_drawing_capability_suspends_with_its_args_and_resolves_to_void() {
+    // `draw_line` is a `to` **capability** (E§13): the call suspends, the host reads its
+    // eight bound arguments (coordinates + RGBA, in order) and draws, then resolves with
+    // `nil` — a `to` capability yields Void, so the module completes (E§7.5).
+    use crate::drive::{CapabilityId, Resolution, resolve};
+    use crate::machine::InstanceState;
+    let (mut inst, outcome) = run_with(
+        "draw_line(0, 0, 10, 20, 255, 128, 0, 255)\n",
+        registry_with(vec![draw_line()]),
+    );
+    let Outcome::Suspended(request) = outcome else {
+        panic!("expected Suspended, got {outcome:?}");
+    };
+    assert_eq!(request.capability, CapabilityId(0));
+    let nums: Vec<i64> = request
+        .args
+        .iter()
+        .map(|&h| inst.as_int(h).unwrap())
+        .collect();
+    assert_eq!(nums, vec![0, 0, 10, 20, 255, 128, 0, 255]);
+    let nil = inst.make_nil();
+    let done = resolve(&mut inst, Resolution::Value(nil));
+    assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
+    assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn set_turtle_carries_a_pose_and_a_visibility_flag() {
+    // `set_turtle(x, y, heading, visible)` (E§13): four bound arguments, the last a
+    // `Bool` — the host poses/shows the marker without drawing, then resolves to Void.
+    use crate::drive::{Resolution, resolve};
+    let (mut inst, outcome) = run_with(
+        "set_turtle(5, 7, 90, true)\n",
+        registry_with(vec![set_turtle()]),
+    );
+    let Outcome::Suspended(request) = outcome else {
+        panic!("expected Suspended, got {outcome:?}");
+    };
+    assert_eq!(request.args.len(), 4);
+    assert_eq!(inst.as_int(request.args[0]).unwrap(), 5);
+    assert_eq!(inst.as_int(request.args[2]).unwrap(), 90);
+    assert!(inst.as_bool(request.args[3]).unwrap());
+    let nil = inst.make_nil();
+    assert!(matches!(
+        resolve(&mut inst, Resolution::Value(nil)),
+        Outcome::Completed(None)
+    ));
+}
+
+#[test]
 fn driving_a_block_again_after_a_non_local_exit_faults() {
     // Host-contract fault (E§7.6, S-46 rider 3): a callback that re-invokes its block
     // after the block took a non-local exit is a violation → `Faulted(Internal)`, NOT a

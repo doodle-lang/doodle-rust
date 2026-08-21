@@ -470,7 +470,13 @@ fn bind_foreign_arguments(
 /// and `resolve(Raise)` reach them at the `intrinsic::` path.
 mod builtins;
 pub(crate) use builtins::render;
-pub use builtins::{each, print, read_line};
+pub use builtins::{cos, each, print, read_line, sin};
+
+/// The M3 platform primitives (`draw_line`/`set_turtle`/`clear_canvas`) the turtle
+/// library draws through — suspending capabilities with no engine-side drawing logic
+/// (E§13).
+mod platform;
+pub use platform::{clear_canvas, draw_line, set_turtle};
 
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,8 @@ use crate::heap::Heap;
 use crate::machine::Value;
 use crate::machine::error::{ExceptionKind, Raise};
 use crate::resolve::BodyKind;
+use crate::span::Span;
+use num_traits::ToPrimitive;
 
 /// The demo intrinsic `print` (E§5.2, S-43): a `to` taking one value, rendering it
 /// (the provisional [`render`] stand-in for L§15 Stringable, superseded at M4/M9a),
@@ -99,6 +101,90 @@ pub fn read_line() -> Intrinsic {
         params: Vec::new(),
         body: ForeignBody::Capability,
     }
+}
+
+/// The **provisional** trig native `sin` (E§5.2): a `fn` taking one number (an angle in
+/// radians) and yielding its sine as a `Float`. The turtle library needs trig for
+/// `forward`, and the standard library that will own `sin`/`cos` is M9a — so these are
+/// registered like `print` until then (superseded with no program-observable change).
+/// Computed with the deterministic pure-Rust `libm` (see `Cargo.toml`): the platform
+/// `f64::sin` is not bit-identical across targets, which would break replay and the
+/// cross-surface conformance gate (E§11).
+pub fn sin() -> Intrinsic {
+    Intrinsic {
+        name: "sin".into(),
+        kind: BodyKind::Func,
+        params: vec![angle_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let angle = as_angle(ctx.heap(), ctx.args()[0], ctx.span())?;
+            finite_float(libm::sin(angle), ctx.span())
+        }),
+    }
+}
+
+/// The **provisional** trig native `cos` (E§5.2): the cosine companion to [`sin`], same
+/// contract and deterministic `libm` backing.
+pub fn cos() -> Intrinsic {
+    Intrinsic {
+        name: "cos".into(),
+        kind: BodyKind::Func,
+        params: vec![angle_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let angle = as_angle(ctx.heap(), ctx.args()[0], ctx.span())?;
+            finite_float(libm::cos(angle), ctx.span())
+        }),
+    }
+}
+
+/// The single required `angle` parameter shared by [`sin`] and [`cos`].
+fn angle_param() -> ForeignParam {
+    ForeignParam {
+        name: "angle".into(),
+        default: None,
+        is_block: false,
+    }
+}
+
+/// Coerces a trig argument (Int, Float, or BigInt) to `f64`, mirroring arithmetic
+/// widening (`arith.rs`): an integer whose magnitude rounds to ±∞ raises `NonFiniteFloat`
+/// (the widening is itself nonfinite, L§4.2), a `Float` passes through (the result check
+/// catches a nonfinite one), and a non-number raises `TypeMismatch`.
+fn as_angle(heap: &Heap, value: Value, span: Span) -> Result<f64, Raise> {
+    let widened = match value {
+        Value::Int(n) => n.to_f64(),
+        Value::Float(x) => return Ok(x),
+        Value::BigInt(idx) => heap.bigint(idx).value.to_f64(),
+        _ => {
+            return Err(Raise::new(
+                ExceptionKind::TypeMismatch,
+                "this needs a number (an angle in radians)",
+                span,
+            ));
+        }
+    };
+    match widened {
+        Some(x) if x.is_finite() => Ok(x),
+        _ => Err(nonfinite(span)),
+    }
+}
+
+/// Wraps a trig result in the finite-float invariant (S-56): `sin`/`cos` of a finite
+/// angle are always finite, but a nonfinite (host-injected) `Float` angle yields `NaN`.
+fn finite_float(x: f64, span: Span) -> Result<Option<Value>, Raise> {
+    if x.is_finite() {
+        Ok(Some(Value::Float(x)))
+    } else {
+        Err(nonfinite(span))
+    }
+}
+
+/// The shared `NonFiniteFloat` raise for the trig natives (message parallels `arith.rs`).
+fn nonfinite(span: Span) -> Raise {
+    Raise::new(
+        ExceptionKind::NonFiniteFloat,
+        "that number got too big to be a real number",
+        span,
+    )
 }
 
 /// A **provisional** value renderer for `print` over the demo subset — a stand-in for

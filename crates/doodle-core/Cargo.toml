@@ -11,6 +11,18 @@ publish = false
 workspace = true
 
 [dependencies]
+# Pure-Rust libm for the deterministic transcendentals: the `sin`/`cos` natives and `pow`
+# (the `**` float path). Platform math (`f64::sin`/`f64::powf`) is *not* bit-identical
+# across targets — these functions are transcendental, so IEEE-754 does not pin their
+# rounding and each platform's libm differs in the last bit(s) — which would break replay
+# and the cross-surface conformance gate (E§11). Computing them from the bundled crate on
+# every target (native + wasm) is the fix. `default-features = false` is a conservative
+# belt-and-suspenders that keeps every routine on the crate's own soft-float path rather
+# than libm's optional `arch` hardware intrinsics; those intrinsics are only fma/sqrt,
+# which IEEE-754 requires be correctly rounded (so a hardware variant gives identical
+# bits) and the transcendentals have no hardware form — so `arch`-off is not itself
+# load-bearing here, it just removes all doubt.
+libm = { version = "0.2", default-features = false }
 num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
