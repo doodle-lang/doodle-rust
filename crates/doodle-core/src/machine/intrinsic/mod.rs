@@ -186,8 +186,9 @@ pub(crate) enum BlockResult {
     /// and return promptly (no result, no further drives); the native call's apply site
     /// resumes the parked exit ([`unwind::resume_native_boundary`]).
     NonLocalExit,
-    /// The nested drive parked a fault (a limit tripped inside it, or the deferred
-    /// S-15 nested-suspend): the caller must stop; `step` will surface the fault.
+    /// The nested drive parked a fault (a limit tripped inside it, or the S-15
+    /// `NestedSuspend` — a suspending capability reached inside the native consumer):
+    /// the caller must stop; `step` will surface the fault.
     Halted,
 }
 
@@ -288,11 +289,16 @@ impl IntrinsicCtx<'_> {
             }
             match step::step(self.resolved, self.heap, self.machine, self.namespace) {
                 Ok(_) => {
-                    // A capability suspended inside the nested drive — S-15 (M3).
-                    // Deferred: clear it and fault the drive.
+                    // A suspending capability was reached inside this native block-consumer's
+                    // reentrant drive (S-15). The nested drive runs on the Rust stack, so the
+                    // native consumer's progress cannot be frozen and resumed — the engine
+                    // forbids it: clear the parked request and fault `NestedSuspend`
+                    // (Decision #2, forbid-and-fault; the resumable "suspend-the-outer-drive"
+                    // alternative is the deferred M7 C-ABI-yield extension, E§5.4). Terminal
+                    // and deterministic.
                     if self.machine.pending.is_some() {
                         self.machine.pending = None;
-                        self.machine.reentry_fault = Some(EngineFault::Internal);
+                        self.machine.reentry_fault = Some(EngineFault::NestedSuspend);
                         return Ok(BlockResult::Halted);
                     }
                 }

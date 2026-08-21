@@ -38,7 +38,7 @@ pub enum Outcome {
     Paused(PauseReason),
     /// An uncaught exception reached the boundary.
     Raised(Exception, Trace),
-    /// A limit, cancellation, or internal fault stopped execution.
+    /// A limit, cancellation, nested-suspend, or internal fault stopped execution.
     Faulted(EngineFault),
 }
 
@@ -70,6 +70,16 @@ pub enum EngineFault {
     LimitExceeded(LimitKind),
     /// The host cancelled the drive.
     Cancelled,
+    /// A suspending capability was reached **inside a native block-consumer's reentrant
+    /// drive** (E§5.4/§5.3, S-15). The nested drive runs on the host's Rust stack, so the
+    /// native consumer's in-progress state (a loop index, say) cannot be frozen and
+    /// resumed — the engine **forbids** the nested suspend as a terminal, deterministic
+    /// fault (Decision #2, "forbid-and-fault"). This is distinct from [`Internal`](Self::Internal):
+    /// it reports a well-defined engine limitation reached by legitimate Doodle code, not
+    /// a violated invariant. The alternative — *suspending the outer drive* by making
+    /// native consumers resumable — is the deferred M7 C-ABI foreign-function-yield
+    /// extension (E§5.4/§7.6; machine-design §14).
+    NestedSuspend,
     /// An internal invariant was violated.
     Internal,
 }
@@ -331,7 +341,8 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
                 instance.set_state(InstanceState::Raised);
                 return Outcome::Raised(raise.exception, raise.trace);
             }
-            // A resource limit (E§10.2) or host cancellation (E§10.1) at a safe point: a
+            // A resource limit (E§10.2), host cancellation (E§10.1), or the S-15
+            // `NestedSuspend` relayed from a native consumer's reentrant drive (§7.6): a
             // non-resumable fault (`state()` becomes terminal `Faulted`).
             Err(Halt::Fault(fault)) => {
                 instance.set_state(InstanceState::Faulted);

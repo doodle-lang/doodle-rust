@@ -858,3 +858,95 @@ fn a_foreign_value_is_inert_in_doodle_and_finalizes_at_destroy() {
         "the foreign's finalizer ran once at destroy"
     );
 }
+
+#[test]
+fn a_suspend_inside_a_native_block_consumer_faults_nestedsuspend() {
+    // S-15 (Decision #2, forbid-and-fault): a suspending capability reached inside a
+    // NATIVE block-consumer's reentrant drive is a terminal, deterministic `NestedSuspend`
+    // fault — the nested drive runs on the Rust stack, so the native consumer's progress
+    // cannot be frozen and resumed. The block's `read_line()` suspends mid-`each`. The
+    // exact-variant match pins it as `NestedSuspend` (not a `Suspended` the host could
+    // resolve, nor a generic `Internal` fault).
+    let mut inst = instance_with_caps("each([1]) do (x)\nread_line()\nend\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn nestedsuspend_reaches_the_same_terminal_stepped_and_sliced() {
+    // Determinism (E§7.7): the `NestedSuspend` terminal is directive- and slice-independent
+    // — a Step-through and a tiny-fuel sliced run both reach the same fault as a fast run
+    // (the nested-drive loop ignores the directive/fuel, so the fault cannot be dropped or
+    // deferred by observation granularity). Guards against a future refactor routing the
+    // fault through the pause path.
+    let src = "each([1]) do (x)\nread_line()\nend\n";
+    let mut fast = instance_with_caps(src);
+    assert!(matches!(
+        run(&mut fast, Directive::RunToCompletion),
+        Outcome::Faulted(EngineFault::NestedSuspend)
+    ));
+
+    let mut stepped = instance_with_caps(src);
+    let mut outcome = run(&mut stepped, Directive::Step);
+    for _ in 0..10_000 {
+        if !matches!(outcome, Outcome::Paused(_)) {
+            break;
+        }
+        outcome = run(&mut stepped, Directive::Step);
+    }
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
+        "stepped: {outcome:?}"
+    );
+
+    let mut sliced = instance_with_caps(src);
+    let mut outcome = run_slice(&mut sliced, Directive::RunToCompletion, Some(1));
+    for _ in 0..10_000 {
+        if !matches!(outcome, Outcome::Paused(PauseReason::SliceEnd)) {
+            break;
+        }
+        outcome = run_slice(&mut sliced, Directive::RunToCompletion, Some(1));
+    }
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
+        "sliced: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_doubly_nested_native_consumer_still_faults_nestedsuspend() {
+    // A suspend two native consumers deep faults the same way: the inner `each`'s drive
+    // parks `NestedSuspend`, and the outer `each`'s reentrant loop re-propagates it
+    // through its `Err(Halt::Fault)` arm rather than swallowing it or leaking a pending
+    // request past the boundary.
+    let mut inst =
+        instance_with_caps("each([1]) do (x)\neach([1]) do (y)\nread_line()\nend\nend\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+}
+
+#[test]
+fn a_doodle_block_consumer_suspends_normally_unlike_the_native_one() {
+    // The forbid-and-fault rule is specific to NATIVE consumers. A Doodle `to` that
+    // invokes its block parameter runs the block on the ordinary cont stack (not a
+    // reentrant Rust-stack drive), so a suspending capability there suspends the whole
+    // instance normally and resolves to completion — the case the turtle demo's Doodle
+    // `repeat` relies on. (`run_block` invokes its block once.)
+    let mut inst = instance_with_caps(
+        "to run_block(do body)\nbody()\nend\nrun_block() do\nread_line()\nend\n",
+    );
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Suspended(_)), "{outcome:?}");
+    assert_eq!(inst.state(), InstanceState::Suspended);
+    let line = inst.make_string(b"hi").unwrap();
+    let done = resolve(&mut inst, Resolution::Value(line));
+    assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
+}

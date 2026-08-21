@@ -77,7 +77,8 @@ pub(crate) fn step(
     let depth_before = machine.frames.len();
     dispatch(resolved, heap, machine, namespace, cont)?;
     // A reentrant nested drive (a native block-consumer running its block) faulted —
-    // a limit tripped, or the deferred S-15 nested-suspend. It parks the fault because
+    // a limit tripped, or the S-15 `NestedSuspend` (a suspending capability reached
+    // inside the native consumer, forbidden — Decision #2). It parks the fault because
     // the Raise-typed `apply` chain cannot carry an `EngineFault`; surface it here as
     // this transition's fault (MD §14).
     if let Some(fault) = machine.take_reentry_fault() {
