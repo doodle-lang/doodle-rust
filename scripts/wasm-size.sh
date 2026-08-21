@@ -11,16 +11,21 @@
 # than measuring a stale or empty artifact (a size gate that passes when the
 # pipeline breaks is worse than useless).
 #
-# NOTE: this measures the raw cargo-built wasm. When the gate becomes binding
-# at M3, the pipeline must run the wasm-bindgen CLI before wasm-opt so the
-# measured artifact is the actual shippable wasm — the raw wasm still carries
-# wasm-bindgen descriptor sections the CLI strips, so today's number
-# over-estimates (conservatively).
+# The measured artifact is the **actual shippable wasm**: cargo build → the
+# `wasm-bindgen` CLI (which strips descriptor sections and emits the JS-facing
+# module) → `wasm-opt -Oz` → brotli. The wasm-bindgen CLI version must match the
+# `wasm-bindgen` crate in Cargo.toml, or it errors loudly (self-checking).
+#
+# The measured brotli byte count is tool-version-dependent (wasm-opt/brotli can
+# differ between the apt binaryen in CI and a homebrew one locally), so it is a
+# budget check, not a bit-reproducible figure — treat the reported number as
+# approximate. Fine given the ~40% headroom at M3.4 (178 KB / 300 KB).
 #
 # The budget may be overridden for testing via WASM_BUDGET_BYTES, e.g.
 #   WASM_BUDGET_BYTES=1 ./scripts/wasm-size.sh   # force a failure
 #
-# Requires `wasm-opt` (binaryen) and `brotli` on PATH.
+# Requires `wasm-bindgen` (wasm-bindgen-cli), `wasm-opt` (binaryen), and
+# `brotli` on PATH.
 
 set -e
 
@@ -31,11 +36,10 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ensure_cargo
 
 # 300 KB brotli-compressed (plan §6.5). "KB" is decimal here (300,000 bytes),
-# matching how web bundle sizes are conventionally reported. The gate becomes a
-# binding constraint at M3; before then it just exercises the mechanism.
+# matching how web bundle sizes are conventionally reported. Binding since M3.4.
 BUDGET_BYTES="${WASM_BUDGET_BYTES:-300000}"
 
-for tool in wasm-opt brotli; do
+for tool in wasm-bindgen wasm-opt brotli; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: '$tool' not found on PATH (install binaryen / brotli)"
         exit 1
@@ -55,18 +59,26 @@ fi
 
 WORK="target/wasm-size"
 mkdir -p "$WORK"
+BG="$WORK/doodle_wasm_bg.wasm"
 OPT="$WORK/doodle_wasm.opt.wasm"
 BR="$WORK/doodle_wasm.opt.wasm.br"
 
 # Remove any stale outputs so a silently no-op tool cannot be measured.
-rm -f "$OPT" "$BR"
+rm -f "$BG" "$OPT" "$BR"
 
-wasm-opt -Oz -o "$OPT" "$RAW"
+# wasm-bindgen: strip descriptor sections and emit the JS-facing module. `--target
+# web` + no TS is enough to produce the shippable `_bg.wasm` we measure; the JS glue
+# it also writes is not part of the wasm budget.
+wasm-bindgen "$RAW" --out-dir "$WORK" --target web --no-typescript
+[ -s "$BG" ] || { echo "ERROR: wasm-bindgen produced no wasm output"; exit 1; }
+
+wasm-opt -Oz -o "$OPT" "$BG"
 [ -s "$OPT" ] || { echo "ERROR: wasm-opt produced no output"; exit 1; }
 brotli -f -o "$BR" "$OPT"
 [ -s "$BR" ] || { echo "ERROR: brotli produced no output"; exit 1; }
 
 raw_size=$(wc -c < "$RAW" | tr -d ' ')
+bg_size=$(wc -c < "$BG" | tr -d ' ')
 opt_size=$(wc -c < "$OPT" | tr -d ' ')
 size=$(wc -c < "$BR" | tr -d ' ')
 case "$size" in
@@ -78,6 +90,7 @@ esac
 
 echo ""
 echo "raw .wasm:        $raw_size bytes"
+echo "wasm-bindgen:     $bg_size bytes"
 echo "wasm-opt -Oz:     $opt_size bytes"
 echo "brotli:           $size bytes"
 echo "budget (brotli):  $BUDGET_BYTES bytes"

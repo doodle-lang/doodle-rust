@@ -1,0 +1,133 @@
+//! Native tests for the wasm facade core ([`Session`]) — driven through plain Rust, no
+//! JS. They cover the front-end pipeline, the drive/resolve loop, outcome tagging, the
+//! handle boundary, output, and position, so M3.4 is verified without a Node harness
+//! (Decision #1). The JS-glue smoke test is `doodle-web`, M3.5.
+
+use super::*;
+
+#[test]
+fn demo_runs_print_to_completion() {
+    // The demo config (print-only, no prelude) matches the native conformance runner.
+    let mut session = Session::demo("print(1 + 2)\n").unwrap();
+    assert_eq!(session.drive(None), DriveOutcome::Completed);
+    assert_eq!(session.output(), b"3\n");
+    assert_eq!(session.prelude_bytes(), 0);
+}
+
+#[test]
+fn a_parse_error_fails_to_load_with_diagnostics() {
+    let Err(err) = Session::demo("print(\n") else {
+        panic!("expected a load error");
+    };
+    assert!(!err.message.is_empty(), "a load error carries diagnostics");
+}
+
+#[test]
+fn division_by_zero_surfaces_a_tagged_raise() {
+    let mut session = Session::demo("1 / 0\n").unwrap();
+    let outcome = session.drive(None);
+    let DriveOutcome::Raised {
+        kind,
+        message,
+        span,
+    } = outcome
+    else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    assert_eq!(kind, "division-by-zero");
+    assert!(!message.is_empty());
+    assert!(span.is_some(), "the raise carries its site span");
+}
+
+#[test]
+fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
+    // draw_line is capability id 3 in the turtle registry (print 0, sin 1, cos 2,
+    // draw_line 3, set_turtle 4, clear_canvas 5). `forward(10)` at heading 0 draws
+    // (0,0)->(0,10) opaque black: args [0.0, 0.0, 0.0, 10.0, 0, 0, 0, 255].
+    let mut session = Session::turtle("forward(10)\n").unwrap();
+    assert!(
+        session.prelude_bytes() > 0,
+        "the turtle library was prepended"
+    );
+
+    let outcome = session.drive(None);
+    let DriveOutcome::Suspended { capability, args } = outcome else {
+        panic!("expected Suspended, got {outcome:?}");
+    };
+    assert_eq!(capability, 3, "draw_line's registration id");
+    assert_eq!(args.len(), 8);
+    assert!((session.as_float(args[3]).unwrap() - 10.0).abs() < 1e-9);
+    assert_eq!(session.as_int(args[7]).unwrap(), 255);
+    // A suspended instance has an executing position (the draw_line call site).
+    assert!(session.current_position().is_some());
+
+    // The host owns the request handles (S-17): release them, then resolve with nil (a
+    // `to` capability yields Void) — the module completes.
+    for &h in &args {
+        session.release(h).unwrap();
+    }
+    let nil = session.make_nil();
+    assert_eq!(session.resolve(nil, false, None), DriveOutcome::Completed);
+}
+
+#[test]
+fn the_handle_boundary_round_trips_scalars() {
+    let mut session = Session::demo("let a = 1\n").unwrap();
+    let i = session.make_int(-7);
+    assert_eq!(session.as_int(i).unwrap(), -7);
+    assert_eq!(session.kind_of(i).unwrap(), Kind::Int);
+
+    let f = session.make_float(2.5);
+    assert_eq!(session.as_float(f).unwrap(), 2.5);
+
+    let b = session.make_bool(true);
+    assert!(session.as_bool(b).unwrap());
+
+    let n = session.make_nil();
+    assert!(session.is_nil(n).unwrap());
+
+    let s = session.make_string(b"hi").unwrap();
+    assert_eq!(session.string_bytes(s).unwrap(), b"hi");
+    assert_eq!(session.kind_of(s).unwrap(), Kind::String);
+
+    // A released handle is stale — a boundary error, never a wrong value.
+    session.release(i).unwrap();
+    assert!(matches!(session.as_int(i), Err(ValueError::Stale)));
+}
+
+#[test]
+fn a_stepped_and_a_fast_demo_reach_the_same_output() {
+    // Determinism through the facade (E§7.7): fuel-slicing does not change the result.
+    let mut fast = Session::demo("print(6 * 7)\n").unwrap();
+    assert_eq!(fast.drive(None), DriveOutcome::Completed);
+
+    let mut sliced = Session::demo("print(6 * 7)\n").unwrap();
+    let mut outcome = sliced.drive(Some(1));
+    for _ in 0..10_000 {
+        if outcome != DriveOutcome::Paused("slice-end") {
+            break;
+        }
+        outcome = sliced.drive(Some(1));
+    }
+    assert_eq!(outcome, DriveOutcome::Completed);
+    assert_eq!(fast.output(), sliced.output());
+    assert_eq!(sliced.output(), b"42\n");
+}
+
+#[test]
+fn prelude_bytes_locates_the_program_start_under_nfc() {
+    // The program portion of the combined+normalized source begins **exactly** at
+    // prelude_bytes — the invariant the program-relative position mapping
+    // (module_pos − prelude_bytes) depends on. The `\n` joiner is a starter, so NFC
+    // cannot compose across the prelude→program boundary; a decomposed accented char in
+    // the program exercises NFC without reaching that boundary. This locks the firewall
+    // against a future joiner/normalize change.
+    let program = "# cafe\u{0301} comment\nforward(5)\n"; // "café" (e + combining acute)
+    let session = Session::turtle(program).unwrap();
+    let prelude_bytes = session.prelude_bytes() as usize;
+    assert_eq!(
+        &session.source()[prelude_bytes..],
+        doodle_core::source::normalize(program).as_ref(),
+        "the program begins exactly at prelude_bytes in the normalized module source"
+    );
+}

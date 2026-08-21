@@ -61,14 +61,26 @@ jobs:
         run: rustup toolchain install
       - name: Install binaryen and brotli
         run: sudo apt-get update && sudo apt-get install -y binaryen brotli
+      - name: Install wasm-bindgen-cli (version matched to the crate)
+        # Read the locked wasm-bindgen version from Cargo.lock so the CLI always
+        # matches the crate (wasm-bindgen errors loudly on a version mismatch).
+        run: |
+          ver=$(awk '/^name = "wasm-bindgen"$/{f=1} f && /^version = /{gsub(/[",]/,"",$3); print $3; exit}' Cargo.lock)
+          [ -n "$ver" ] || { echo "no wasm-bindgen entry in Cargo.lock"; exit 1; }
+          echo "installing wasm-bindgen-cli $ver"
+          cargo install wasm-bindgen-cli --version "$ver" --locked
       - name: wasm size gate
         run: ./scripts/wasm-size.sh
       - name: wasm size gate rejects an over-budget artifact
+        # Must fail *for the budget reason*, not merely exit non-zero — otherwise a broken
+        # pipeline (missing tool, empty artifact) would pass this negative test.
         run: |
-          if WASM_BUDGET_BYTES=1 ./scripts/wasm-size.sh; then
-            echo "expected the gate to fail with a 1-byte budget"
-            exit 1
+          if out=$(WASM_BUDGET_BYTES=1 ./scripts/wasm-size.sh 2>&1); then
+            echo "expected the gate to fail with a 1-byte budget"; echo "$out"; exit 1
           fi
+          echo "$out" | grep -q "exceeds budget" || {
+            echo "the gate failed, but not on the budget comparison:"; echo "$out"; exit 1
+          }
 
   capi:
     name: capi (header + C smoke)
