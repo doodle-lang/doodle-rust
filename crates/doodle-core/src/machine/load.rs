@@ -1,0 +1,161 @@
+//! Instance construction (engine spec E§3.1): `create`/`load*`/`load_full` — building a
+//! `Ready` [`Instance`] from a resolved module, seeding its global namespace (S-43) and
+//! its module top-level frame. Split from `machine.rs` (the `Instance`/`Machine`
+//! definitions and lifecycle) so that file stays within the hygiene length limit; these
+//! carry their own `impl Instance` block, as `lifecycle.rs`/`boundary.rs` do.
+
+use super::{
+    Arc, AtomicBool, CellIdx, Config, ConfigError, Cont, Directive, Frame, FusedCounter,
+    HandleTable, Heap, Instance, InstanceState, Limits, Machine, ResolvedModule, UNICODE_VERSION,
+    UnicodeVersion, Value, intrinsic, limits, local, ring, types,
+};
+
+impl Instance {
+    /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
+    /// Validates the config first (S-41): a requested Unicode version that is not the
+    /// engine's build-pinned one is rejected — the engine supports exactly its pinned
+    /// version, so a host or replay can assert the expected version at create time
+    /// rather than diverge silently on grapheme/normalization behavior (E§11). `None`
+    /// uses the pinned version.
+    pub fn create(module: ResolvedModule, config: Config) -> Result<Self, ConfigError> {
+        if let Some(requested) = config.unicode_version
+            && requested != UNICODE_VERSION
+        {
+            return Err(ConfigError::UnsupportedUnicodeVersion {
+                requested,
+                pinned: UNICODE_VERSION,
+            });
+        }
+        Ok(Self::load_with_limits(module, config.limits))
+    }
+
+    /// The Unicode/UCD version this engine is pinned to (L§4.4; the config's
+    /// target-version field is validated against it, S-41).
+    pub fn unicode_version() -> UnicodeVersion {
+        UNICODE_VERSION
+    }
+
+    /// Loads a resolved module into a fresh `Ready` instance with the
+    /// [`Default`](Limits) resource limits and no intrinsics. See [`load_full`](Self::load_full).
+    pub fn load(module: ResolvedModule) -> Self {
+        Self::load_full(module, Limits::default(), intrinsic::Registry::new())
+    }
+
+    /// Loads a resolved module under the given resource limits (E§10.2), no
+    /// intrinsics. See [`load_full`](Self::load_full).
+    pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
+        Self::load_full(module, limits, intrinsic::Registry::new())
+    }
+
+    /// Loads a resolved module with host-registered intrinsic foreign functions
+    /// (E§5.1, S-43) and the [`Default`](Limits) limits. `registry` holds the
+    /// intrinsics the host registered **before** this load (E§5.5); they seed as
+    /// read-only global names after the program's declarations and the built-in
+    /// type values, so a program's own declaration of the same name shadows one.
+    pub fn load_with_intrinsics(module: ResolvedModule, registry: intrinsic::Registry) -> Self {
+        Self::load_full(module, Limits::default(), registry)
+    }
+
+    /// Loads a resolved module with host-registered intrinsics (S-43) under the given
+    /// resource limits (E§10.2) — [`load_with_intrinsics`](Self::load_with_intrinsics)
+    /// and [`load_with_limits`](Self::load_with_limits) combined.
+    pub fn load_with_intrinsics_and_limits(
+        module: ResolvedModule,
+        limits: Limits,
+        registry: intrinsic::Registry,
+    ) -> Self {
+        Self::load_full(module, limits, registry)
+    }
+
+    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
+    /// under the given resource limits (E§10.2) and intrinsic registry (S-43). Each
+    /// module-level name gets an **uninitialized** binding cell (its `let`/`const`
+    /// fills it when it executes; a read before then is a use-before-defined error).
+    /// The module top level becomes an ordinary, drivable `ModuleTopLevel` frame
+    /// whose pending work sequences its statements.
+    fn load_full(module: ResolvedModule, limits: Limits, intrinsics: intrinsic::Registry) -> Self {
+        debug_assert!(
+            matches!(
+                module.ast.node(module.root),
+                crate::ast::Node::Module { .. }
+            ),
+            "load: a resolved module's root must be the `Module` node"
+        );
+        let mut heap = Heap::new();
+        let canonical_id = module.canonical_id;
+        // Namespace order (S-43): module globals first (their `let`/`const`/`to`/`fn`
+        // fill their cells in execution order — the temporal dead zone, M2a.4a), then
+        // the built-in type-value prelude, then the host intrinsics — each later group
+        // appended after, so an earlier binding of the same name wins the linear
+        // `find_cell` scan (control.rs): a user global shadows a type value or an
+        // intrinsic, matching the M5 prelude star-import this seeding will become.
+        let mut namespace: Vec<(Box<str>, CellIdx)> = module
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), heap.alloc_cell(None)))
+            .collect();
+        for &(name, builtin) in types::BUILTINS {
+            let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { builtin }));
+            namespace.push((name.into(), heap.alloc_cell(Some(ty))));
+        }
+        for (i, intrinsic) in intrinsics.iter().enumerate() {
+            // Each intrinsic interns to one foreign `CalObj` (its registration index is
+            // the `CallableTarget::Intrinsic` id) held by a read-only global cell.
+            let cal = heap.alloc_callable(crate::heap::CalObj {
+                module: canonical_id,
+                target: crate::heap::CallableTarget::Intrinsic(i as u32),
+                captures: Vec::new(),
+            });
+            namespace.push((
+                intrinsic.name.clone(),
+                heap.alloc_cell(Some(Value::Callable(cal))),
+            ));
+        }
+        // The module top level's construct-body locals may be cell-boxed (a `fn`
+        // captured one, §7), so build its slots like any frame — no params, no
+        // captures. `raw` is all-`None`; `let`s fill the slots as they execute.
+        let module_id = module
+            .callables
+            .iter()
+            .position(|c| matches!(c.kind, crate::resolve::BodyKind::ModuleTopLevel))
+            .expect("a resolved module has a top-level callable");
+        let raw = vec![None; module.callables[module_id].slot_count as usize];
+        let locals = local::build(&module, &mut heap, module_id, &raw, &[]);
+        let root = module.root;
+        let resolved = Arc::new(module);
+        let frame = Frame::module_top_level(
+            locals,
+            Cont::Seq {
+                block: root,
+                next: 0,
+            },
+            0, // the module frame is frame serial 0; further frames count up
+        );
+        Instance {
+            resolved,
+            heap,
+            machine: Machine {
+                frames: vec![frame],
+                reg: None,
+                frame_serial: 1,
+                unwind: None,
+                ring: ring::RingBuffer::new(),
+                fuel: FusedCounter::new(&limits),
+                gc_threshold: limits::GC_MIN_BYTES,
+                handles: HandleTable::new(),
+                intrinsics,
+                output: Vec::new(),
+                pending: None,
+                directive: Directive::RunToCompletion,
+                reentry_fault: None,
+                foreign_roots: Vec::new(),
+                reentry_depth: 0,
+                gc_every_safe_point: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                limits,
+            },
+            namespace,
+            state: InstanceState::Ready,
+        }
+    }
+}
