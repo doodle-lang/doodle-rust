@@ -266,7 +266,10 @@ pub fn resolve_slice(
     }
     match resolution {
         // The capability's value becomes the call's result; resume the drive so the
-        // caller's waiting continuation consumes it, under the directive in force.
+        // caller's waiting continuation consumes it, under the directive in force. A
+        // cancellation requested while suspended is reaped here too: the resumed drive's
+        // next safe point observes it and faults `Cancelled` (or the program completes
+        // first — a cancel racing completion loses, §10.1).
         Resolution::Value(handle) => match instance.resume_with_value(handle) {
             Ok(()) => drive(instance, instance.resume_directive(), fuel),
             // A stale resolution handle is a host-contract violation (a non-resumable
@@ -275,15 +278,26 @@ pub fn resolve_slice(
             Err(_) => fault(instance),
         },
         // The host rejected the capability: raise at its call site. No handlers yet
-        // (`try`/`rescue` is M4), so it reaches the boundary → the terminal `Raised`
-        // state (E§3.3), like any uncaught raise.
-        Resolution::Raise(handle) => match instance.resume_with_raise(handle) {
-            Ok((exception, trace)) => {
-                instance.set_state(InstanceState::Raised);
-                Outcome::Raised(exception, trace)
+        // (`try`/`rescue` is M4), so it reaches the boundary → the terminal `Raised` state
+        // (E§3.3), like any uncaught raise — **unless a cancellation is pending**: a cancel
+        // with program work still ahead wins over a host raise (E§10.1, S-23). The raise arm
+        // never drives, so unlike the value arm it cannot reap a cancel at a safe point;
+        // discard the rejection and tear the stack down to `Faulted(Cancelled)`. The raise
+        // never surfaces, and — unlike unsticking with a fabricated value — the parked call's
+        // continuation never runs, so the discarded resolution has no program-visible effect.
+        Resolution::Raise(handle) => {
+            if instance.cancel_requested() {
+                instance.discard_pending_and_cancel();
+                return drive(instance, instance.resume_directive(), fuel);
             }
-            Err(_) => fault(instance),
-        },
+            match instance.resume_with_raise(handle) {
+                Ok((exception, trace)) => {
+                    instance.set_state(InstanceState::Raised);
+                    Outcome::Raised(exception, trace)
+                }
+                Err(_) => fault(instance),
+            }
+        }
     }
 }
 

@@ -329,6 +329,30 @@ impl Instance {
         CancelToken(Arc::clone(&self.machine.cancel))
     }
 
+    /// Whether host cancellation has been requested (E§10.1) — a plain read of the cancel
+    /// flag, distinct from the safe-point poll ([`Machine::poll_cancel`]) that *arms* the
+    /// unwind. Lets `resolve` (E§7.5) reap a cancellation that arrived while the instance
+    /// was suspended, so a host raise racing the stop button does not escape it (S-23).
+    pub(crate) fn cancel_requested(&self) -> bool {
+        self.machine.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Discards a parked capability request and arms the cancel unwind (E§10.1, S-23):
+    /// resuming the drive then tears the stack down to `Faulted(Cancelled)` **without**
+    /// running the parked call's continuation, so a host resolution that lost to a pending
+    /// cancellation has no program-visible effect. Only valid while suspended — a request is
+    /// parked and the frame stack is non-empty (a suspend never empties it), which the
+    /// caller establishes by checking [`cancel_requested`](Self::cancel_requested) at a
+    /// `Suspended` instance.
+    pub(crate) fn discard_pending_and_cancel(&mut self) {
+        self.machine.pending = None;
+        debug_assert!(
+            self.machine.unwind.is_none() && !self.machine.frames.is_empty(),
+            "cancel-reap requires a parked suspension with an intact stack"
+        );
+        self.machine.unwind = Some(unwind::Unwind::Cancel);
+    }
+
     /// The result register: the last value produced, or `None` for Void
     /// (L§6.11). After a top-level drive completes this is `None` — a module runs
     /// for effect and yields Void.

@@ -243,6 +243,56 @@ fn a_capability_resolved_with_a_raise_surfaces_raised() {
 }
 
 #[test]
+fn a_cancelled_suspended_instance_resolved_with_a_raise_faults_cancelled() {
+    // S-23: a cancellation requested while suspended wins over the host's resolution — a
+    // *raise* included. The raise arm surfaces `Raised` without driving, so it cannot reap
+    // a cancel at a safe point the way the value arm does; it must instead discard the
+    // rejection and fault `Cancelled`. Regression: it once surfaced `Raised`, letting a
+    // host raise that raced the stop button escape cancellation (M3.6 review).
+    let mut inst = instance_with_caps("print(read_line())\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    // Stop button pressed while parked on the capability; then the host rejects the call.
+    inst.cancel_token().cancel();
+    let reason = inst.make_string(b"end of input").unwrap();
+    let outcome = resolve(&mut inst, Resolution::Raise(reason));
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
+        "cancel must win over a host raise, got {outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+    // The rejection was discarded and the parked call's continuation never ran: no output.
+    assert_eq!(inst.output(), b"");
+}
+
+#[test]
+fn a_cancelled_suspended_instance_resolved_with_a_value_faults_cancelled_when_work_remains() {
+    // The value arm's companion: a cancellation requested while suspended is reaped at the
+    // resumed drive's next safe point. The first statement finishes (consuming the resolved
+    // value), then the cancel faults before the second statement runs — program work
+    // remained, so cancel wins (contrast: a value resolution that *completed* the program
+    // would stand, a cancel racing completion losing, §10.1).
+    let mut inst = instance_with_caps("print(read_line())\nprint(\"after\")\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Suspended(_)
+    ));
+    inst.cancel_token().cancel();
+    let line = inst.make_string(b"hello").unwrap();
+    let outcome = resolve(&mut inst, Resolution::Value(line));
+    assert!(
+        matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
+        "{outcome:?}"
+    );
+    assert_eq!(inst.state(), InstanceState::Faulted);
+    // The resumed statement ran to its end (printing the resolved value); the cancel then
+    // stopped the second statement.
+    assert_eq!(inst.output(), b"hello\n");
+}
+
+#[test]
 fn resolving_with_a_stale_handle_faults_terminally() {
     // A stale resolution handle is a host-contract violation: the drive returns
     // Faulted AND the instance is left terminally Faulted (not a resumable Suspended
