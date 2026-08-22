@@ -1,0 +1,13 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): the import/exports surface (L§11), including the `.*` wildcard token
+# (a `.` immediately followed by `*`) — the trickiest lexer interaction — vs a `.name` field
+# chain, which must NOT lex as a wildcard.
+import shapes
+import shapes as s
+import shapes.circle as c
+import shapes.circle.outline.*
+import a.b, c.d as e
+exports draw, clear, pen
+let field = obj.a.b.c

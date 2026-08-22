@@ -1,0 +1,11 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): the operator precedence ladder (App C) — postfix, `**`
+# (right-assoc), unary, `* / // %`, `+ -`, comparisons (non-assoc), `not`, `and`, `or`.
+let a = 2 ** 3 ** 2
+let b = -x ** 2
+let c = 1 + 2 * 3 - 4 // 5 % 6
+let d = not a and b or c
+let e = obj.field[0](arg).other
+let f = a == b and c < d

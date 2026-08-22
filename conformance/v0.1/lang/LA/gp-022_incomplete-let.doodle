@@ -1,0 +1,7 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: expected an expression @ 7:8
+# Grammar-parity (§6.4): `let x =` with no right-hand side (a line ending in `=` does not
+# continue, L§3.2) is a syntax error.
+let x =

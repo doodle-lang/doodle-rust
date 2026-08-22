@@ -1,0 +1,9 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): literals (L§3.6) and `;` separators (L§3.2, several statements on
+# one line).
+let n = 1_000_000; let h = 0xdead_beef; let bits = 0b1010; let o = 0o755
+let f = 3.141_592; let g = 1.5e-3
+let s = "hi \u{2728} {n}"; let t = """inline triple"""; let raw = b"\x00\x01"
+let flags = true; let void = nil

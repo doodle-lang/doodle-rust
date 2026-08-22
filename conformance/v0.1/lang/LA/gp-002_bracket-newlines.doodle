@@ -1,0 +1,18 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): inside `(`/`[`/`{` a newline is insignificant (L§3.2), so a list,
+# call, or dict may span lines freely.
+let xs = [
+  1,
+  2,
+  3,
+]
+let total = sum(
+  xs,
+  0,
+)
+let d = {
+  a: 1,
+  b: 2,
+}

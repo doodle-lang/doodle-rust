@@ -1,0 +1,11 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4, S-4): in a `while`/`with` header the trailing `do` opens the
+# construct body, NOT a block argument to a call in the header (no-trailing-block mode).
+while more(items) do
+  step()
+end
+with pen = chosen(color) do
+  draw()
+end

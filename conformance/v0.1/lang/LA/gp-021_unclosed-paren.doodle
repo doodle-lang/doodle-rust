@@ -1,0 +1,6 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: expected `)` to close this call @ 6:12
+# Grammar-parity (§6.4): an unclosed `(` is a syntax error.
+let x = foo(1, 2

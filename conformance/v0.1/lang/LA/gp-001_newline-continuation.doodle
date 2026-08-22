@@ -1,0 +1,13 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (implementation-plan §6.4): a line ending in a binary operator continues
+# onto the next physical line (L§3.2). Only a *trailing* operator continues — a leading
+# operator never joins the previous line — so every continued line here ends in an operator.
+let a = 1 +
+  2 +
+  3
+let b = a *
+  2
+let c = a == b or
+  a < b

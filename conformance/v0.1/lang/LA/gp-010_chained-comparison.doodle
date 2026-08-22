@@ -1,0 +1,7 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: comparisons don't chain @ 7:17
+# Grammar-parity (§6.4): comparisons don't chain (App C, non-associative) — a syntax error
+# the Lezer grammar must reject too.
+let bad = a < b < c

@@ -1,0 +1,12 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): protocol/implement members are each self-delimited by `end`, so a
+# separator between them is optional (App A `proto-member*` / `( to-decl | fn-decl )*`).
+protocol Shape
+  fn area(self) end fn name(self) end
+end
+implement Shape for Point
+  fn area(self) return 0 end
+  fn name(self) return "point" end
+end

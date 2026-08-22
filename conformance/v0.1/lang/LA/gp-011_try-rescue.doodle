@@ -1,0 +1,20 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): `try … rescue e … end` as a statement and as an expression value,
+# and a `try` as the first statement of a final `else` body (L§8.7).
+try
+  risky()
+rescue e
+  handle(e)
+end
+let result = try compute() rescue e "failed" end
+if bad then
+  x = 0
+else
+  try
+    fallback()
+  rescue e
+    give_up()
+  end
+end

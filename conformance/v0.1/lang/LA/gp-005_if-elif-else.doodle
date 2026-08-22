@@ -1,0 +1,18 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): `else if` is a greedy elif clause; the chain closes with one
+# `end` (L§7). Also an if-statement with no else, and an if used as an expression value.
+if a then
+  x = 1
+else if b then
+  x = 2
+else if c then
+  x = 3
+else
+  x = 4
+end
+if ready then
+  go()
+end
+let label = if win then "yes" else "no" end

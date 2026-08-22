@@ -1,0 +1,22 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): module, ref record, loop, protocol extends, named call args,
+# a block parameter, and a computed dict key.
+module geometry
+  let pi = 3.14159
+end
+ref record Circle with center, radius
+end
+loop do
+  step()
+end
+protocol Circle extends Shape
+  fn circumference(self)
+  end
+end
+let made = make(x: 1, y: 2)
+fn each(xs, do body)
+  return xs
+end
+let keyed = { (compute()): 1 }

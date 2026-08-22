@@ -1,0 +1,11 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): a line ending in a UNARY `-`/`+` continues (L§3.2: continuation
+# keys on the token, not its unary/binary role).
+let a = -
+  2
+let b = 3 * -
+  4
+let c = 2 ** -
+  3

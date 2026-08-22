@@ -1,0 +1,9 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: expected an expression @ 9:1
+# Grammar-parity (§6.4): a line BEGINNING with a binary operator does not continue the
+# previous line (L§3.2: only a trailing trigger continues) — so `* 2` starts a new
+# statement and is a syntax error.
+let a = 1
+* 2

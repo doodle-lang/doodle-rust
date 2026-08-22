@@ -1,0 +1,12 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): a trailing `do … end` on a call *outside* a construct header is a
+# block argument to that call (L§8.5) — the common `repeat(n) do … end` shape.
+repeat(3) do
+  forward(10)
+  right(90)
+end
+let doubled = collect(source) do
+  transform()
+end

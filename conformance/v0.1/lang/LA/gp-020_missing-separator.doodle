@@ -1,0 +1,7 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: expected a statement separator @ 7:3
+# Grammar-parity (§6.4): two statements on one line with no separator (L§3.2) is a syntax
+# error — the Lezer grammar must reject it too.
+1 2

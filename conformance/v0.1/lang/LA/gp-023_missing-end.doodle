@@ -1,0 +1,7 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+#! expect-static-error: expected `end` to close this `while` @ 6:1
+# Grammar-parity (§6.4): a `while` with no closing `end` is a syntax error.
+while going do
+  step()

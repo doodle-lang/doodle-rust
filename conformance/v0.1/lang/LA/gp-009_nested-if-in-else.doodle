@@ -1,0 +1,13 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): a nested `if` (with its own `end`) as the first statement of a
+# final `else` body is valid when `else` is followed by a separator — distinct from `else if`
+# (an elif). The Lezer grammar must accept it too (probed against the engine).
+if a then
+  x = 1
+else
+  if b then
+    x = 2
+  end
+end

@@ -1,0 +1,21 @@
+#! clause: LA
+#! mode: static
+#! stage: parse
+# Grammar-parity (§6.4): declaration forms (L§8/§9/§10) — `to`/`fn` with default params,
+# a record, a protocol with members, an anonymous fn, and a `parameter`.
+to greet(name, greeting = "hi")
+  print(greeting)
+end
+fn double(x)
+  return x * 2
+end
+record Point with x, y
+end
+protocol Shape
+  fn area(self)
+  end
+end
+let inc = fn(n)
+  return n + 1
+end
+parameter pen_color = "black"
