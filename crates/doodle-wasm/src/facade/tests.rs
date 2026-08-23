@@ -71,6 +71,36 @@ fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
 }
 
 #[test]
+fn current_user_position_tracks_the_user_line_not_the_library() {
+    // `forward(10)` (the user's program) calls `draw_line` inside the prepended turtle
+    // library, so at the suspend the TOP-frame position is in the prelude, while
+    // `current_user_position` reports the user's `forward(10)` call site — the basis for a
+    // live line highlight of the user's program (M3.7).
+    let mut session = Session::turtle("forward(10)\n").unwrap();
+    let prelude = session.prelude_bytes();
+    let DriveOutcome::Suspended { args, .. } = session.drive(None) else {
+        panic!("expected Suspended");
+    };
+    let top = session.current_position().expect("a top-frame position");
+    let user = session
+        .current_user_position()
+        .expect("a user-program position");
+    assert!(
+        top.start < prelude,
+        "the top frame (draw_line) is inside the library ({} < {prelude})",
+        top.start
+    );
+    assert!(
+        user.start >= prelude,
+        "the user position is in the program ({} >= {prelude})",
+        user.start
+    );
+    for &h in &args {
+        session.release(h).unwrap();
+    }
+}
+
+#[test]
 fn the_handle_boundary_round_trips_scalars() {
     let mut session = Session::demo("let a = 1\n").unwrap();
     let i = session.make_int(-7);

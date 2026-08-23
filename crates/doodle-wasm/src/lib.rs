@@ -95,6 +95,18 @@ impl DoodleInstance {
             .map(|span| vec![span.start, span.end])
     }
 
+    /// The `[start, end)` byte span of the currently-executing line **in the user's
+    /// program** (E§8.2) — the innermost call site at or past the prelude, so it tracks the
+    /// user's turtle command even while the prepended library runs on top of it (`currentSpan`
+    /// would report the library). `undefined` when nothing on the stack is in the user
+    /// program. Offsets index the full module; subtract `preludeBytes`.
+    #[wasm_bindgen(js_name = currentUserSpan)]
+    pub fn current_user_span(&self) -> Option<Vec<u32>> {
+        self.session
+            .current_user_position()
+            .map(|span| vec![span.start, span.end])
+    }
+
     /// Byte length of the prepended prelude (0 for the demo config).
     #[wasm_bindgen(js_name = preludeBytes)]
     pub fn prelude_bytes(&self) -> u32 {

@@ -103,6 +103,20 @@ impl Instance {
             .collect()
     }
 
+    /// The call-site spans of the active callable frames (E§8.2), innermost first — like
+    /// [`stack_walk`](Self::stack_walk) but returning only source positions, minting no
+    /// callable handles. Frames with no call site (a block, the module top) are skipped. A
+    /// host uses this to find the outer (e.g. user-program) line currently executing while
+    /// inner library frames run on top of it — a live line highlight.
+    pub fn call_site_spans(&self) -> Vec<Span> {
+        self.machine
+            .frames
+            .iter()
+            .rev()
+            .filter_map(|frame| frame.call_site.map(|node| self.resolved.ast.span(node)))
+            .collect()
+    }
+
     /// The span the construct a continuation is at occupies (E§8.1, MD §17), or `None`
     /// for a span-less marker (a `ReturnBarrier`). Conts that carry an operator/operand
     /// span report it directly; those that name a node resolve it through the AST.

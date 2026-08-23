@@ -184,6 +184,25 @@ impl Session {
         self.instance.current_position().map(|p| p.span)
     }
 
+    /// The currently-executing span **in the user's program** (E§8.2): the innermost active
+    /// call site at or past the prelude — the user line whose turtle command is running,
+    /// even while the prepended library executes on top of it — else the top frame's own
+    /// position when it is itself in the user program (a top-level statement between
+    /// commands). `None` when nothing on the stack is in the user program. Drives a live
+    /// line highlight; still module-relative, so subtract [`prelude_bytes`](Self::prelude_bytes).
+    pub fn current_user_position(&self) -> Option<Span> {
+        self.instance
+            .call_site_spans()
+            .into_iter()
+            .find(|span| span.start >= self.prelude_bytes)
+            .or_else(|| {
+                self.instance
+                    .current_position()
+                    .map(|p| p.span)
+                    .filter(|span| span.start >= self.prelude_bytes)
+            })
+    }
+
     /// Byte length of the prepended prelude (0 for the demo config), so a host can map a
     /// module-relative position back to the user's program.
     pub fn prelude_bytes(&self) -> u32 {
