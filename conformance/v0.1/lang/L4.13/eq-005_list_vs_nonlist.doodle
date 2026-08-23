@@ -1,0 +1,4 @@
+#! clause: L4.13
+#! mode: run
+#! expect-out: false
+print([1] == 1)

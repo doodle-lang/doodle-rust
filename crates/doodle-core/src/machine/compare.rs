@@ -14,16 +14,16 @@
 //! `not` likewise. (`and`/`or` short-circuit control lives in the `step` loop;
 //! this module supplies the strict-`Bool` check and `not`.)
 //!
-//! **Scope (M2a.3b).** Numbers, bools, nil, bytes (all constructible now) and
-//! strings (helper-tested; string *values* arrive with string construction).
-//! Structural equality of lists/dicts/records is cycle-safe and lands at M4 —
-//! those values are not constructible yet, so that arm is unreachable here.
+//! **Scope.** Numbers, bools, nil, bytes, strings, and the reference-identity
+//! kinds compare directly. **Lists** compare structurally and **cycle-safely**
+//! (M4.0). Dicts and records join the same cycle-safe walk at M4.4 (they are not
+//! constructible before M4.1/M4.2, so their arm is currently unreachable).
 
 use super::arith::{Num, as_num};
 use super::error::{ExceptionKind, Raise};
 use crate::ast::BinaryOp;
 use crate::heap::Heap;
-use crate::machine::Value;
+use crate::machine::{ListIdx, Value};
 use crate::span::Span;
 use num_bigint::BigInt;
 use std::cmp::Ordering;
@@ -73,8 +73,19 @@ pub(crate) fn as_bool(v: Value, op: &str, span: Span) -> Result<bool, Raise> {
     }
 }
 
-/// Structural equality (L§4.13) — total and reflexive, never raises.
+/// Structural equality (L§4.13) — total and reflexive, never raises. Aggregates
+/// (lists now; dicts/records at M4.4) compare by structure, cycle-safely.
 pub(crate) fn equal(a: Value, b: Value, heap: &Heap) -> bool {
+    equal_rec(a, b, heap, &mut Vec::new())
+}
+
+/// The structural walk. `in_progress` holds the list-index pairs currently being
+/// compared on this path; **re-meeting a pair means a cycle**, and unrolling the
+/// two structures would agree forever, so the pair is equal co-inductively. This
+/// makes equality terminate on self-referential structures (reachable once
+/// mutation/place-chains land at M4.3). The pair stack is a plain `Vec` — no
+/// hasher — so nothing here can perturb determinism.
+fn equal_rec(a: Value, b: Value, heap: &Heap, in_progress: &mut Vec<(ListIdx, ListIdx)>) -> bool {
     // Numbers compare across kinds by exact value (S-28).
     if let (Some(na), Some(nb)) = (as_num(a, heap), as_num(b, heap)) {
         return numeric_equal(&na, &nb);
@@ -93,16 +104,46 @@ pub(crate) fn equal(a: Value, b: Value, heap: &Heap) -> bool {
         (Value::Module(x), Value::Module(y)) => x == y,
         (Value::Type(x), Value::Type(y)) => x == y,
         (Value::Foreign(x), Value::Foreign(y)) => x == y,
-        // Structural, cycle-safe equality of these is M4 — and they are not
-        // constructible before then, so this arm is unreachable at M2a.3b.
-        (Value::List(_), Value::List(_))
-        | (Value::Dict(_), Value::Dict(_))
-        | (Value::Record(_), Value::Record(_)) => {
-            unimplemented!("structural equality of lists/dicts/records is M4")
+        (Value::List(x), Value::List(y)) => list_equal(x, y, heap, in_progress),
+        // Dicts and records join this walk at M4.4; not constructible before
+        // M4.1/M4.2, so this arm is currently unreachable.
+        (Value::Dict(_), Value::Dict(_)) | (Value::Record(_), Value::Record(_)) => {
+            unimplemented!("structural equality of dicts/records is M4.4")
         }
         // Different types (including a number vs a non-number) are never equal.
         _ => false,
     }
+}
+
+/// Structural equality of two lists (L§4.6/§4.13): same length and pairwise-equal
+/// elements, walked cycle-safely via `in_progress`.
+fn list_equal(
+    x: ListIdx,
+    y: ListIdx,
+    heap: &Heap,
+    in_progress: &mut Vec<(ListIdx, ListIdx)>,
+) -> bool {
+    // The same list object is equal to itself without a walk — also the base case
+    // that terminates a list reachable from its own elements.
+    if x == y {
+        return true;
+    }
+    // This exact pair is already being compared further up the walk: a cycle.
+    if in_progress.contains(&(x, y)) {
+        return true;
+    }
+    let xs = &heap.list(x).items;
+    let ys = &heap.list(y).items;
+    if xs.len() != ys.len() {
+        return false;
+    }
+    in_progress.push((x, y));
+    let equal = xs
+        .iter()
+        .zip(ys.iter())
+        .all(|(&ea, &eb)| equal_rec(ea, eb, heap, in_progress));
+    in_progress.pop();
+    equal
 }
 
 /// Total order of two values where ordering is defined (numbers, strings);
@@ -379,5 +420,68 @@ mod tests {
             binary(BinaryOp::Ne, Value::Int(1), Value::Float(1.0), &h, S),
             Ok(Value::Bool(false))
         ));
+    }
+
+    fn list(items: Vec<Value>, h: &mut Heap) -> Value {
+        Value::List(h.alloc_list(items))
+    }
+
+    #[test]
+    fn lists_compare_structurally() {
+        let mut h = Heap::new();
+        let one = int("1", &mut h);
+        let two = int("2", &mut h);
+        let three = int("3", &mut h);
+        // Same length, pairwise-equal elements.
+        let a = list(vec![one, two, three], &mut h);
+        let b = list(vec![one, two, three], &mut h);
+        assert!(eq(a, b, &h));
+        // A differing element.
+        let l1 = list(vec![one], &mut h);
+        let l2 = list(vec![two], &mut h);
+        assert!(!eq(l1, l2, &h));
+        // Different lengths.
+        let l12 = list(vec![one, two], &mut h);
+        assert!(!eq(l12, l1, &h));
+        // Empty lists are equal.
+        let e1 = list(vec![], &mut h);
+        let e2 = list(vec![], &mut h);
+        assert!(eq(e1, e2, &h));
+        // Nested, and element equality recurses.
+        let inner1 = list(vec![one], &mut h);
+        let inner23 = list(vec![two, three], &mut h);
+        let nested_a = list(vec![inner1, inner23], &mut h);
+        let inner1b = list(vec![one], &mut h);
+        let inner23b = list(vec![two, three], &mut h);
+        let nested_b = list(vec![inner1b, inner23b], &mut h);
+        assert!(eq(nested_a, nested_b, &h));
+        // Elements compare cross-kind by exact value (S-28) through the walk.
+        let li = list(vec![one], &mut h);
+        let lf = list(vec![Value::Float(1.0)], &mut h);
+        assert!(eq(li, lf, &h));
+        // A list is never equal to a non-list, and never raises.
+        assert!(!eq(l1, one, &h));
+        assert!(!eq(l1, Value::Nil, &h));
+    }
+
+    #[test]
+    fn list_equality_is_cycle_safe() {
+        let mut h = Heap::new();
+        // `a = [a]` and `b = [b]` — self-referential lists (source can't build these
+        // until M4.3's mutation, but the heap can). Equality must terminate.
+        let ai = h.alloc_list(vec![]);
+        h.list_push(ai, Value::List(ai));
+        let bi = h.alloc_list(vec![]);
+        h.list_push(bi, Value::List(bi));
+        // The same cyclic object equals itself.
+        assert!(eq(Value::List(ai), Value::List(ai), &h));
+        // Two distinct one-cycle lists are structurally equal (co-induction) — and this
+        // returns rather than looping.
+        assert!(eq(Value::List(ai), Value::List(bi), &h));
+        // `c = [1, c]` differs from `a = [a]` by length; still terminates.
+        let one = int("1", &mut h);
+        let ci = h.alloc_list(vec![one]);
+        h.list_push(ci, Value::List(ci));
+        assert!(!eq(Value::List(ai), Value::List(ci), &h));
     }
 }
