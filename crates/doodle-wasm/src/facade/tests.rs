@@ -126,6 +126,47 @@ fn the_handle_boundary_round_trips_scalars() {
 }
 
 #[test]
+fn the_int_boundary_carries_a_bignum_capability_argument() {
+    // A Doodle integer is arbitrary-precision (L§4.2), so a capability can receive one
+    // that overflows i64. `pencolor(r, g, b)` stores its channels and `forward` passes
+    // them to `draw_line`; a huge `r` therefore arrives as a bignum capability argument.
+    // The fixed-width reader refuses it, but the arbitrary-precision reader carries it in
+    // full — the host embedding decodes through the latter so the value never wedges the
+    // decode (the failure mode the M3.9 review found in the pump).
+    let huge = "1000000000000000000000000000000"; // 10^30, past i64
+    let mut session = Session::turtle(&format!("pencolor({huge}, 0, 0)\nforward(1)\n")).unwrap();
+    let DriveOutcome::Suspended { capability, args } = session.drive(None) else {
+        panic!("expected a draw_line suspend");
+    };
+    assert_eq!(capability, 3, "draw_line");
+    let r = args[4]; // [x0, y0, x1, y1, r, g, b, a]
+    assert_eq!(session.kind_of(r).unwrap(), Kind::Int);
+    assert_eq!(session.as_int(r), Err(ValueError::IntOutOfRange));
+    assert_eq!(session.as_int_decimal(r).unwrap(), huge);
+    for &h in &args {
+        session.release(h).unwrap();
+    }
+}
+
+#[test]
+fn make_int_decimal_round_trips_any_magnitude() {
+    let mut session = Session::demo("let a = 1\n").unwrap();
+    // Beyond i64: interns as a bignum and reads back in full.
+    let big = "-340282366920938463463374607431768211456"; // -(2^128)
+    let h = session.make_int_decimal(big).unwrap();
+    assert_eq!(session.kind_of(h).unwrap(), Kind::Int);
+    assert_eq!(session.as_int_decimal(h).unwrap(), big);
+    // Within i64: still a machine word the fixed-width reader accepts.
+    let small = session.make_int_decimal("255").unwrap();
+    assert_eq!(session.as_int(small).unwrap(), 255);
+    // Malformed text is a boundary error, not a panic.
+    assert_eq!(
+        session.make_int_decimal("twelve"),
+        Err(ValueError::MalformedInt)
+    );
+}
+
+#[test]
 fn a_stepped_and_a_fast_demo_reach_the_same_output() {
     // Determinism through the facade (E§7.7): fuel-slicing does not change the result.
     let mut fast = Session::demo("print(6 * 7)\n").unwrap();

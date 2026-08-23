@@ -220,6 +220,9 @@ impl Session {
     pub fn make_int(&mut self, value: i64) -> Handle {
         self.instance.make_int(value)
     }
+    pub fn make_int_decimal(&mut self, decimal: &str) -> Result<Handle, ValueError> {
+        self.instance.make_int_decimal(decimal)
+    }
     pub fn make_float(&mut self, value: f64) -> Handle {
         self.instance.make_float(value)
     }
@@ -234,6 +237,9 @@ impl Session {
     }
     pub fn as_int(&self, handle: Handle) -> Result<i64, ValueError> {
         self.instance.as_int(handle)
+    }
+    pub fn as_int_decimal(&self, handle: Handle) -> Result<String, ValueError> {
+        self.instance.as_int_decimal(handle)
     }
     pub fn as_float(&self, handle: Handle) -> Result<f64, ValueError> {
         self.instance.as_float(handle)

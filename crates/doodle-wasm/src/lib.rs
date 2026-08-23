@@ -125,6 +125,17 @@ impl DoodleInstance {
     pub fn make_int(&mut self, value: i64) -> u64 {
         self.session.make_int(value).bits()
     }
+    /// Interns an `Int` of any magnitude from its base-10 text, returning its handle
+    /// bits — the arbitrary-precision counterpart of `makeInt`'s `i64`. The pump encodes
+    /// a JS `bigint` capability result through this (`value.toString()`) so a Doodle
+    /// integer beyond `i64` (L§4.2) crosses the boundary. Throws on non-integer text.
+    #[wasm_bindgen(js_name = makeIntStr)]
+    pub fn make_int_str(&mut self, decimal: &str) -> Result<u64, JsError> {
+        self.session
+            .make_int_decimal(decimal)
+            .map(|h| h.bits())
+            .map_err(value_error)
+    }
     /// Interns a `Float` value (NaN canonicalized), returning its handle bits.
     #[wasm_bindgen(js_name = makeFloat)]
     pub fn make_float(&mut self, value: f64) -> u64 {
@@ -153,6 +164,17 @@ impl DoodleInstance {
     pub fn as_int(&self, handle: u64) -> Result<i64, JsError> {
         self.session
             .as_int(Handle::from_bits(handle))
+            .map_err(value_error)
+    }
+    /// Reads an `Int` handle of any magnitude as its base-10 text — the arbitrary-precision
+    /// counterpart of `asInt` (which throws on a bignum). The pump decodes an integer
+    /// capability argument through this into a JS `bigint`, so a value beyond `i64` does
+    /// not throw out of the decode and wedge the instance. Throws only on a stale or
+    /// non-integer handle.
+    #[wasm_bindgen(js_name = asIntStr)]
+    pub fn as_int_str(&self, handle: u64) -> Result<String, JsError> {
+        self.session
+            .as_int_decimal(Handle::from_bits(handle))
             .map_err(value_error)
     }
     /// Reads a `Float` handle; throws on a stale handle or a non-float value.
