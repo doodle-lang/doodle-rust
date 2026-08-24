@@ -4,10 +4,10 @@
 //! first-key-wins, and `==` collision resolution — lives here because it needs value
 //! hashing and equality (which the heap layer must not reach up to).
 
-use super::compare::{self, equal, kind_name};
+use super::compare::{self, equal};
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
-use super::hash::{hash_value, is_hashable};
+use super::hash::{check_hashable, hash_value};
 use super::step::take_value;
 use super::{Machine, Value};
 use crate::ast::{DictKey, Node, NodeId};
@@ -52,6 +52,14 @@ pub(super) fn get(
     Ok(find(heap, idx, key, hash).map(|pos| heap.dict(idx).entries[pos as usize].1))
 }
 
+/// The value stored under a key `==`-equal to `key`, or `None` if absent. Used by
+/// dict `==` (`super::compare`) to look up one dict's keys in the other. The key
+/// comes from a dict's own entries, so it is known hashable and this never raises.
+pub(super) fn value_for_key(heap: &Heap, idx: DictIdx, key: Value) -> Option<Value> {
+    let hash = hash_value(key, heap);
+    find(heap, idx, key, hash).map(|pos| heap.dict(idx).entries[pos as usize].1)
+}
+
 /// The position of the entry whose key is `==` `key` (already hashed to `hash`), or
 /// `None`. Candidates share the key's content hash; `==` resolves the collision.
 fn find(heap: &Heap, idx: DictIdx, key: Value, hash: u64) -> Option<u32> {
@@ -63,14 +71,11 @@ fn find(heap: &Heap, idx: DictIdx, key: Value, hash: u64) -> Option<u32> {
         .find(|&p| equal(d.entries[p as usize].0, key, heap))
 }
 
-/// Hashes a key, raising if it is not hashable (L§4.8).
+/// Hashes a key, raising if it is not hashable (L§4.8). The raise's message names
+/// the offending field for a value record with a non-hashable field.
 fn key_hash(key: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
-    if !is_hashable(key) {
-        return Err(Raise::new(
-            ExceptionKind::UnhashableKey,
-            format!("{} can't be used as a dict key", kind_name(key)),
-            span,
-        ));
+    if let Err(reason) = check_hashable(key, heap) {
+        return Err(Raise::new(ExceptionKind::UnhashableKey, reason, span));
     }
     Ok(hash_value(key, heap))
 }

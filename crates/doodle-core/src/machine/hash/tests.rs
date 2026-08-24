@@ -10,6 +10,10 @@ fn h(v: Value, heap: &Heap) -> u64 {
     hash_value(v, heap)
 }
 
+fn is_hashable(v: Value, heap: &Heap) -> bool {
+    check_hashable(v, heap).is_ok()
+}
+
 /// The load-bearing invariant (L§4.8): `a == b` ⇒ `hash(a) == hash(b)`.
 fn assert_coheres(a: Value, b: Value, heap: &Heap) {
     if compare::equal(a, b, heap) {
@@ -78,15 +82,83 @@ fn strings_bytes_and_kind_separation() {
     assert_ne!(h(Value::Bool(false), &heap), h(zero, &heap));
 }
 
+fn record_type(
+    heap: &mut Heap,
+    name: &str,
+    fields: &[&str],
+    is_ref: bool,
+) -> crate::machine::TypeIdx {
+    let schema = crate::machine::RecordType {
+        name: name.into(),
+        fields: fields.iter().map(|f| (*f).into()).collect(),
+        is_ref,
+    };
+    heap.alloc_type(crate::heap::TypeObj {
+        kind: crate::machine::TypeKind::Record(schema),
+    })
+}
+
 #[test]
 fn hashability_of_kinds() {
     let mut heap = Heap::new();
-    assert!(is_hashable(Value::Nil));
-    assert!(is_hashable(Value::Bool(true)));
-    assert!(is_hashable(Value::Int(3)));
-    assert!(is_hashable(Value::Float(1.5)));
-    assert!(is_hashable(Value::Str(heap.alloc_string("x".into()))));
-    assert!(is_hashable(Value::Bytes(heap.alloc_bytes(vec![1].into()))));
-    // A list is not hashable (M4.1); records join at M4.4.
-    assert!(!is_hashable(Value::List(heap.alloc_list(vec![]))));
+    assert!(is_hashable(Value::Nil, &heap));
+    assert!(is_hashable(Value::Bool(true), &heap));
+    assert!(is_hashable(Value::Int(3), &heap));
+    assert!(is_hashable(Value::Float(1.5), &heap));
+    let s = Value::Str(heap.alloc_string("x".into()));
+    let by = Value::Bytes(heap.alloc_bytes(vec![1].into()));
+    assert!(is_hashable(s, &heap));
+    assert!(is_hashable(by, &heap));
+    // Lists and dicts are never hashable.
+    assert!(!is_hashable(Value::List(heap.alloc_list(vec![])), &heap));
+    assert!(!is_hashable(Value::Dict(heap.alloc_dict()), &heap));
+}
+
+#[test]
+fn record_hashability_follows_value_vs_ref_and_field_content() {
+    let mut heap = Heap::new();
+    // A value record with all-scalar fields is hashable.
+    let point = record_type(&mut heap, "Point", &["x", "y"], false);
+    let p = Value::Record(heap.alloc_record(point, Box::new([Value::Int(1), Value::Int(2)])));
+    assert!(is_hashable(p, &heap));
+
+    // A reference record is not hashable, and the message says so.
+    let turtle = record_type(&mut heap, "Turtle", &["heading"], true);
+    let t = Value::Record(heap.alloc_record(turtle, Box::new([Value::Int(0)])));
+    let err = check_hashable(t, &heap).unwrap_err();
+    assert!(
+        err.contains("Turtle") && err.contains("reference record"),
+        "{err}"
+    );
+
+    // A value record with a list field is not hashable; the raise names the field.
+    let holder = record_type(&mut heap, "Holder", &["items"], false);
+    let list = Value::List(heap.alloc_list(vec![Value::Int(1)]));
+    let h = Value::Record(heap.alloc_record(holder, Box::new([list])));
+    let err = check_hashable(h, &heap).unwrap_err();
+    assert!(
+        err.contains("items"),
+        "should name the offending field: {err}"
+    );
+
+    // Nesting: a value record whose value-record field holds a list — the message
+    // names the deep offending field, not the intermediate one.
+    let outer = record_type(&mut heap, "Outer", &["inner"], false);
+    let o = Value::Record(heap.alloc_record(outer, Box::new([h])));
+    let err = check_hashable(o, &heap).unwrap_err();
+    assert!(err.contains("items"), "should name the deep field: {err}");
+}
+
+#[test]
+fn value_records_hash_coherently_with_structural_eq() {
+    let mut heap = Heap::new();
+    let point = record_type(&mut heap, "Point", &["x", "y"], false);
+    // Two distinct instances with equal fields are `==` and must hash equal.
+    let a = Value::Record(heap.alloc_record(point, Box::new([Value::Int(1), Value::Float(2.0)])));
+    let b = Value::Record(heap.alloc_record(point, Box::new([Value::Int(1), Value::Int(2)])));
+    assert!(compare::equal(a, b, &heap));
+    assert_coheres(a, b, &heap);
+    // A different field value hashes differently (not required, but expected here).
+    let c = Value::Record(heap.alloc_record(point, Box::new([Value::Int(1), Value::Int(3)])));
+    assert!(!compare::equal(a, c, &heap));
 }

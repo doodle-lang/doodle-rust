@@ -1,0 +1,7 @@
+#! clause: L4.8
+#! mode: run
+#! expect-raise: is a reference record, so it can't be a dict key @ 7:1
+ref record Turtle with heading end
+let t = Turtle(heading: 0)
+let d = {}
+d[t] = 5

@@ -1,5 +1,5 @@
 #! clause: L4.8
 #! mode: run
-#! expect-raise: can't be used as a dict key @ 5:7
+#! expect-raise: a list can't be a dict key @ 5:7
 let d = {5: 10}
 print(d[[1]])

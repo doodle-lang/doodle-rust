@@ -1,0 +1,9 @@
+#! clause: L4.13
+#! mode: run
+#! expect-out: true
+ref record Node with link end
+let a = Node(link: nil)
+a.link = a
+let b = Node(link: nil)
+b.link = b
+print(a == b)

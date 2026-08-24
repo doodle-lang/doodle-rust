@@ -14,13 +14,20 @@
 //! integer-valued finite float — hashes by its `BigInt`; a non-integer finite
 //! float, `±inf`, or the canonical NaN hashes by its bit pattern. So `1` and `1.0`
 //! hash alike; `0`, `0.0`, `-0.0` hash alike; NaN has one hash.
+//!
+//! **Records as keys (L§9.5, L§15 hook 2; S-29).** A value record whose fields are
+//! all (recursively) hashable is a key; it hashes structurally over its type and
+//! fields, coherent with the nominal fieldwise `==`. A reference record, and any
+//! value record with a list/dict/`ref` field reachable inside it, is **not**
+//! hashable — so hashing never enters a reference graph and is total without cycle
+//! detection. [`check_hashable`] enforces this and names the offending field.
 
 use crate::heap::Heap;
-use crate::machine::Value;
+use crate::machine::{RecIdx, TypeKind, Value};
 use num_bigint::BigInt;
 use std::hash::Hasher;
 
-use super::compare::decompose;
+use super::compare::{decompose, kind_name};
 
 // A fixed SipHash key. Any constant works — the hash is never serialized or
 // compared across engine builds — so these are simply two fixed 64-bit words.
@@ -34,21 +41,69 @@ const TAG_INT: u8 = 2;
 const TAG_FLOAT: u8 = 3;
 const TAG_STR: u8 = 4;
 const TAG_BYTES: u8 = 5;
+const TAG_RECORD: u8 = 6;
 
-/// Whether `v` may be used as a dict key (L§4.8). Scalars are hashable now;
-/// records join at M4.4 (the reachable-immutable ones, per D-M4-1); lists, dicts,
-/// and the reference kinds are never hashable.
-pub(super) fn is_hashable(v: Value) -> bool {
-    matches!(
-        v,
+/// Checks that `v` may be a dict key (L§4.8, L§9.5): scalars (numbers, booleans,
+/// strings, bytes, nil) and **value records whose fields are all (recursively)
+/// hashable**. Lists, dicts, reference records, and any value record with such a
+/// field anywhere inside are rejected — the principle is that no shared mutable
+/// value be reachable from a stored key (a value-record key is the dict's own copy,
+/// §4.14, so it is unreachable). `Err` carries a message naming the offending field,
+/// for the raise at insertion/lookup.
+pub(super) fn check_hashable(v: Value, heap: &Heap) -> Result<(), String> {
+    match v {
         Value::Nil
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::BigInt(_)
-            | Value::Float(_)
-            | Value::Str(_)
-            | Value::Bytes(_)
-    )
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::BigInt(_)
+        | Value::Float(_)
+        | Value::Str(_)
+        | Value::Bytes(_) => Ok(()),
+        Value::Record(r) => check_record_hashable(r, heap),
+        // Lists, dicts, and the reference kinds carry shared mutable identity.
+        other => Err(format!("{} can't be a dict key", kind_name(other))),
+    }
+}
+
+/// A value record is hashable iff it is not a `ref` record and every field is
+/// (recursively) hashable (L§9.5). Names the first offending field; for a nested
+/// value-record field the deeper message is propagated so it names the actual
+/// non-hashable leaf, not just the intermediate field.
+fn check_record_hashable(r: RecIdx, heap: &Heap) -> Result<(), String> {
+    let type_idx = heap.record(r).type_idx;
+    let (is_ref, type_name, field_names) = match &heap.type_value(type_idx).kind {
+        TypeKind::Record(rt) => (rt.is_ref, rt.name.clone(), rt.fields.clone()),
+        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+    };
+    if is_ref {
+        return Err(format!(
+            "`{type_name}` is a reference record, so it can't be a dict key"
+        ));
+    }
+    let fields = heap.record(r).fields.to_vec();
+    for (name, &f) in field_names.iter().zip(fields.iter()) {
+        if let Err(inner) = check_hashable(f, heap) {
+            // A value-record field's own message already names the deep offender;
+            // any other non-hashable field is named here with its kind.
+            return Err(if is_value_record(f, heap) {
+                inner
+            } else {
+                format!("field `{name}` of `{type_name}` can't be part of a dict key ({inner})")
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `v` is a **value** record (a record that is not `ref`).
+fn is_value_record(v: Value, heap: &Heap) -> bool {
+    let Value::Record(r) = v else {
+        return false;
+    };
+    match &heap.type_value(heap.record(r).type_idx).kind {
+        TypeKind::Record(rt) => !rt.is_ref,
+        TypeKind::Builtin(_) => false,
+    }
 }
 
 /// The content hash of a hashable value — coherent with structural `==` (L§4.8).
@@ -69,7 +124,26 @@ fn hash_into<H: Hasher>(v: Value, heap: &Heap, h: &mut H) {
         Value::Int(_) | Value::BigInt(_) | Value::Float(_) => hash_number(v, heap, h),
         Value::Str(i) => hash_bytes(TAG_STR, heap.string(i).utf8.as_bytes(), h),
         Value::Bytes(i) => hash_bytes(TAG_BYTES, &heap.byte_string(i).bytes, h),
-        _ => unreachable!("a non-hashable value reached hashing (guarded by is_hashable)"),
+        Value::Record(r) => hash_record(r, heap, h),
+        _ => unreachable!("a non-hashable value reached hashing (guarded by check_hashable)"),
+    }
+}
+
+/// Hashes a value record structurally (L§9.5, L§15 hook 2): its declared type plus
+/// each field in declaration order, coherent with the nominal fieldwise `==`
+/// (L§4.13). The [`is_hashable`] gate guarantees every field is a scalar or another
+/// value record, so this never enters a reference graph — total and terminating
+/// without cycle detection.
+fn hash_record<H: Hasher>(r: RecIdx, heap: &Heap, h: &mut H) {
+    h.write_u8(TAG_RECORD);
+    // Nominal identity: the declared type is part of what `==` compares, so it is
+    // part of the hash (and fixes the field count). A run assigns type indices
+    // deterministically and the hash is never compared across builds (module
+    // header), so the raw index is a fine deterministic type discriminator.
+    h.write_u32(heap.record(r).type_idx.0);
+    let fields = heap.record(r).fields.to_vec();
+    for f in fields {
+        hash_into(f, heap, h);
     }
 }
 

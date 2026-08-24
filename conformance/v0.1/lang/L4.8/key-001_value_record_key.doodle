@@ -1,0 +1,7 @@
+#! clause: L4.8
+#! mode: run
+#! expect-out: origin
+record Point with x, y end
+let d = {}
+d[Point(x: 1, y: 2)] = "origin"
+print(d[Point(x: 1, y: 2)])

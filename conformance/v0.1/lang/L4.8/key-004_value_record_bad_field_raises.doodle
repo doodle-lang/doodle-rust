@@ -1,0 +1,6 @@
+#! clause: L4.8
+#! mode: run
+#! expect-raise: field `items` of `Holder` can't be part of a dict key @ 6:1
+record Holder with items end
+let d = {}
+d[Holder(items: [1, 2])] = 5

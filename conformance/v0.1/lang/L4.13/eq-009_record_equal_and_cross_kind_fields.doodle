@@ -1,0 +1,7 @@
+#! clause: L4.13
+#! mode: run
+#! expect-out: true
+#! expect-out: false
+record Point with x, y end
+print(Point(x: 1, y: 2) == Point(x: 1, y: 2.0))
+print(Point(x: 1, y: 2) == Point(x: 1, y: 3))

@@ -14,19 +14,33 @@
 //! `not` likewise. (`and`/`or` short-circuit control lives in the `step` loop;
 //! this module supplies the strict-`Bool` check and `not`.)
 //!
-//! **Scope.** Numbers, bools, nil, bytes, strings, and the reference-identity
-//! kinds compare directly. **Lists** compare structurally and **cycle-safely**
-//! (M4.0). Dicts and records join the same cycle-safe walk at M4.4 (they are not
-//! constructible before M4.1/M4.2, so their arm is currently unreachable).
+//! **Aggregates.** Numbers, bools, nil, bytes, strings, and the reference-identity
+//! kinds compare directly. Lists, dicts, and records compare structurally and
+//! **cycle-safely** via a co-inductive walk ([`Agg`] pair stack): lists by length +
+//! pairwise elements, **dicts order-independently** (same key set, equal values),
+//! records **nominally** (same declared type, pairwise fields — value and `ref`
+//! alike). The pair stack is a plain `Vec` (no hasher), so nothing here perturbs
+//! determinism.
 
 use super::arith::{Num, as_num};
 use super::error::{ExceptionKind, Raise};
 use crate::ast::BinaryOp;
 use crate::heap::Heap;
-use crate::machine::{ListIdx, Value};
+use crate::machine::{DictIdx, ListIdx, RecIdx, Value};
 use crate::span::Span;
 use num_bigint::BigInt;
 use std::cmp::Ordering;
+
+/// An aggregate value's heap identity, tracked on the cycle-detection stack. Lists,
+/// dicts, and reference records can each form cycles (through their elements, values,
+/// and fields respectively), so all three take part in the co-inductive walk; a
+/// re-met pair is a cycle and compares equal (L§4.13).
+#[derive(Clone, Copy, PartialEq)]
+enum Agg {
+    List(ListIdx),
+    Dict(DictIdx),
+    Record(RecIdx),
+}
 
 /// Applies a **comparison or equality** operator (`== != < > <= >=`). Arithmetic
 /// and logical operators do not reach here.
@@ -74,18 +88,18 @@ pub(crate) fn as_bool(v: Value, op: &str, span: Span) -> Result<bool, Raise> {
 }
 
 /// Structural equality (L§4.13) — total and reflexive, never raises. Aggregates
-/// (lists now; dicts/records at M4.4) compare by structure, cycle-safely.
+/// (lists, dicts, records) compare by structure, cycle-safely.
 pub(crate) fn equal(a: Value, b: Value, heap: &Heap) -> bool {
     equal_rec(a, b, heap, &mut Vec::new())
 }
 
-/// The structural walk. `in_progress` holds the list-index pairs currently being
+/// The structural walk. `in_progress` holds the aggregate-index pairs currently being
 /// compared on this path; **re-meeting a pair means a cycle**, and unrolling the
 /// two structures would agree forever, so the pair is equal co-inductively. This
-/// makes equality terminate on self-referential structures (reachable once
-/// mutation/place-chains land at M4.3). The pair stack is a plain `Vec` — no
-/// hasher — so nothing here can perturb determinism.
-fn equal_rec(a: Value, b: Value, heap: &Heap, in_progress: &mut Vec<(ListIdx, ListIdx)>) -> bool {
+/// makes equality terminate on self-referential structures (a cyclic list, a
+/// self-referencing dict value, a `ref` record graph). The pair stack is a plain
+/// `Vec` — no hasher — so nothing here can perturb determinism.
+fn equal_rec(a: Value, b: Value, heap: &Heap, in_progress: &mut Vec<(Agg, Agg)>) -> bool {
     // Numbers compare across kinds by exact value (S-28).
     if let (Some(na), Some(nb)) = (as_num(a, heap), as_num(b, heap)) {
         return numeric_equal(&na, &nb);
@@ -105,11 +119,8 @@ fn equal_rec(a: Value, b: Value, heap: &Heap, in_progress: &mut Vec<(ListIdx, Li
         (Value::Type(x), Value::Type(y)) => x == y,
         (Value::Foreign(x), Value::Foreign(y)) => x == y,
         (Value::List(x), Value::List(y)) => list_equal(x, y, heap, in_progress),
-        // Dicts and records join this walk at M4.4; not constructible before
-        // M4.1/M4.2, so this arm is currently unreachable.
-        (Value::Dict(_), Value::Dict(_)) | (Value::Record(_), Value::Record(_)) => {
-            unimplemented!("structural equality of dicts/records is M4.4")
-        }
+        (Value::Dict(x), Value::Dict(y)) => dict_equal(x, y, heap, in_progress),
+        (Value::Record(x), Value::Record(y)) => record_equal(x, y, heap, in_progress),
         // Different types (including a number vs a non-number) are never equal.
         _ => false,
     }
@@ -117,19 +128,14 @@ fn equal_rec(a: Value, b: Value, heap: &Heap, in_progress: &mut Vec<(ListIdx, Li
 
 /// Structural equality of two lists (L§4.6/§4.13): same length and pairwise-equal
 /// elements, walked cycle-safely via `in_progress`.
-fn list_equal(
-    x: ListIdx,
-    y: ListIdx,
-    heap: &Heap,
-    in_progress: &mut Vec<(ListIdx, ListIdx)>,
-) -> bool {
+fn list_equal(x: ListIdx, y: ListIdx, heap: &Heap, in_progress: &mut Vec<(Agg, Agg)>) -> bool {
     // The same list object is equal to itself without a walk — also the base case
     // that terminates a list reachable from its own elements.
     if x == y {
         return true;
     }
     // This exact pair is already being compared further up the walk: a cycle.
-    if in_progress.contains(&(x, y)) {
+    if in_progress.contains(&(Agg::List(x), Agg::List(y))) {
         return true;
     }
     let xs = &heap.list(x).items;
@@ -137,11 +143,66 @@ fn list_equal(
     if xs.len() != ys.len() {
         return false;
     }
-    in_progress.push((x, y));
+    in_progress.push((Agg::List(x), Agg::List(y)));
     let equal = xs
         .iter()
         .zip(ys.iter())
         .all(|(&ea, &eb)| equal_rec(ea, eb, heap, in_progress));
+    in_progress.pop();
+    equal
+}
+
+/// Structural equality of two dicts (L§4.13) — **order-independent**: equal iff they
+/// have the same number of entries and, for every key in `x`, `y` holds a
+/// `==`-equal key mapping to a `==`-equal value. Insertion order is not compared
+/// (`{a:1, b:2} == {b:2, a:1}`). Keys are hashable (so their own comparison
+/// terminates); only the *values* can re-enter this walk, tracked via `in_progress`.
+fn dict_equal(x: DictIdx, y: DictIdx, heap: &Heap, in_progress: &mut Vec<(Agg, Agg)>) -> bool {
+    if x == y {
+        return true;
+    }
+    if in_progress.contains(&(Agg::Dict(x), Agg::Dict(y))) {
+        return true;
+    }
+    if heap.dict(x).entries.len() != heap.dict(y).entries.len() {
+        return false;
+    }
+    in_progress.push((Agg::Dict(x), Agg::Dict(y)));
+    // Equal lengths + every x-key present in y with an equal value ⇒ the key sets
+    // and mappings coincide (dicts hold no duplicate keys, L§4.8).
+    let equal =
+        heap.dict(x)
+            .entries
+            .iter()
+            .all(|&(k, vx)| match super::dict::value_for_key(heap, y, k) {
+                Some(vy) => equal_rec(vx, vy, heap, in_progress),
+                None => false,
+            });
+    in_progress.pop();
+    equal
+}
+
+/// Structural equality of two records (L§4.13) — **nominal**: equal iff they are the
+/// same declared type (so field count and order coincide) and every field is
+/// pairwise `==`. Holds for both value and `ref` records; a `ref` record graph can
+/// cycle, so the pair is tracked via `in_progress`.
+fn record_equal(x: RecIdx, y: RecIdx, heap: &Heap, in_progress: &mut Vec<(Agg, Agg)>) -> bool {
+    if x == y {
+        return true;
+    }
+    if in_progress.contains(&(Agg::Record(x), Agg::Record(y))) {
+        return true;
+    }
+    if heap.record(x).type_idx != heap.record(y).type_idx {
+        return false;
+    }
+    in_progress.push((Agg::Record(x), Agg::Record(y)));
+    let equal = heap
+        .record(x)
+        .fields
+        .iter()
+        .zip(heap.record(y).fields.iter())
+        .all(|(&fx, &fy)| equal_rec(fx, fy, heap, in_progress));
     in_progress.pop();
     equal
 }
@@ -268,221 +329,4 @@ pub(super) fn kind_name(v: Value) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::machine::arith::int_value;
-
-    const S: Span = Span::DUMMY;
-
-    fn int(n: &str, heap: &mut Heap) -> Value {
-        int_value(n.parse().unwrap(), heap)
-    }
-
-    fn eq(a: Value, b: Value, heap: &Heap) -> bool {
-        equal(a, b, heap)
-    }
-
-    fn ord(a: Value, b: Value, heap: &Heap) -> Ordering {
-        order(a, b, heap, S).expect("ordering should be defined")
-    }
-
-    #[test]
-    fn same_type_equality_by_content() {
-        let mut h = Heap::new();
-        assert!(eq(Value::Bool(true), Value::Bool(true), &h));
-        assert!(!eq(Value::Bool(true), Value::Bool(false), &h));
-        assert!(eq(Value::Nil, Value::Nil, &h));
-        let a = h.alloc_bytes(vec![1, 2].into());
-        let b = h.alloc_bytes(vec![1, 2].into());
-        let c = h.alloc_bytes(vec![1, 3].into());
-        assert!(eq(Value::Bytes(a), Value::Bytes(b), &h));
-        assert!(!eq(Value::Bytes(a), Value::Bytes(c), &h));
-    }
-
-    #[test]
-    fn different_types_are_never_equal_and_never_raise() {
-        let h = Heap::new();
-        assert!(!eq(Value::Int(1), Value::Bool(true), &h));
-        assert!(!eq(Value::Nil, Value::Int(0), &h));
-        assert!(!eq(Value::Bool(false), Value::Nil, &h));
-    }
-
-    #[test]
-    fn cross_kind_numeric_equality_is_exact() {
-        let mut h = Heap::new();
-        assert!(eq(Value::Int(1), Value::Float(1.0), &h));
-        assert!(!eq(Value::Int(1), Value::Float(1.5), &h));
-        // -0.0 == 0.0 == 0 (all three directions).
-        assert!(eq(Value::Float(-0.0), Value::Float(0.0), &h));
-        assert!(eq(Value::Int(0), Value::Float(-0.0), &h));
-        assert!(eq(Value::Float(-0.0), Value::Int(0), &h));
-        // Beyond 2^53, exact — a lossy widen would call these equal.
-        let big = int("9007199254740993", &mut h); // 2^53 + 1
-        let two53 = Value::Float(9007199254740992.0); // 2^53 (exact f64)
-        assert!(!eq(big, two53, &h));
-        assert!(eq(int("9007199254740992", &mut h), two53, &h)); // 2^53 == 2^53
-    }
-
-    #[test]
-    fn bigint_vs_float_equality_is_exact() {
-        let mut h = Heap::new();
-        // 2^70 is exactly representable; 2^70 + 1 is not, and is strictly larger.
-        let p70 = int("1180591620717411303424", &mut h); // 2^70
-        let p70f = Value::Float(1180591620717411303424.0);
-        assert!(eq(p70, p70f, &h));
-        let p70_1 = int("1180591620717411303425", &mut h); // 2^70 + 1
-        assert!(!eq(p70_1, p70f, &h));
-        assert_eq!(ord(p70_1, p70f, &h), Ordering::Greater);
-    }
-
-    #[test]
-    fn nan_equals_only_itself_and_never_raises() {
-        let h = Heap::new();
-        let nan = Value::Float(f64::NAN);
-        assert!(eq(nan, nan, &h)); // reflexive (S-28)
-        assert!(!eq(nan, Value::Float(1.0), &h));
-        assert!(!eq(nan, Value::Int(1), &h));
-        assert!(!eq(Value::Int(1), nan, &h));
-    }
-
-    #[test]
-    fn ordering_of_numbers_including_cross_kind() {
-        let mut h = Heap::new();
-        assert_eq!(ord(Value::Int(1), Value::Int(2), &h), Ordering::Less);
-        assert_eq!(ord(Value::Int(1), Value::Float(1.5), &h), Ordering::Less);
-        assert_eq!(ord(Value::Float(2.0), Value::Int(1), &h), Ordering::Greater);
-        assert_eq!(ord(Value::Int(5), int("5", &mut h), &h), Ordering::Equal);
-        // Neither zero is less than the other.
-        assert_eq!(
-            ord(Value::Float(-0.0), Value::Float(0.0), &h),
-            Ordering::Equal
-        );
-    }
-
-    #[test]
-    fn ordering_a_nan_raises() {
-        let h = Heap::new();
-        let nan = Value::Float(f64::NAN);
-        let e = order(nan, Value::Int(1), &h, S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-        let e = order(Value::Float(1.0), nan, &h, S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-    }
-
-    #[test]
-    fn ordering_non_numbers_raises() {
-        let mut h = Heap::new();
-        let e = order(Value::Bool(true), Value::Bool(false), &h, S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-        let bytes = Value::Bytes(h.alloc_bytes(vec![1].into()));
-        let e = order(bytes, bytes, &h, S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-        // A number vs a non-number is also undefined.
-        let e = order(Value::Int(1), Value::Nil, &h, S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-    }
-
-    #[test]
-    fn strings_compare_by_content_and_code_point_order() {
-        // String values are stored NFC by construction, so equality is a content
-        // compare of the normalized bytes and ordering is UTF-8 byte (= code
-        // point) order.
-        let mut h = Heap::new();
-        let a = Value::Str(h.alloc_string("caf\u{e9}".into())); // "café" (NFC)
-        let b = Value::Str(h.alloc_string("caf\u{e9}".into()));
-        assert!(eq(a, b, &h));
-        let c = Value::Str(h.alloc_string("cafe".into()));
-        assert!(!eq(a, c, &h));
-        let apple = Value::Str(h.alloc_string("apple".into()));
-        let banana = Value::Str(h.alloc_string("banana".into()));
-        assert_eq!(ord(apple, banana, &h), Ordering::Less);
-    }
-
-    #[test]
-    fn not_negates_booleans_and_rejects_others() {
-        assert!(matches!(not(Value::Bool(true), S), Ok(Value::Bool(false))));
-        assert!(matches!(not(Value::Bool(false), S), Ok(Value::Bool(true))));
-        let e = not(Value::Int(1), S).unwrap_err();
-        assert_eq!(e.exception.kind, ExceptionKind::TypeMismatch);
-    }
-
-    #[test]
-    fn comparison_operators_return_booleans() {
-        let h = Heap::new();
-        assert!(matches!(
-            binary(BinaryOp::Lt, Value::Int(1), Value::Int(2), &h, S),
-            Ok(Value::Bool(true))
-        ));
-        assert!(matches!(
-            binary(BinaryOp::Ge, Value::Int(1), Value::Int(2), &h, S),
-            Ok(Value::Bool(false))
-        ));
-        assert!(matches!(
-            binary(BinaryOp::Ne, Value::Int(1), Value::Float(1.0), &h, S),
-            Ok(Value::Bool(false))
-        ));
-    }
-
-    fn list(items: Vec<Value>, h: &mut Heap) -> Value {
-        Value::List(h.alloc_list(items))
-    }
-
-    #[test]
-    fn lists_compare_structurally() {
-        let mut h = Heap::new();
-        let one = int("1", &mut h);
-        let two = int("2", &mut h);
-        let three = int("3", &mut h);
-        // Same length, pairwise-equal elements.
-        let a = list(vec![one, two, three], &mut h);
-        let b = list(vec![one, two, three], &mut h);
-        assert!(eq(a, b, &h));
-        // A differing element.
-        let l1 = list(vec![one], &mut h);
-        let l2 = list(vec![two], &mut h);
-        assert!(!eq(l1, l2, &h));
-        // Different lengths.
-        let l12 = list(vec![one, two], &mut h);
-        assert!(!eq(l12, l1, &h));
-        // Empty lists are equal.
-        let e1 = list(vec![], &mut h);
-        let e2 = list(vec![], &mut h);
-        assert!(eq(e1, e2, &h));
-        // Nested, and element equality recurses.
-        let inner1 = list(vec![one], &mut h);
-        let inner23 = list(vec![two, three], &mut h);
-        let nested_a = list(vec![inner1, inner23], &mut h);
-        let inner1b = list(vec![one], &mut h);
-        let inner23b = list(vec![two, three], &mut h);
-        let nested_b = list(vec![inner1b, inner23b], &mut h);
-        assert!(eq(nested_a, nested_b, &h));
-        // Elements compare cross-kind by exact value (S-28) through the walk.
-        let li = list(vec![one], &mut h);
-        let lf = list(vec![Value::Float(1.0)], &mut h);
-        assert!(eq(li, lf, &h));
-        // A list is never equal to a non-list, and never raises.
-        assert!(!eq(l1, one, &h));
-        assert!(!eq(l1, Value::Nil, &h));
-    }
-
-    #[test]
-    fn list_equality_is_cycle_safe() {
-        let mut h = Heap::new();
-        // `a = [a]` and `b = [b]` — self-referential lists (source can't build these
-        // until M4.3's mutation, but the heap can). Equality must terminate.
-        let ai = h.alloc_list(vec![]);
-        h.list_push(ai, Value::List(ai));
-        let bi = h.alloc_list(vec![]);
-        h.list_push(bi, Value::List(bi));
-        // The same cyclic object equals itself.
-        assert!(eq(Value::List(ai), Value::List(ai), &h));
-        // Two distinct one-cycle lists are structurally equal (co-induction) — and this
-        // returns rather than looping.
-        assert!(eq(Value::List(ai), Value::List(bi), &h));
-        // `c = [1, c]` differs from `a = [a]` by length; still terminates.
-        let one = int("1", &mut h);
-        let ci = h.alloc_list(vec![one]);
-        h.list_push(ci, Value::List(ci));
-        assert!(!eq(Value::List(ai), Value::List(ci), &h));
-    }
-}
+mod tests;

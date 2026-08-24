@@ -1,0 +1,4 @@
+#! clause: L4.13
+#! mode: run
+#! expect-out: true
+print({a: 1, b: 2} == {b: 2, a: 1})
