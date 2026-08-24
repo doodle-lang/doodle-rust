@@ -143,6 +143,9 @@ impl Instance {
             Cont::DefineCallable { decl } => ast.span(*decl),
             Cont::DefineRecord { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
+            Cont::TryHandler { try_node } => ast.span(*try_node),
+            // A cleanup marker restores a binding; it occupies no construct of its own.
+            Cont::WithRestore { .. } => return None,
             // Operator plumbing carries the operator's span directly.
             Cont::BinRhs { span, .. }
             | Cont::BinApply { span, .. }

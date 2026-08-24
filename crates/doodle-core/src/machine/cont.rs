@@ -273,6 +273,28 @@ pub(crate) enum Cont {
         /// The `Return`/`Break`/`Continue` node.
         exit: NodeId,
     },
+    /// **Cleanup** (machine-design §12/§13): restore a dynamic-parameter binding. On
+    /// normal completion of a `with` body, and as the unwinder pops past this cont on
+    /// **any** exit (break/continue/return/raise/cancel), pop `dyn_stack` down to
+    /// `dyn_mark`, writing each saved value back into its cell. The producer (`with`)
+    /// is M4.6; the restore mechanism and its execution during unwind are M4.5a.
+    // Constructed by the `with` producer (M4.6); the M4.5a mechanism matches it only.
+    #[allow(dead_code)]
+    WithRestore {
+        /// The `dyn_stack` length to restore to — entries above it are this `with`'s.
+        dyn_mark: u32,
+    },
+    /// **Cleanup (raise-only)** (machine-design §12): a `try`'s rescue handler. On
+    /// normal completion of the protected body this pops inertly (the body's value is
+    /// the `try`'s value). Only a **raise** unwind stops here — binding the exception
+    /// and entering the rescue body. The bind-and-enter is M4.5b; M4.5a adds the cont
+    /// and the unwinder's recognition of it as the raise catch-point.
+    // Constructed by the `try` producer (M4.5b); the M4.5a mechanism matches it only.
+    #[allow(dead_code)]
+    TryHandler {
+        /// The `Try` node (its `rescue_name`/`rescue_body` drive the M4.5b catch).
+        try_node: NodeId,
+    },
 }
 
 impl Cont {
@@ -329,7 +351,9 @@ impl Cont {
             | Cont::BindDefault { .. }
             | Cont::DefineCallable { .. }
             | Cont::ReturnBarrier
-            | Cont::ExitApply { .. } => {}
+            | Cont::ExitApply { .. }
+            | Cont::WithRestore { .. }
+            | Cont::TryHandler { .. } => {}
         }
     }
 }

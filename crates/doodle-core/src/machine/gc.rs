@@ -11,8 +11,10 @@
 //! callables, the **host handle table** (§16, M2a.11), and every namespace binding
 //! cell, plus a **parked capability request**'s bound arguments while `Suspended`
 //! (§14, M2b.4). A frame's `block_param`, `Block` static link, and `Consumer` hold
-//! frame indices/serials — not heap references — so they root nothing. Roots that join
-//! later as their state lands: the dynamic-parameter stack (M4) and the drive stack (M2b.5).
+//! frame indices/serials — not heap references — so they root nothing. Also the
+//! in-flight synchronous foreign-call arguments (§15) and the **dynamic-binding save
+//! stack** (§13 — each `with`'s saved prior value). Roots that join later as their
+//! state lands: the drive stack (M2b.5).
 
 use super::Machine;
 use super::control::Namespace;
@@ -44,7 +46,7 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine, namespace: &Namespace)
         if let Some(v) = machine.reg {
             tracer.value(v);
         }
-        if let Some(v) = machine.unwind.and_then(|u| u.gc_value()) {
+        if let Some(v) = machine.unwind.as_ref().and_then(|u| u.gc_value()) {
             tracer.value(v);
         }
         for cal in machine.ring.callables() {
@@ -69,6 +71,11 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine, namespace: &Namespace)
         // host's Rust stack (e.g. a native `each`'s list while its reentrant drive runs),
         // so a collection during that drive must keep them alive.
         for value in &machine.foreign_roots {
+            tracer.value(*value);
+        }
+        // The dynamic-binding save stack (§13): each `with`'s saved prior value stays
+        // reachable while the binding is active, so a restore can write it back.
+        for (_, value) in &machine.dyn_stack {
             tracer.value(*value);
         }
     });

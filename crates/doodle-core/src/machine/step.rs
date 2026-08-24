@@ -42,14 +42,28 @@ pub(crate) fn step(
     // consistent across the two return paths (E§7.4).
     if machine.unwind.is_some() {
         let cancelling = matches!(machine.unwind, Some(unwind::Unwind::Cancel));
-        let settle = unwind::step(resolved, heap, machine)?;
+        // An unwind arm may itself raise (a bare `return` off a `fn`'s end): that becomes
+        // a Raise unwind, running cleanup on its way out rather than propagating straight
+        // to the boundary.
+        let settle = match unwind::step(resolved, heap, machine) {
+            Ok(settle) => settle,
+            Err(raise) => {
+                arm_raise(machine, raise);
+                return Ok(None);
+            }
+        };
         // Cancellation teardown (E§10.1, §12): once the cancel unwind empties the stack,
         // the whole program is torn down — fault `Cancelled`, a non-resumable stop that
-        // Doodle code cannot catch. (The frames popped inertly at M2b; each will run its
-        // block/`with` cleanup as the unwinder gains those conts at M4.)
+        // Doodle code cannot catch.
         if cancelling && machine.frames.is_empty() {
             machine.unwind = None;
             return Err(Halt::Fault(EngineFault::Cancelled));
+        }
+        // An uncaught raise drained the whole stack (no `TryHandler` cleared it): it
+        // reaches the outermost boundary as the terminal `Raised` outcome (E§9).
+        if machine.frames.is_empty() && matches!(machine.unwind, Some(unwind::Unwind::Raise { .. }))
+        {
+            return Err(Halt::Raise(take_raise(machine)));
         }
         return match settle {
             Some(depth) => {
@@ -76,14 +90,22 @@ pub(crate) fn step(
         Some(Cont::Seq { .. }) | Some(Cont::ReturnBarrier) | None
     );
     let depth_before = machine.frames.len();
-    dispatch(resolved, heap, machine, namespace, cont)?;
+    let dispatched = dispatch(resolved, heap, machine, namespace, cont);
     // A reentrant nested drive (a native block-consumer running its block) faulted —
     // a limit tripped, or the S-15 `NestedSuspend` (a suspending capability reached
     // inside the native consumer, forbidden — Decision #2). It parks the fault because
     // the Raise-typed `apply` chain cannot carry an `EngineFault`; surface it here as
-    // this transition's fault (MD §14).
+    // this transition's fault (MD §14). A fault takes priority over a raise.
     if let Some(fault) = machine.take_reentry_fault() {
         return Err(Halt::Fault(fault));
+    }
+    // A raise from the transition begins a **Raise unwind** (machine-design §12): it
+    // unwinds through the frames running `WithRestore` cleanup and seeking a handler,
+    // rather than propagating straight to the boundary. An uncaught raise drains the
+    // stack and surfaces as the terminal `Raised` in the unwind branch above.
+    if let Err(raise) = dispatched {
+        arm_raise(machine, raise);
+        return Ok(None);
     }
     // The frame depth where a safe point fired this transition (for `Step*` anchoring),
     // or `None`. A statement safe point and a call-entry safe point never coincide in
@@ -229,6 +251,15 @@ fn dispatch(
             Ok(())
         }
         Some(Cont::FieldRead { field }) => record::field_read(resolved, heap, machine, field),
+        // A `with` body completed normally: restore its dynamic binding (machine-design
+        // §13). The body's value stays in the register as the `with`'s value.
+        Some(Cont::WithRestore { dyn_mark }) => {
+            unwind::restore(machine, heap, dyn_mark);
+            Ok(())
+        }
+        // A `try` body completed normally: its handler is not run, and the body's value
+        // is the `try`'s value (already in the register). Discard the handler cont.
+        Some(Cont::TryHandler { .. }) => Ok(()),
         Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
         // The frame's work is drained: return from it.
@@ -337,6 +368,25 @@ fn return_from_top_frame(machine: &mut Machine) {
                 "a callable/block frame returns via its ReturnBarrier, not an empty cont stack"
             )
         }
+    }
+}
+
+/// Arms an in-flight **Raise unwind** (machine-design §12) from a raise that surfaced
+/// during a transition, replacing any current transfer: the unwinder then walks the
+/// frames running `WithRestore` cleanup and seeking a `TryHandler`.
+fn arm_raise(machine: &mut Machine, raise: Raise) {
+    machine.unwind = Some(unwind::Unwind::Raise {
+        exception: raise.exception,
+        trace: raise.trace,
+    });
+}
+
+/// Takes the in-flight Raise unwind's exception + trace back into a [`Raise`] and clears
+/// the transfer — for the drained, uncaught raise reaching the boundary.
+fn take_raise(machine: &mut Machine) -> Raise {
+    match machine.unwind.take() {
+        Some(unwind::Unwind::Raise { exception, trace }) => Raise { exception, trace },
+        _ => unreachable!("take_raise with no in-flight raise"),
     }
 }
 

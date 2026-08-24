@@ -171,6 +171,13 @@ pub(crate) struct Machine {
     /// they are rooted here (a flat stack; a call pushes on entry and pops on return) or
     /// a collection during the nested drive would free them.
     foreign_roots: Vec<Value>,
+    /// The **dynamic-binding save stack** (machine-design §13): while a `with p = v`
+    /// body runs, its `(cell, old_value)` is pushed here and a
+    /// [`WithRestore`](cont::Cont::WithRestore) cont is pushed on the frame; restoring
+    /// (on normal completion or any unwind, §12) pops back to the cont's mark, writing
+    /// each saved value back into its cell. Its saved values are GC roots. The `with`/
+    /// `parameter` producers are M4.6; the save stack and restore mechanism are M4.5a.
+    dyn_stack: Vec<(CellIdx, Value)>,
     /// The current **reentrant-drive nesting depth** (MD §14): each reentrant block
     /// invocation (`intrinsic::invoke_block`) runs a nested drive on the **host's Rust
     /// stack**, so a program that recurses through a native block-consumer grows the Rust

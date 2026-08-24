@@ -150,6 +150,7 @@ impl Instance {
                 directive: Directive::RunToCompletion,
                 reentry_fault: None,
                 foreign_roots: Vec::new(),
+                dyn_stack: Vec::new(),
                 reentry_depth: 0,
                 gc_every_safe_point: false,
                 cancel: Arc::new(AtomicBool::new(false)),

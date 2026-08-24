@@ -4,26 +4,40 @@
 //! loop / block / consumer / home callable" lexically, so the machine performs no
 //! dynamic scan).
 //!
-//! **Scope (M2a.6b).** The three intra-instance exits over blocks and loops, with
+//! **Scope.** The three intra-instance exits over blocks and loops, with
 //! **punch-through** (a `return` in a block exits the writing function, not the
-//! block's consumer). `raise`/`try`/`rescue` (M4) and `with` restoration (the
-//! `WithRestore` cont, M4) add cont categories the unwinder executes as it pops;
-//! at M2a.6 there are none, so the unwinder pops continuations and frames inertly.
-//! Cancellation (§12) joins with the limits (M2a.9).
+//! block's consumer); cancellation (§12); and (M4.5a) the **cleanup** category the
+//! unwinder executes as it pops — every exit runs each
+//! [`WithRestore`](super::cont::Cont::WithRestore) it passes ([`restore`]), and a
+//! [`Raise`](Unwind::Raise) additionally catches at the nearest
+//! [`TryHandler`](super::cont::Cont::TryHandler). The `with`/`parameter` producers
+//! (M4.6) and the `try`/`rescue` handler binding (M4.5b) fill in the conts' producers;
+//! M4.5a builds the mechanism and routes raises through this channel.
 
-use super::cont::Cont;
-use super::error::{ExceptionKind, Raise};
-use super::frame::{Consumer, FrameKind};
+use super::error::{Exception, ExceptionKind, Raise, Trace};
+use super::frame::Consumer;
 use super::step::take_value;
 use super::{Machine, Value};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
-use crate::resolve::{BodyKind, ExitTarget, ResolvedModule};
+use crate::resolve::{ExitTarget, ResolvedModule};
+
+mod arms;
+mod cleanup;
+pub(crate) use arms::resume_native_boundary;
+use arms::{
+    block_break, block_continue, consumer_is_proc, current_block_consumer, do_return,
+    home_callable, loop_break, loop_continue, native_break,
+};
+pub(crate) use cleanup::restore;
+use cleanup::{cleanup_and_pop_frame, raise_unwind};
 
 /// An in-flight non-local transfer (machine-design §12). Its target frame/loop is
-/// resolved when the exit executes ([`exit_apply`]); the unwinder then pops toward
-/// it one continuation or frame at a time.
-#[derive(Clone, Copy)]
+/// resolved when the exit executes ([`exit_apply`]); the unwinder then pops toward it
+/// one continuation or frame at a time, running each
+/// [`WithRestore`](super::cont::Cont::WithRestore) it passes. Not `Copy` — a
+/// [`Raise`](Unwind::Raise) carries an owned exception.
+#[derive(Clone)]
 pub(crate) enum Unwind {
     /// `break` in a loop: pop the current frame's continuations to the matching
     /// loop continuation and discard it (resume after the loop).
@@ -76,11 +90,24 @@ pub(crate) enum Unwind {
         span: crate::span::Span,
     },
     /// **Cancellation** (E§10.1, §12): the host's stop button. Its target is
-    /// *everything* — the unwinder pops every frame (running each frame's block/`with`
-    /// cleanup as for an exception; none exist until M4), and once the stack is empty
-    /// the drive faults [`Cancelled`](crate::drive::EngineFault::Cancelled), a
+    /// *everything* — the unwinder pops every frame (running each frame's `WithRestore`
+    /// cleanup as for a raise, but never catching at a `TryHandler`), and once the stack
+    /// is empty the drive faults [`Cancelled`](crate::drive::EngineFault::Cancelled), a
     /// non-resumable stop that Doodle code cannot catch. Carries no value.
     Cancel,
+    /// A **raise** in flight (machine-design §12; L§12): unwind every frame toward the
+    /// nearest [`TryHandler`](super::cont::Cont::TryHandler) — the one genuinely dynamic
+    /// target — running each [`WithRestore`](super::cont::Cont::WithRestore) as it pops.
+    /// Carries the exception and trace captured at the raise site. A handler catches it;
+    /// uncaught, it drains the whole stack and `step` reports the terminal `Raised`
+    /// outcome. (The exception is host-facing kind+message today; it becomes a Doodle
+    /// **value** — and thus a GC root — at M4.5b.)
+    Raise {
+        /// The raised exception (E§9).
+        exception: Exception,
+        /// The trace captured at the raise site (E§8.2).
+        trace: Trace,
+    },
 }
 
 impl Unwind {
@@ -94,7 +121,12 @@ impl Unwind {
             | Unwind::BlockBreak { value, .. }
             | Unwind::Return { value, .. }
             | Unwind::NativeBreak { value, .. } => *value,
-            Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } | Unwind::Cancel => None,
+            // A `Raise`'s exception is host-facing kind+message (no heap value) until
+            // exceptions-as-values (M4.5b), when this arm returns the exception value.
+            Unwind::LoopBreak { .. }
+            | Unwind::LoopContinue { .. }
+            | Unwind::Cancel
+            | Unwind::Raise { .. } => None,
         }
     }
 }
@@ -176,291 +208,51 @@ pub(crate) fn exit_apply(
 /// let the *next* normal safe point fire) return `Ok(None)`.
 pub(crate) fn step(
     resolved: &ResolvedModule,
-    heap: &Heap,
+    heap: &mut Heap,
     machine: &mut Machine,
 ) -> Result<Option<usize>, Raise> {
+    // A raise carries a non-`Copy` exception; it needs none of that here (the exception
+    // is read at the terminal drain in [`super::step`]), so handle it before the clone.
+    if matches!(machine.unwind, Some(Unwind::Raise { .. })) {
+        raise_unwind(resolved, heap, machine);
+        return Ok(None);
+    }
     match machine
         .unwind
+        .clone()
         .expect("unwind::step with no in-flight unwind")
     {
         Unwind::LoopBreak { loop_node } => {
-            loop_break(machine, loop_node);
+            loop_break(machine, heap, loop_node);
             Ok(None)
         }
         Unwind::LoopContinue { loop_node } => {
-            loop_continue(resolved, machine, loop_node);
+            loop_continue(resolved, machine, heap, loop_node);
             Ok(None)
         }
         Unwind::BlockContinue { value } => {
-            block_continue(machine, value);
+            block_continue(machine, heap, value);
             Ok(None)
         }
         Unwind::BlockBreak {
             value,
             consumer,
             consumer_serial,
-        } => Ok(block_break(machine, value, consumer, consumer_serial)),
+        } => Ok(block_break(machine, heap, value, consumer, consumer_serial)),
         // A `return` can fall off the end of a `fn` (a bare `return`), so it alone
         // may raise as it delivers.
         Unwind::Return { value, home } => do_return(resolved, heap, machine, value, home),
         Unwind::NativeBreak { boundary, .. } => {
-            native_break(machine, boundary);
+            native_break(machine, heap, boundary);
             Ok(None)
         }
         // Cancellation (E§10.1): tear the stack down one frame per transition, running
-        // each frame's block/`with` cleanup as for an exception (none exist until M4, so
-        // a frame pops inertly here). This reports no settling safe point; [`step`] faults
-        // `Cancelled` once the stack is empty.
+        // each frame's `WithRestore` cleanup as it pops. This reports no settling safe
+        // point; [`super::step`] faults `Cancelled` once the stack is empty.
         Unwind::Cancel => {
-            machine.frames.pop();
+            cleanup_and_pop_frame(machine, heap);
             Ok(None)
         }
-    }
-}
-
-/// `break` in a loop: pop continuations off the current frame until the matching
-/// loop continuation is discarded — resuming after the loop.
-fn loop_break(machine: &mut Machine, loop_node: NodeId) {
-    let frame = machine.frames.last_mut().expect("loop break with no frame");
-    let cont = frame
-        .conts
-        .pop()
-        .expect("the target loop continuation must be on the stack");
-    if is_loop_cont(&cont, loop_node) {
-        // A `while`/`loop` yields Void (L§7.6/§7.7); a `break` skips the condition
-        // re-eval that would otherwise clear the register, so clear it here — the
-        // loop must not leak its last body value (the seq boundary clears it too,
-        // but make the loop-yields-Void invariant explicit at the exit).
-        machine.reg = None;
-        machine.unwind = None;
-    }
-}
-
-/// `continue` in a loop: pop to the matching loop continuation, then re-enter it —
-/// a `while` re-evaluates its condition (so `WhileCheck` re-checks); a `loop`'s
-/// `LoopReloop` re-runs the body when it next executes.
-fn loop_continue(resolved: &ResolvedModule, machine: &mut Machine, loop_node: NodeId) {
-    let frame = machine
-        .frames
-        .last_mut()
-        .expect("loop continue with no frame");
-    if !matches!(frame.conts.last(), Some(c) if is_loop_cont(c, loop_node)) {
-        frame.conts.pop();
-        return;
-    }
-    // The target loop continuation is on top. A `while` needs its condition
-    // re-evaluated before `WhileCheck` re-checks; a `loop`'s `LoopReloop` re-runs
-    // the body on its own.
-    if let Some(Cont::WhileCheck { node }) = frame.conts.last() {
-        let cond = while_cond(resolved, *node);
-        frame.conts.push(Cont::Eval { node: cond });
-    }
-    machine.unwind = None;
-}
-
-/// `continue` in a block: deliver `value` as the block's yield to its invoker, then
-/// let the block frame's [`ReturnBarrier`](Cont::ReturnBarrier) finish it normally.
-fn block_continue(machine: &mut Machine, value: Option<Value>) {
-    let frame = machine
-        .frames
-        .last_mut()
-        .expect("block continue with no frame");
-    if matches!(frame.conts.last(), Some(Cont::ReturnBarrier)) {
-        machine.reg = value;
-        machine.unwind = None;
-    } else {
-        frame.conts.pop();
-    }
-}
-
-/// `break` in a block: pop frames (the block, then any intervening frames) through
-/// the consumer frame inclusive, delivering `value` as the consuming call's result.
-/// Returns `Some(post-pop depth)` on the settling transition that pops the consumer
-/// (a return safe point), `None` for an intervening pop.
-fn block_break(
-    machine: &mut Machine,
-    value: Option<Value>,
-    consumer: usize,
-    serial: u64,
-) -> Option<usize> {
-    let top = machine.frames.len() - 1;
-    if top == consumer {
-        debug_assert_eq!(
-            machine.frames[top].serial, serial,
-            "stale consumer link — a frame slot was reused (machine-design §8)"
-        );
-        machine.frames.pop();
-        machine.reg = value;
-        machine.unwind = None;
-        Some(machine.frames.len())
-    } else {
-        // An intervening frame (the block, or a punched-through consumer); its
-        // continuations are abandoned (no `WithRestore` to run until M4).
-        machine.frames.pop();
-        None
-    }
-}
-
-/// `break` targeting a **native** block-consumer (E§7.6, S-46): pop one frame toward
-/// the native `boundary`. There is no consumer frame at the boundary, so this never
-/// pops it — once the stack drains to `boundary` the reentrant nested drive
-/// ([`invoke_block`](super::intrinsic)) sees the still-parked unwind and relays it as
-/// `NonLocalExit(Break)`; the native call's apply site then completes the call
-/// ([`resume_native_boundary`]). The nested drive stops stepping the moment the stack
-/// reaches `boundary`, so this is only reached with a frame above it to pop.
-fn native_break(machine: &mut Machine, boundary: usize) {
-    debug_assert!(
-        machine.frames.len() > boundary,
-        "native_break at/under its boundary — the nested drive should have caught it"
-    );
-    machine.frames.pop();
-}
-
-/// Resolves a parked non-local exit at a native block-consumer's apply site (E§7.6,
-/// S-46), given the native call's `boundary` (frame depth) and `kind`. Precondition:
-/// `machine.unwind` is `Some` (the reentrant nested drive returned `NonLocalExit`).
-///
-/// A `break` targeting *this* call ([`Unwind::NativeBreak`] at `boundary`) **completes
-/// it**: the unwind clears and its value becomes the call's result (Void for a `to`),
-/// returning `true` — the drive resumes normally. A valued `break` to a **procedure**
-/// consumer has no value destination (the open S-10 half), so it raises for parity
-/// with the [`Consumer::DoodleCall`] path. Any other in-flight exit (a `return`, or a
-/// `break` aimed at a construct enclosing this call) is left parked and returns
-/// `false` — it keeps unwinding past this call in the enclosing drive.
-pub(crate) fn resume_native_boundary(
-    machine: &mut Machine,
-    boundary: usize,
-    kind: BodyKind,
-) -> Result<bool, Raise> {
-    let Some(Unwind::NativeBreak {
-        value,
-        boundary: target,
-        span,
-    }) = machine.unwind
-    else {
-        return Ok(false);
-    };
-    if target != boundary {
-        // A `break` aimed at an enclosing native consumer: keep it parked (this only
-        // arises with nested native consumers — the inner apply resumes its own break;
-        // an outer one propagates here). Left in flight for the enclosing drive.
-        return Ok(false);
-    }
-    // Consume the parked unwind before delivering or raising.
-    machine.unwind = None;
-    if value.is_some() && kind == BodyKind::Proc {
-        return Err(Raise::new(
-            ExceptionKind::NoValueDestination,
-            "this `break` gives a value, but the block-consuming call is a procedure, \
-             which yields none",
-            span,
-        ));
-    }
-    machine.reg = value;
-    Ok(true)
-}
-
-/// `return`: pop frames through the home callable inclusive (punching through any
-/// intervening blocks/consumers), delivering `value` as the callable's result. A
-/// bare `return` in a `fn` delivers no value — the function fell off the end
-/// (L§8.4), the same rule the [`ReturnBarrier`](super::cont::Cont::ReturnBarrier)
-/// applies on fall-through — so this delivery raises `FunctionFellOffEnd`.
-fn do_return(
-    resolved: &ResolvedModule,
-    heap: &Heap,
-    machine: &mut Machine,
-    value: Option<Value>,
-    home: usize,
-) -> Result<Option<usize>, Raise> {
-    let top = machine.frames.len() - 1;
-    if top != home {
-        // An intervening frame (a punched-through block/consumer); keep unwinding.
-        machine.frames.pop();
-        return Ok(None);
-    }
-    let fell_off = match machine.frames[home].kind {
-        FrameKind::Callable { cal } => {
-            let id = heap.callable(cal).source_id() as usize;
-            resolved.callables[id].kind == BodyKind::Func && value.is_none()
-        }
-        _ => false,
-    };
-    let home_frame = machine.frames.pop().expect("the home frame");
-    machine.unwind = None;
-    if fell_off {
-        let FrameKind::Callable { cal } = home_frame.kind else {
-            unreachable!("fell_off implies a callable home");
-        };
-        let id = heap.callable(cal).source_id() as usize;
-        return Err(Raise::new(
-            ExceptionKind::FunctionFellOffEnd,
-            "this function reached its end without producing a value",
-            resolved.ast.span(resolved.callables[id].decl),
-        ));
-    }
-    machine.reg = value;
-    Ok(Some(machine.frames.len()))
-}
-
-/// The home callable frame for a `return` (machine-design §12): the current frame
-/// if it is a callable, else the frame reached by chasing the block `defining`
-/// chain to the lexically enclosing callable (never the block's dynamic consumer).
-fn home_callable(machine: &Machine) -> usize {
-    let mut idx = machine.frames.len() - 1;
-    loop {
-        match &machine.frames[idx].kind {
-            FrameKind::Block { defining, .. } => idx = *defining,
-            // A callable (a `return`'s only legal home — the resolver requires it).
-            FrameKind::Callable { .. } | FrameKind::ModuleTopLevel => return idx,
-        }
-    }
-}
-
-/// The consumer of the current block frame (who invoked it) — the `break` target: a
-/// Doodle frame, or a **native** boundary (a block invoked by a native block-consuming
-/// function, MD §14).
-fn current_block_consumer(machine: &Machine) -> Consumer {
-    let FrameKind::Block { consumer, .. } = &machine
-        .frames
-        .last()
-        .expect("block break with no frame")
-        .kind
-    else {
-        unreachable!("a block `break` outside a block frame");
-    };
-    *consumer
-}
-
-/// Whether the frame at `consumer` runs a procedure (a `to`) — for the open S-10
-/// to-consumer half, where a valued `break` has no value destination.
-fn consumer_is_proc(
-    resolved: &ResolvedModule,
-    heap: &Heap,
-    machine: &Machine,
-    consumer: usize,
-) -> bool {
-    match &machine.frames[consumer].kind {
-        FrameKind::Callable { cal } => matches!(
-            resolved.callables[heap.callable(*cal).source_id() as usize].kind,
-            BodyKind::Proc
-        ),
-        _ => false,
-    }
-}
-
-/// Whether `cont` is the loop continuation for `loop_node` (its `while`/`loop`
-/// node), which `break`/`continue` target.
-fn is_loop_cont(cont: &Cont, loop_node: NodeId) -> bool {
-    matches!(
-        cont,
-        Cont::WhileCheck { node } | Cont::LoopReloop { node } if *node == loop_node
-    )
-}
-
-/// The condition expression of a `while` node.
-fn while_cond(resolved: &ResolvedModule, node: NodeId) -> NodeId {
-    match resolved.ast.node(node) {
-        Node::While { cond, .. } => *cond,
-        _ => unreachable!("while_cond over a non-While node"),
+        Unwind::Raise { .. } => unreachable!("a raise unwind is handled before the clone"),
     }
 }

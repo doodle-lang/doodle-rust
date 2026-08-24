@@ -1079,3 +1079,115 @@ fn step_out_stops_the_instant_a_fn_returns_before_a_sibling_runs() {
         );
     }
 }
+
+// --- M4.5a: WithRestore cleanup runs as the unwinder pops (machine-design §12/§13) ---
+//
+// The `with`/`parameter` producer is M4.6, so these drive the mechanism directly:
+// they simulate a live `with` binding (a dyn-stack entry + a `WithRestore` cont) and
+// verify the unwinder restores it. The two distinct cleanup paths are exercised —
+// `cleanup_and_pop_frame` (shared by cancel and the `break`/`return` frame-poppers) via
+// cancellation, and `raise_unwind` via a raise. The `restore` primitive is tested on its
+// own. The loop/block `break`/`continue` punch-through shares the same `restore` via
+// `discard_cont`; it becomes conformance-testable once `with` exists (M4.6).
+
+/// Simulates entering `with p = new` on the top frame: allocate a parameter cell holding
+/// `old`, record `(cell, old)` on the dyn stack, overwrite the cell with `new`, and push
+/// the matching `WithRestore` cont. Returns the cell so a test can assert restoration.
+fn simulate_with(inst: &mut Instance, old: Value, new: Value) -> CellIdx {
+    let cell = inst.heap.alloc_cell(Some(old));
+    let mark = inst.machine.dyn_stack.len() as u32;
+    inst.machine.dyn_stack.push((cell, old));
+    inst.heap.cell_mut(cell).value = Some(new);
+    inst.machine
+        .frames
+        .last_mut()
+        .expect("a live frame")
+        .conts
+        .push(super::cont::Cont::WithRestore { dyn_mark: mark });
+    cell
+}
+
+fn cell_int(inst: &Instance, cell: CellIdx) -> Option<i64> {
+    inst.heap.cell(cell).value.and_then(Value::as_int)
+}
+
+#[test]
+fn restore_reverts_bindings_down_to_the_mark() {
+    let mut inst = load_source("let x = 1\n");
+    let c1 = inst.heap.alloc_cell(Some(Value::Int(1)));
+    let c2 = inst.heap.alloc_cell(Some(Value::Int(2)));
+    let mark = inst.machine.dyn_stack.len() as u32;
+    inst.machine.dyn_stack.push((c1, Value::Int(1)));
+    inst.machine.dyn_stack.push((c2, Value::Int(2)));
+    inst.heap.cell_mut(c1).value = Some(Value::Int(11));
+    inst.heap.cell_mut(c2).value = Some(Value::Int(22));
+    super::unwind::restore(&mut inst.machine, &mut inst.heap, mark);
+    assert_eq!(cell_int(&inst, c1), Some(1), "c1 restored");
+    assert_eq!(cell_int(&inst, c2), Some(2), "c2 restored");
+    assert_eq!(
+        inst.machine.dyn_stack.len() as u32,
+        mark,
+        "dyn stack drained"
+    );
+}
+
+#[test]
+fn cancellation_runs_withrestore_as_it_unwinds() {
+    let mut inst = load_source("let x = 1\n");
+    let cell = simulate_with(&mut inst, Value::Int(10), Value::Int(99));
+    assert_eq!(cell_int(&inst, cell), Some(99), "the with is active");
+    inst.machine.unwind = Some(super::unwind::Unwind::Cancel);
+    let mut fault = None;
+    for _ in 0..100 {
+        match inst.step() {
+            Ok(_) => {}
+            Err(Halt::Fault(f)) => {
+                fault = Some(f);
+                break;
+            }
+            Err(other) => panic!("unexpected halt during cancel: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(fault, Some(EngineFault::Cancelled)),
+        "cancel faults"
+    );
+    assert_eq!(
+        cell_int(&inst, cell),
+        Some(10),
+        "cancel restored the binding"
+    );
+    assert!(inst.machine.dyn_stack.is_empty(), "dyn stack drained");
+}
+
+#[test]
+fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
+    let mut inst = load_source("let x = 1\n");
+    let cell = simulate_with(&mut inst, Value::Int(10), Value::Int(99));
+    inst.machine.unwind = Some(super::unwind::Unwind::Raise {
+        exception: Exception {
+            kind: ExceptionKind::TypeMismatch,
+            message: "boom".into(),
+        },
+        trace: Trace { raised_at: None },
+    });
+    let mut raised = None;
+    for _ in 0..100 {
+        match inst.step() {
+            Ok(_) => {}
+            Err(Halt::Raise(r)) => {
+                raised = Some(r);
+                break;
+            }
+            Err(other) => panic!("unexpected halt during raise: {other:?}"),
+        }
+    }
+    let raised = raised.expect("the uncaught raise reached the boundary");
+    assert_eq!(raised.exception.message, "boom", "exception preserved");
+    assert_eq!(
+        cell_int(&inst, cell),
+        Some(10),
+        "raise restored the binding"
+    );
+    assert!(inst.machine.dyn_stack.is_empty(), "dyn stack drained");
+}
