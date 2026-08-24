@@ -231,8 +231,9 @@ fn cmp_int_float(n: &BigInt, x: f64) -> Option<Ordering> {
 }
 
 /// Decomposes a finite `f64` into `(mantissa, exp)` with `x == mantissa * 2^exp`
-/// exactly (signed mantissa). `±0.0` gives mantissa `0`.
-fn decompose(x: f64) -> (BigInt, i32) {
+/// exactly (signed mantissa). `±0.0` gives mantissa `0`. Shared with value hashing
+/// (`super::hash`), which needs the same exact integer value a float compares as.
+pub(super) fn decompose(x: f64) -> (BigInt, i32) {
     let bits = x.to_bits();
     let negative = bits >> 63 == 1;
     let biased_exp = ((bits >> 52) & 0x7ff) as i32;
@@ -248,7 +249,7 @@ fn decompose(x: f64) -> (BigInt, i32) {
     (if negative { -mag } else { mag }, exp)
 }
 
-fn kind_name(v: Value) -> &'static str {
+pub(super) fn kind_name(v: Value) -> &'static str {
     match v {
         Value::Nil => "nil",
         Value::Bool(_) => "a boolean",

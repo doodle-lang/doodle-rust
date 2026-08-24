@@ -32,13 +32,13 @@ mod objects;
 mod slab;
 
 pub use objects::{
-    BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, Finalizer, ForeignObj, ListObj, StrObj,
-    TypeObj,
+    BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, DictObj, Finalizer, ForeignObj, ListObj,
+    StrObj, TypeObj,
 };
 pub use slab::Slab;
 
 use crate::machine::{
-    BigIntIdx, BytesIdx, CalIdx, CellIdx, FrnIdx, ListIdx, StrIdx, TypeIdx, Value,
+    BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, StrIdx, TypeIdx, Value,
 };
 use num_bigint::BigInt;
 
@@ -78,6 +78,12 @@ fn bytes_payload(o: &BytesObj) -> u64 {
 /// A list's payload: one value width per element.
 fn list_payload(o: &ListObj) -> u64 {
     o.items.len() as u64 * VALUE_BYTES
+}
+
+/// A dict's payload: one key + one value width per entry. The hash index is a
+/// derivable cache (MD §5) and is not charged — its size never shifts GC timing.
+fn dict_payload(o: &DictObj) -> u64 {
+    o.entries.len() as u64 * 2 * VALUE_BYTES
 }
 
 /// A bignum's payload: its magnitude size in bytes (bit length rounded up); `bits`
@@ -127,6 +133,7 @@ pub struct Heap {
     strings: Slab<StrObj>,
     bytes: Slab<BytesObj>,
     lists: Slab<ListObj>,
+    dicts: Slab<DictObj>,
     bigints: Slab<BigIntObj>,
     cells: Slab<CellObj>,
     callables: Slab<CalObj>,
@@ -149,6 +156,7 @@ impl Heap {
             strings: Slab::new(),
             bytes: Slab::new(),
             lists: Slab::new(),
+            dicts: Slab::new(),
             bigints: Slab::new(),
             cells: Slab::new(),
             callables: Slab::new(),
@@ -233,6 +241,40 @@ impl Heap {
     pub fn list_push(&mut self, idx: ListIdx, value: Value) {
         self.bytes_allocated += VALUE_BYTES;
         self.lists.get_mut(idx.0).items.push(value);
+    }
+
+    /// Allocates an empty dict; entries are added with [`dict_push_entry`](Self::dict_push_entry).
+    pub fn alloc_dict(&mut self) -> DictIdx {
+        let obj = DictObj::default();
+        self.charge_object(dict_payload(&obj));
+        let serial = self.next_serial();
+        DictIdx(self.dicts.alloc(obj, serial))
+    }
+
+    /// Borrows the dict at `idx`.
+    pub fn dict(&self, idx: DictIdx) -> &DictObj {
+        self.dicts.get(idx.0)
+    }
+
+    /// Appends a `(key, value)` entry and indexes it under the key's content
+    /// `hash`, charging one key + one value width (like [`list_push`](Self::list_push),
+    /// the accounting-integrity reason there is no raw `&mut DictObj`). Returns the
+    /// new entry's position. The caller (`machine::dict`) has already checked that no
+    /// existing key is `==` this one — first-key-wins updates go through
+    /// [`dict_set_value`](Self::dict_set_value).
+    pub fn dict_push_entry(&mut self, idx: DictIdx, key: Value, value: Value, hash: u64) -> u32 {
+        self.bytes_allocated += 2 * VALUE_BYTES;
+        let d = self.dicts.get_mut(idx.0);
+        let pos = d.entries.len() as u32;
+        d.entries.push((key, value));
+        d.index.entry(hash).or_default().push(pos);
+        pos
+    }
+
+    /// Overwrites the value of the entry at `pos` (first-key-wins: the stored key is
+    /// unchanged, L§4.8). No charge — one value width replaces another.
+    pub fn dict_set_value(&mut self, idx: DictIdx, pos: u32, value: Value) {
+        self.dicts.get_mut(idx.0).entries[pos as usize].1 = value;
     }
 
     /// Borrows the bignum at `idx`.
@@ -331,6 +373,7 @@ impl Heap {
         self.strings.live_count()
             + self.bytes.live_count()
             + self.lists.live_count()
+            + self.dicts.live_count()
             + self.bigints.live_count()
             + self.cells.live_count()
             + self.callables.live_count()

@@ -16,7 +16,7 @@
 //! value's outgoing references) and the **sweep**.
 
 use super::{
-    Heap, OBJECT_OVERHEAD, bigint_payload, bytes_payload, cal_payload, cell_payload,
+    Heap, OBJECT_OVERHEAD, bigint_payload, bytes_payload, cal_payload, cell_payload, dict_payload,
     foreign_payload, list_payload, str_payload, type_payload,
 };
 use crate::machine::{CalIdx, CellIdx, Value};
@@ -59,6 +59,11 @@ impl Tracer<'_> {
                     self.stack.push(v);
                 }
             }
+            Value::Dict(i) => {
+                if self.heap.dicts.mark(i.0) {
+                    self.stack.push(v);
+                }
+            }
             Value::Callable(i) => {
                 if self.heap.callables.mark(i.0) {
                     self.stack.push(v);
@@ -85,12 +90,9 @@ impl Tracer<'_> {
             }
             // Non-heap scalars: nothing to mark.
             Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Module(_) => {}
-            // Not yet allocatable (no slab exists): such a value cannot be
-            // constructed, so reaching here is a bug. When dicts/records land (M4/M5),
-            // add their marking — and child-scanning for the aggregate kinds — here
-            // and in `run`.
-            Value::Dict(_) | Value::Record(_) => {
-                unreachable!("GC reached {v:?} — dict/record are not allocatable yet")
+            // Records join at M4.2/M4.4 — not allocatable yet, so reaching here is a bug.
+            Value::Record(_) => {
+                unreachable!("GC reached {v:?} — records are not allocatable yet")
             }
         }
     }
@@ -116,6 +118,16 @@ impl Tracer<'_> {
                     for k in 0..n {
                         let item = self.heap.lists.get(i.0).items[k];
                         self.enqueue(item);
+                    }
+                }
+                Value::Dict(i) => {
+                    // A dict's children are each entry's key AND value (the index holds
+                    // only positions). Copy out by position before re-borrowing.
+                    let n = self.heap.dicts.get(i.0).entries.len();
+                    for k in 0..n {
+                        let (key, value) = self.heap.dicts.get(i.0).entries[k];
+                        self.enqueue(key);
+                        self.enqueue(value);
                     }
                 }
                 Value::Callable(i) => {
@@ -170,6 +182,8 @@ impl Heap {
             .sweep(|o| freed += OBJECT_OVERHEAD + bytes_payload(o));
         self.lists
             .sweep(|o| freed += OBJECT_OVERHEAD + list_payload(o));
+        self.dicts
+            .sweep(|o| freed += OBJECT_OVERHEAD + dict_payload(o));
         self.bigints
             .sweep(|o| freed += OBJECT_OVERHEAD + bigint_payload(o));
         self.cells

@@ -49,6 +49,11 @@ pub enum ExceptionKind {
     /// required argument, an unknown keyword, a duplicate binding, or too many
     /// positional arguments.
     ArgumentError,
+    /// A non-hashable value (e.g. a list) was used as a dict key (L§4.8). At M4.1
+    /// the hashable kinds are the scalars; records join at M4.4.
+    UnhashableKey,
+    /// A dict was indexed (`d[k]`) with a key it does not contain (L§4.8).
+    KeyNotFound,
     /// A valued `break` exited a block-consuming call whose callee is a **procedure**
     /// (yields no value), so the value has no destination (L§7.10, §8.5). This is
     /// the **open** S-10 to-consumer half; the machine raises **provisionally**

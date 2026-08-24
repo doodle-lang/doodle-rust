@@ -160,6 +160,45 @@ pub(crate) enum Cont {
         /// The index of the element now in the register.
         index: u32,
     },
+    /// A dict literal entry's **computed** key is now in the register: pair it with
+    /// the entry's value expression to evaluate next (L§4.8). (A bare-word key needs
+    /// no eval, so it skips straight to [`DictGotValue`](Cont::DictGotValue).)
+    DictGotKey {
+        /// The `Dict` literal node.
+        dict: NodeId,
+        /// The `(key, value)` pairs completed so far, in insertion order.
+        entries: Vec<(Value, Value)>,
+        /// The index of the entry whose key is now in the register.
+        index: u32,
+    },
+    /// A dict literal entry's value is now in the register: record `key → value`, then
+    /// evaluate the next entry or build the dict once the last is in (L§4.8).
+    DictGotValue {
+        /// The `Dict` literal node.
+        dict: NodeId,
+        /// The `(key, value)` pairs completed so far, in insertion order.
+        entries: Vec<(Value, Value)>,
+        /// The index of the entry now completing.
+        index: u32,
+        /// This entry's already-evaluated key.
+        key: Value,
+    },
+    /// An index expression's object (`d` in `d[k]`) is now in the register: stash it,
+    /// then evaluate the key `k` (L§4.8).
+    IndexGotObject {
+        /// The key expression `k`.
+        index: NodeId,
+        /// The whole `Index` node's span, for a raise.
+        span: Span,
+    },
+    /// An index expression's key is now in the register: look it up in the stashed
+    /// object (L§4.8).
+    IndexApply {
+        /// The object being indexed.
+        object: Value,
+        /// The whole `Index` node's span, for a raise.
+        span: Span,
+    },
     /// A parameter default's value is now in the register: write it into the
     /// callee frame's slot (defaults are evaluated in the callee activation, L§8.2).
     BindDefault {
@@ -204,8 +243,21 @@ impl Cont {
             }
             Cont::BlockGotArg { values, .. } => values.iter().copied().for_each(f),
             Cont::ListGotElem { values, .. } => values.iter().copied().for_each(f),
+            Cont::DictGotKey { entries, .. } => entries.iter().for_each(|(k, v)| {
+                f(*k);
+                f(*v);
+            }),
+            Cont::DictGotValue { entries, key, .. } => {
+                entries.iter().for_each(|(k, v)| {
+                    f(*k);
+                    f(*v);
+                });
+                f(*key);
+            }
+            Cont::IndexApply { object, .. } => f(*object),
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
+            | Cont::IndexGotObject { .. }
             | Cont::Eval { .. }
             | Cont::BinRhs { .. }
             | Cont::UnaryApply { .. }

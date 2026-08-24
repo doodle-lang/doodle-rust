@@ -1,0 +1,5 @@
+#! clause: L4.8
+#! mode: run
+#! expect-out: 10
+let d = {a: 10, b: 20}
+print(d["a"])

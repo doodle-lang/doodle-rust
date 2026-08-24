@@ -133,6 +133,7 @@ impl Instance {
             Cont::CallGotArg { call, .. } => ast.span(*call),
             Cont::BlockGotArg { call, .. } => ast.span(*call),
             Cont::ListGotElem { list, .. } => ast.span(*list),
+            Cont::DictGotKey { dict, .. } | Cont::DictGotValue { dict, .. } => ast.span(*dict),
             Cont::BindDefault { default, .. } => ast.span(*default),
             Cont::DefineCallable { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
@@ -142,6 +143,8 @@ impl Instance {
             | Cont::UnaryApply { span, .. }
             | Cont::AndRhs { span, .. }
             | Cont::OrRhs { span, .. }
+            | Cont::IndexGotObject { span, .. }
+            | Cont::IndexApply { span, .. }
             | Cont::AssertBool { span } => *span,
             // A `Seq` is about to run its next statement (or has drained the body).
             Cont::Seq { block, next } => match self.stmt_at(*block, *next) {

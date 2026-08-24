@@ -7,6 +7,8 @@
 use crate::machine::{BuiltinType, CellIdx, Value};
 use crate::span::ModuleId;
 use num_bigint::BigInt;
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 /// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
 /// construction path (literal decode, concat seam pass, `make_string`) produces
@@ -31,6 +33,38 @@ pub struct BytesObj {
 pub struct ListObj {
     /// The elements, in order.
     pub items: Vec<Value>,
+}
+
+/// A dict object (L§4.7/§4.8): key→value entries in **insertion order** (the
+/// observable order, L§4.8) plus a hash index for O(1)-ish lookup. Keys are
+/// hashable scalars (M4.1); lookups resolve collisions by structural `==`, so the
+/// index — a cache derivable from `entries` — is never itself observed and is
+/// excluded from byte accounting (like the grapheme memo, MD §5). `insert`/`get`
+/// live in `machine::dict` (they need value hashing + `==`); the heap owns storage.
+#[derive(Clone, Debug, Default)]
+pub struct DictObj {
+    /// Entries in insertion order.
+    pub entries: Vec<(Value, Value)>,
+    /// Content-hash of each key → its positions in `entries` (the collision chain).
+    pub index: HashMap<u64, Vec<u32>, BuildHasherDefault<U64Hasher>>,
+}
+
+/// A pass-through hasher for the dict index's already-hashed `u64` keys: each key
+/// is a fixed-key SipHash of a Doodle value (`machine::hash`), so re-hashing adds
+/// nothing. Deterministic (no seed) — the index never uses a randomized hasher.
+#[derive(Default)]
+pub struct U64Hasher(u64);
+
+impl Hasher for U64Hasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("the dict index is keyed only by u64 value-hashes");
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
 }
 
 /// A heap bignum (L§4.2): an integer outside `i64` range. The **canonical-int
