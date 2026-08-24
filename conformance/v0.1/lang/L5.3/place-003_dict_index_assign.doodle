@@ -1,0 +1,9 @@
+#! clause: L5.3
+#! mode: run
+#! expect-out: 2
+#! expect-out: 5
+let d = {a: 1}
+d["b"] = 2
+d["a"] = 5
+print(d["b"])
+print(d["a"])

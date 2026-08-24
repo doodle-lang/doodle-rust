@@ -19,7 +19,9 @@ use crate::span::Span;
 /// Inserts `key → value` (L§4.8). If an existing key is structurally `==` `key`, its
 /// value is overwritten and the **first key is kept** (first-key-wins); otherwise a
 /// new entry is appended in insertion order. Raises [`ExceptionKind::UnhashableKey`]
-/// if `key` is not hashable.
+/// if `key` is not hashable. A value record is copied on store (L§4.14) — a dict
+/// entry is a place — so this is the single copy choke for both dict literals and
+/// `d[k] = v` place assignment.
 pub(super) fn insert(
     heap: &mut Heap,
     idx: DictIdx,
@@ -28,6 +30,7 @@ pub(super) fn insert(
     span: Span,
 ) -> Result<(), Raise> {
     let hash = key_hash(key, heap, span)?;
+    let value = super::record::copy_on_bind(value, heap);
     match find(heap, idx, key, hash) {
         Some(pos) => heap.dict_set_value(idx, pos, value),
         None => {
@@ -207,6 +210,35 @@ pub(super) fn index_apply(
                 span,
             )),
         },
+        other => Err(Raise::new(
+            ExceptionKind::TypeMismatch,
+            format!("you can't index {} with `[…]`", compare::kind_name(other)),
+            span,
+        )),
+    }
+}
+
+/// Completes an index place assignment `object[key] = rhs` (L§5.3): `object` (the
+/// place, no copy) and `key` are passed in; the RHS is in the register. For a dict,
+/// stores `key → rhs` ([`insert`] applies first-key-wins and copies a value-record
+/// RHS for binding). List/string index assignment joins this arm at M4.8, when list
+/// indexing lands; until then a non-dict object raises `TypeMismatch`, matching the
+/// index *read* path ([`index_apply`]). The statement yields Void.
+pub(super) fn index_set(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    assign: NodeId,
+    object: Value,
+    key: Value,
+) -> Result<(), Raise> {
+    let Node::Assign { target, value } = resolved.ast.node(assign) else {
+        unreachable!("dict::index_set over a non-Assign node");
+    };
+    let span = resolved.ast.span(*target);
+    let rhs = take_value(machine, resolved.ast.span(*value))?;
+    match object {
+        Value::Dict(d) => insert(heap, d, key, rhs, span),
         other => Err(Raise::new(
             ExceptionKind::TypeMismatch,
             format!("you can't index {} with `[…]`", compare::kind_name(other)),

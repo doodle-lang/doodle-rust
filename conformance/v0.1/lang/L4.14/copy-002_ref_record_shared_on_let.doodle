@@ -1,0 +1,8 @@
+#! clause: L4.14
+#! mode: run
+#! expect-out: 90
+ref record Turtle with heading end
+let t = Turtle(heading: 0)
+let u = t
+u.heading = 90
+print(t.heading)

@@ -125,7 +125,11 @@ impl Instance {
         Some(match cont {
             Cont::Eval { node } => ast.span(*node),
             Cont::BindLet { decl } => ast.span(*decl),
-            Cont::AssignTo { assign } => ast.span(*assign),
+            Cont::AssignTo { assign }
+            | Cont::AssignPlaceObj { assign }
+            | Cont::AssignFieldVal { assign, .. }
+            | Cont::AssignIndexKey { assign, .. }
+            | Cont::AssignIndexVal { assign, .. } => ast.span(*assign),
             Cont::IfChoose { node, .. } => ast.span(*node),
             Cont::WhileCheck { node } => ast.span(*node),
             Cont::LoopReloop { node } => ast.span(*node),

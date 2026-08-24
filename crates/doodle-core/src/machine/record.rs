@@ -4,8 +4,9 @@
 //! A record type's schema (name, field order, `ref`-ness) lives on the shared type
 //! value ([`TypeKind::Record`]); an instance ([`RecObj`](crate::heap::RecObj)) stores
 //! only its field values, positionally, plus a reference to its type (nominal identity
-//! for `is`, L§6.5). Value-vs-reference copy behavior (L§4.14) becomes observable with
-//! mutation (M4.3); until then a record is effectively immutable.
+//! for `is`, L§6.5). Field place assignment (`r.name = v`) mutates a record in place;
+//! [`copy_on_bind`] implements the value-vs-`ref` copy behavior (L§4.14) that makes
+//! the distinction observable — a value record is copied at each bind, a `ref` shared.
 
 use super::compare::kind_name;
 use super::error::{ExceptionKind, Raise};
@@ -27,12 +28,19 @@ pub(crate) fn define(
     namespace: &control::Namespace,
     decl: NodeId,
 ) {
-    let Node::Record { name, fields, .. } = resolved.ast.node(decl) else {
+    let Node::Record {
+        name,
+        fields,
+        is_ref,
+        ..
+    } = resolved.ast.node(decl)
+    else {
         unreachable!("record::define over a non-Record node");
     };
     let schema = RecordType {
         name: name.clone(),
         fields: fields.clone().into_boxed_slice(),
+        is_ref: *is_ref,
     };
     let kind = TypeKind::Record(schema);
     let ty = Value::Type(heap.alloc_type(TypeObj { kind }));
@@ -56,9 +64,42 @@ pub(crate) fn construct(
         TypeKind::Builtin(_) => unreachable!("construct on a built-in type"),
     };
     let fields = match_fields(resolved, call, &name, &field_names, &arg_values, span)?;
+    // A field is a place: storing a value record into it copies (L§4.14), exactly as
+    // a `let`/assignment/argument bind does. `ref` fields and non-records share.
+    let fields: Vec<Value> = fields.into_iter().map(|f| copy_on_bind(f, heap)).collect();
     let rec = heap.alloc_record(type_idx, fields.into_boxed_slice());
     machine.reg = Some(Value::Record(rec));
     Ok(())
+}
+
+/// Copies `value` for a **binding, assignment, argument bind, or container store**
+/// (L§4.14): a **value record** is copied — recursively through its value-record
+/// fields, so the new binding is fully independent — and everything else (scalars,
+/// strings, lists, dicts, callables, `ref` records) is *shared*, its bits returned
+/// unchanged. Reads and place navigation do **not** copy; the copy fires only where
+/// a value lands in a place, giving C-style struct-copy value semantics.
+///
+/// Recursion terminates: a value record can never contain itself (assigning it into
+/// a field copies), so a value-record graph is a finite tree. No GC runs during the
+/// copy — collection happens only at statement-level safe points, between machine
+/// transitions — so the intermediate copies are safe before they are rooted.
+pub(crate) fn copy_on_bind(value: Value, heap: &mut Heap) -> Value {
+    let Value::Record(r) = value else {
+        return value;
+    };
+    let type_idx = heap.record(r).type_idx;
+    let is_ref = match &heap.type_value(type_idx).kind {
+        TypeKind::Record(rt) => rt.is_ref,
+        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+    };
+    if is_ref {
+        return value; // a `ref` record is shared, not copied.
+    }
+    // Copy the fields out so the record's immutable borrow releases before the
+    // recursive copies allocate (`Value` is `Copy`).
+    let fields = heap.record(r).fields.to_vec();
+    let copied: Vec<Value> = fields.into_iter().map(|f| copy_on_bind(f, heap)).collect();
+    Value::Record(heap.alloc_record(type_idx, copied.into_boxed_slice()))
 }
 
 /// Matches a construction call's arguments to `field_names` (L§9), returning the field
@@ -165,6 +206,52 @@ pub(crate) fn field_read(
     }
 }
 
+/// Completes a field place assignment `object.name = rhs` (L§5.3): `object` (the
+/// place, navigated with no copy) is passed in; the RHS is in the register. Copies
+/// the RHS for binding (L§4.14) and writes it into the field, mutating the record in
+/// place. Raises `TypeMismatch` if `object` is not a record, `NoSuchField` if it has
+/// no such field. The statement yields Void.
+pub(crate) fn field_set(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    assign: NodeId,
+    object: Value,
+) -> Result<(), Raise> {
+    let Node::Assign { target, value } = resolved.ast.node(assign) else {
+        unreachable!("record::field_set over a non-Assign node");
+    };
+    let (field_node, value_node) = (*target, *value);
+    let rhs = copy_on_bind(take_value(machine, resolved.ast.span(value_node))?, heap);
+    let Node::Field { name, .. } = resolved.ast.node(field_node) else {
+        unreachable!("record::field_set over a non-Field target");
+    };
+    let span = resolved.ast.span(field_node);
+    let Value::Record(r) = object else {
+        return Err(Raise::new(
+            ExceptionKind::TypeMismatch,
+            format!("you can't set a field of {}", kind_name(object)),
+            span,
+        ));
+    };
+    let type_idx = heap.record(r).type_idx;
+    let pos = match &heap.type_value(type_idx).kind {
+        TypeKind::Record(rt) => rt.fields.iter().position(|f| f.as_ref() == name.as_ref()),
+        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+    };
+    match pos {
+        Some(p) => {
+            heap.record_set_field(r, p, rhs);
+            Ok(())
+        }
+        None => Err(Raise::new(
+            ExceptionKind::NoSuchField,
+            format!("this record has no field `{name}`"),
+            span,
+        )),
+    }
+}
+
 fn arg_err(span: Span, message: String) -> Raise {
     Raise::new(ExceptionKind::ArgumentError, message, span)
 }
@@ -175,6 +262,10 @@ mod tests {
     use crate::heap::TypeObj;
 
     fn record_type(heap: &mut Heap, name: &str, fields: &[&str]) -> TypeIdx {
+        typed_record(heap, name, fields, false)
+    }
+
+    fn typed_record(heap: &mut Heap, name: &str, fields: &[&str], is_ref: bool) -> TypeIdx {
         let schema = RecordType {
             name: name.into(),
             fields: fields
@@ -182,10 +273,79 @@ mod tests {
                 .map(|f| (*f).into())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            is_ref,
         };
         heap.alloc_type(TypeObj {
             kind: TypeKind::Record(schema),
         })
+    }
+
+    /// A record field's value, for asserting on copies.
+    fn field(heap: &Heap, v: Value, pos: usize) -> Value {
+        match v {
+            Value::Record(r) => heap.record(r).fields[pos],
+            _ => panic!("not a record"),
+        }
+    }
+
+    #[test]
+    fn copy_on_bind_copies_a_value_record_but_shares_a_ref_record() {
+        let mut heap = Heap::new();
+        let vty = typed_record(&mut heap, "V", &["x"], false);
+        let rty = typed_record(&mut heap, "R", &["x"], true);
+        let v = Value::Record(heap.alloc_record(vty, Box::new([Value::Int(1)])));
+        let r = Value::Record(heap.alloc_record(rty, Box::new([Value::Int(1)])));
+        // A value record is copied: a distinct instance whose mutation is independent.
+        let v2 = copy_on_bind(v, &mut heap);
+        assert!(!matches!((v, v2), (Value::Record(a), Value::Record(b)) if a == b));
+        let Value::Record(v2r) = v2 else {
+            unreachable!()
+        };
+        heap.record_set_field(v2r, 0, Value::Int(99));
+        assert!(
+            matches!(field(&heap, v, 0), Value::Int(1)),
+            "original untouched"
+        );
+        // A `ref` record is shared: the same instance.
+        let r2 = copy_on_bind(r, &mut heap);
+        assert!(matches!((r, r2), (Value::Record(a), Value::Record(b)) if a == b));
+    }
+
+    #[test]
+    fn copy_on_bind_copies_value_record_fields_recursively_and_shares_others() {
+        let mut heap = Heap::new();
+        let inner_ty = typed_record(&mut heap, "Inner", &["x"], false);
+        let outer_ty = typed_record(&mut heap, "Outer", &["inner", "xs"], false);
+        let inner = Value::Record(heap.alloc_record(inner_ty, Box::new([Value::Int(1)])));
+        let shared_list = Value::List(heap.alloc_list(vec![Value::Int(0)]));
+        let outer = Value::Record(heap.alloc_record(outer_ty, Box::new([inner, shared_list])));
+        let copy = copy_on_bind(outer, &mut heap);
+        // The value-record `inner` field is a *distinct* object (deep copy)…
+        assert!(
+            !matches!((field(&heap, outer, 0), field(&heap, copy, 0)),
+                (Value::Record(a), Value::Record(b)) if a == b),
+            "nested value record is copied"
+        );
+        // …while the reference-typed `xs` field is *shared* (same list).
+        assert!(
+            matches!((field(&heap, outer, 1), field(&heap, copy, 1)),
+                (Value::List(a), Value::List(b)) if a == b),
+            "reference field is shared"
+        );
+    }
+
+    #[test]
+    fn copy_on_bind_returns_non_records_unchanged() {
+        let mut heap = Heap::new();
+        let list = Value::List(heap.alloc_list(vec![]));
+        assert!(matches!(
+            (list, copy_on_bind(list, &mut heap)),
+            (Value::List(a), Value::List(b)) if a == b
+        ));
+        assert!(matches!(
+            copy_on_bind(Value::Int(7), &mut heap),
+            Value::Int(7)
+        ));
     }
 
     #[test]

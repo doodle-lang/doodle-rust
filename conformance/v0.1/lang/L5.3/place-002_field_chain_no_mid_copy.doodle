@@ -1,0 +1,8 @@
+#! clause: L5.3
+#! mode: run
+#! expect-out: 5
+record Inner with x end
+record Outer with inner end
+let a = Outer(inner: Inner(x: 1))
+a.inner.x = 5
+print(a.inner.x)

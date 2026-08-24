@@ -1,0 +1,7 @@
+#! clause: L5.3
+#! mode: run
+#! expect-out: 10
+record Point with x, y end
+let p = Point(x: 3, y: 4)
+p.x = 10
+print(p.x)

@@ -1,0 +1,6 @@
+#! clause: L5.3
+#! mode: run
+#! expect-raise: this record has no field `z` @ 6:1
+record Point with x, y end
+let p = Point(x: 3, y: 4)
+p.z = 10

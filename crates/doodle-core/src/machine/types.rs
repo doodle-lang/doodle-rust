@@ -26,17 +26,21 @@ pub(crate) enum TypeKind {
     Record(RecordType),
 }
 
-/// A record type's schema (L§9): its name and its field names in declaration order.
-/// The schema lives on the type value; an instance ([`RecObj`](crate::heap::RecObj))
-/// stores only its field values positionally and a reference back to this type. The
-/// value-vs-reference distinction (`ref record`, L§4.14) joins here at M4.3, where
-/// copy-on-bind first reads it (it is unobservable without mutation until then).
+/// A record type's schema (L§9): its name, field names in declaration order, and
+/// whether it is a `ref record`. The schema lives on the type value; an instance
+/// ([`RecObj`](crate::heap::RecObj)) stores only its field values positionally and a
+/// reference back to this type. The value-vs-reference distinction (`ref record`,
+/// L§4.14) is read by [`copy_on_bind`](super::record::copy_on_bind): a value record
+/// is copied on binding, a `ref` record shared.
 #[derive(Clone, Debug)]
 pub(crate) struct RecordType {
     /// The declared type name (for reflection and error messages).
     pub name: Box<str>,
     /// Field names, in declaration order — the order an instance's values follow.
     pub fields: Box<[Box<str>]>,
+    /// Whether this is a `ref record` (L§4.14): its instances are *shared* on
+    /// binding/assignment/argument-passing, where a value record is *copied*.
+    pub is_ref: bool,
 }
 
 /// A built-in type value (L§4.12). The spellings are provisional (L Appendix D).

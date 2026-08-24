@@ -159,8 +159,15 @@ fn apply(
     let info = &resolved.callables[callable_id];
     let params = &info.params;
     let body = info.body;
-    let (slots, filled) =
-        bind_arguments(resolved, call, params, info.slot_count, &arg_values, span)?;
+    let (slots, filled) = bind_arguments(
+        resolved,
+        heap,
+        call,
+        params,
+        info.slot_count,
+        &arg_values,
+        span,
+    )?;
 
     // Unfilled ordinary parameters need a default (scheduled below) or the call is
     // missing a required argument. A block parameter is filled from the `do … end`
@@ -264,6 +271,7 @@ fn reuses_current_frame(
 /// callable [`apply`] and block invocation ([`block`]).
 pub(crate) fn bind_arguments(
     resolved: &ResolvedModule,
+    heap: &mut Heap,
     call: NodeId,
     params: &[ParamInfo],
     slot_count: u16,
@@ -306,7 +314,8 @@ pub(crate) fn bind_arguments(
                 format!("`{}` was given more than once", params[p].name),
             ));
         }
-        slots[params[p].slot as usize] = Some(val);
+        // Binding an argument to a parameter copies a value record (L§4.14).
+        slots[params[p].slot as usize] = Some(super::record::copy_on_bind(val, heap));
         filled[p] = true;
     }
     Ok((slots, filled))
@@ -322,7 +331,8 @@ pub(crate) fn bind_default(
     slot: u16,
     default: NodeId,
 ) -> Result<(), Raise> {
-    let value = take_value(machine, resolved.ast.span(default))?;
+    // A default binds like any parameter: a value record is copied (L§4.14).
+    let value = super::record::copy_on_bind(take_value(machine, resolved.ast.span(default))?, heap);
     let top = machine.frames.len() - 1;
     local::write(heap, &mut machine.frames[top].locals[slot as usize], value);
     Ok(())

@@ -22,6 +22,7 @@ mod cont;
 mod control;
 mod dict;
 mod error;
+mod eval;
 mod foreign;
 mod frame;
 mod gc;

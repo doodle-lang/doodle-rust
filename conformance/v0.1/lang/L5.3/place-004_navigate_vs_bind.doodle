@@ -1,0 +1,11 @@
+#! clause: L5.3
+#! mode: run
+#! expect-out: 9
+#! expect-out: 9
+record Point with x, y end
+let d = {p: Point(x: 1, y: 2)}
+d["p"].x = 9
+print(d["p"].x)
+let y = d["p"]
+y.x = 100
+print(d["p"].x)

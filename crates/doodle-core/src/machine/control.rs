@@ -81,6 +81,9 @@ pub(crate) fn bind_decl(
     decl: NodeId,
     value: Value,
 ) {
+    // Binding a value record copies it (L§4.14); a `ref` record, a scalar, or a
+    // callable/type (a `to`/`fn`/`record` definition binds one) is shared unchanged.
+    let value = super::record::copy_on_bind(value, heap);
     match resolved.resolutions[decl.0 as usize] {
         // A construct-body / nested local: a frame slot. A declaration is a new
         // binding, so a boxed slot gets a fresh cell (loop-fresh).
@@ -95,8 +98,10 @@ pub(crate) fn bind_decl(
     }
 }
 
-/// Writes an assignment's value (now in the register) to its target lvalue. At
-/// M2a.4a the target is a simple name; field/index place chains are M4 (S-38).
+/// Writes a **name** assignment's value (now in the register) to its binding — a
+/// module cell, a frame slot, or an enclosing local (a block writing outward). A
+/// value record is copied for binding (L§4.14). Field/index place targets take the
+/// [`assign_place_obj`] path instead (they are never dispatched here).
 pub(crate) fn assign_to(
     resolved: &ResolvedModule,
     heap: &mut Heap,
@@ -107,12 +112,13 @@ pub(crate) fn assign_to(
     let Node::Assign { target, .. } = resolved.ast.node(assign) else {
         unreachable!("AssignTo over a non-Assign node");
     };
+    debug_assert!(
+        matches!(resolved.ast.node(*target), Node::Ident(_)),
+        "AssignTo is only dispatched for a name target; places go through AssignPlaceObj"
+    );
     let target = *target;
     let span = resolved.ast.span(assign);
-    let value = take_value(machine, span)?;
-    if !matches!(resolved.ast.node(target), Node::Ident(_)) {
-        unimplemented!("assignment to a field/index place is M4 (S-38)");
-    }
+    let value = super::record::copy_on_bind(take_value(machine, span)?, heap);
     match resolution(resolved, target) {
         Resolution::LocalSlot(slot) => set_slot(machine, heap, slot, value),
         Resolution::ModuleName(idx) => {
@@ -127,6 +133,63 @@ pub(crate) fn assign_to(
             set_slot_at(machine, heap, owner, slot, value);
         }
     }
+    Ok(())
+}
+
+/// A place assignment's target **object** is now in the register — the *actual*
+/// object (place navigation copies nothing, L§5.3). Branch on the target kind:
+/// a `Field` target evaluates the RHS next (then sets the field); an `Index` target
+/// evaluates the key first (left-to-right, L§14), then the RHS. The copy for binding
+/// fires at the final store, not here.
+pub(crate) fn assign_place_obj(
+    resolved: &ResolvedModule,
+    machine: &mut Machine,
+    assign: NodeId,
+) -> Result<(), Raise> {
+    let Node::Assign { target, value } = resolved.ast.node(assign) else {
+        unreachable!("AssignPlaceObj over a non-Assign node");
+    };
+    let (target, value) = (*target, *value);
+    let object = take_value(machine, resolved.ast.span(target))?;
+    let frame = machine.frames.last_mut().expect("a frame is active");
+    match resolved.ast.node(target) {
+        // `object.name = v`: evaluate the RHS, then set the field.
+        Node::Field { .. } => {
+            frame.conts.push(Cont::AssignFieldVal { assign, object });
+            frame.conts.push(Cont::Eval { node: value });
+        }
+        // `object[key] = v`: evaluate the key, then the RHS, then store.
+        Node::Index { index, .. } => {
+            let index = *index;
+            frame.conts.push(Cont::AssignIndexKey { assign, object });
+            frame.conts.push(Cont::Eval { node: index });
+        }
+        other => unreachable!("AssignPlaceObj over a non-place target: {other:?}"),
+    }
+    Ok(())
+}
+
+/// An index place assignment's key is now in the register, its object saved: stash
+/// the key and evaluate the RHS (left-to-right, L§14), which [`Cont::AssignIndexVal`]
+/// then stores.
+pub(crate) fn assign_index_key(
+    resolved: &ResolvedModule,
+    machine: &mut Machine,
+    assign: NodeId,
+    object: Value,
+) -> Result<(), Raise> {
+    let Node::Assign { target, value } = resolved.ast.node(assign) else {
+        unreachable!("AssignIndexKey over a non-Assign node");
+    };
+    let (target, value) = (*target, *value);
+    let key = take_value(machine, resolved.ast.span(target))?;
+    let frame = machine.frames.last_mut().expect("a frame is active");
+    frame.conts.push(Cont::AssignIndexVal {
+        assign,
+        object,
+        key,
+    });
+    frame.conts.push(Cont::Eval { node: value });
     Ok(())
 }
 

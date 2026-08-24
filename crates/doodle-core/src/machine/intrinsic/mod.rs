@@ -334,7 +334,7 @@ pub(crate) fn apply(
     let body = intrinsic.body.clone();
     let kind = intrinsic.kind;
     let param_infos = param_infos(&intrinsic.params);
-    let args = bind_foreign_arguments(resolved, call, &intrinsic.params, &arg_values, span)?;
+    let args = bind_foreign_arguments(resolved, heap, call, &intrinsic.params, &arg_values, span)?;
     // Bind the `do … end` block argument to the intrinsic's block parameter, checking
     // consistency (§8.3/§8.5) — reusing the source-callable path: a block passed to a
     // block-less intrinsic raises, and a block parameter with no block raises. `each`
@@ -430,6 +430,7 @@ fn param_infos(params: &[ForeignParam]) -> Vec<ParamInfo> {
 /// error. A block parameter is not a value here (invoked reentrantly, M2b.5).
 fn bind_foreign_arguments(
     resolved: &ResolvedModule,
+    heap: &mut Heap,
     call: NodeId,
     params: &[ForeignParam],
     arg_values: &[Value],
@@ -440,6 +441,7 @@ fn bind_foreign_arguments(
     let param_infos = param_infos(params);
     let (slots, filled) = bind_arguments(
         resolved,
+        heap,
         call,
         &param_infos,
         params.len() as u16,

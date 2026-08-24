@@ -1,0 +1,5 @@
+#! clause: L5.3
+#! mode: run
+#! expect-raise: you can't set a field of @ 5:1
+let n = 5
+n.x = 10

@@ -164,6 +164,7 @@ fn block_apply(
     let block_info = &resolved.callables[block_id];
     let (slots, filled) = call::bind_arguments(
         resolved,
+        heap,
         call,
         &block_info.params,
         block_info.slot_count,

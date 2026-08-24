@@ -1,0 +1,10 @@
+#! clause: L4.14
+#! mode: run
+#! expect-out: 3
+#! expect-out: 10
+record Point with x, y end
+let a = Point(x: 3, y: 4)
+let b = a
+b.x = 10
+print(a.x)
+print(b.x)

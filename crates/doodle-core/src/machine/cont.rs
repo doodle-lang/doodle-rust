@@ -88,11 +88,47 @@ pub(crate) enum Cont {
         /// The `Let`/`Const` declaration node.
         decl: NodeId,
     },
-    /// An assignment's right-hand value is now in the register: write it to the
-    /// target lvalue (a module cell or a frame slot). The statement yields Void.
+    /// An assignment to a **name** target: its right-hand value is now in the
+    /// register — write it to the binding (a module cell or a frame slot), copying a
+    /// value record for binding (L§4.14). The statement yields Void. A `Field`/`Index`
+    /// place target instead takes the [`AssignPlaceObj`](Cont::AssignPlaceObj) path.
     AssignTo {
-        /// The `Assign` node (its `target` is the lvalue).
+        /// The `Assign` node (its `target` is an `Ident` lvalue).
         assign: NodeId,
+    },
+    /// A place assignment's target **object** (`a.b` in `a.b.c = v`, `d` in `d[k] = v`)
+    /// is now in the register — the *actual* object, navigated with no copy (L§5.3, the
+    /// S-38 "no intermediate copies" rule). Branch on the target kind to finish the
+    /// store: a `Field` target evaluates the RHS next, an `Index` target the key.
+    AssignPlaceObj {
+        /// The `Assign` node (its `target` is a `Field`/`Index` lvalue).
+        assign: NodeId,
+    },
+    /// A field place assignment with its target object saved: the RHS is now in the
+    /// register. Copy it for binding and write it into `object`'s field (L§5.3/§9).
+    AssignFieldVal {
+        /// The `Assign` node (its `target` names the field).
+        assign: NodeId,
+        /// The object being mutated (a record place, no copy).
+        object: Value,
+    },
+    /// An index place assignment with its target object saved: the key is now in the
+    /// register. Stash the key, then evaluate the RHS (left-to-right, L§14).
+    AssignIndexKey {
+        /// The `Assign` node (its `target` is the `Index` lvalue).
+        assign: NodeId,
+        /// The object being indexed (a dict place, no copy).
+        object: Value,
+    },
+    /// An index place assignment with its object and key saved: the RHS is now in the
+    /// register. Copy it for binding and store it under the key (L§5.3/§4.8).
+    AssignIndexVal {
+        /// The `Assign` node (for its span).
+        assign: NodeId,
+        /// The object being indexed (a dict place, no copy).
+        object: Value,
+        /// The already-evaluated key.
+        key: Value,
     },
     /// An `if` arm's condition is now in the register: it must be a `Bool`; if
     /// true run that arm's body, else advance to the next arm / `else` / nothing
@@ -267,8 +303,14 @@ impl Cont {
                 f(*key);
             }
             Cont::IndexApply { object, .. } => f(*object),
+            Cont::AssignFieldVal { object, .. } | Cont::AssignIndexKey { object, .. } => f(*object),
+            Cont::AssignIndexVal { object, key, .. } => {
+                f(*object);
+                f(*key);
+            }
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
+            | Cont::AssignPlaceObj { .. }
             | Cont::FieldRead { .. }
             | Cont::DefineRecord { .. }
             | Cont::IndexGotObject { .. }

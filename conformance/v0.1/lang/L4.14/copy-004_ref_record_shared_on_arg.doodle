@@ -1,0 +1,10 @@
+#! clause: L4.14
+#! mode: run
+#! expect-out: 99
+ref record Box with n end
+to bump(p)
+  p.n = 99
+end
+let b = Box(n: 1)
+bump(b)
+print(b.n)

@@ -1,0 +1,8 @@
+#! clause: L4.14
+#! mode: run
+#! expect-out: 1
+record Point with x, y end
+let a = Point(x: 1, y: 2)
+let d = {p: a}
+a.x = 9
+print(d["p"].x)
