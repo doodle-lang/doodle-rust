@@ -33,12 +33,12 @@ mod slab;
 
 pub use objects::{
     BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, DictObj, Finalizer, ForeignObj, ListObj,
-    StrObj, TypeObj,
+    RecObj, StrObj, TypeObj,
 };
 pub use slab::Slab;
 
 use crate::machine::{
-    BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, StrIdx, TypeIdx, Value,
+    BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };
 use num_bigint::BigInt;
 
@@ -84,6 +84,12 @@ fn list_payload(o: &ListObj) -> u64 {
 /// derivable cache (MD §5) and is not charged — its size never shifts GC timing.
 fn dict_payload(o: &DictObj) -> u64 {
     o.entries.len() as u64 * 2 * VALUE_BYTES
+}
+
+/// A record's payload: one value width per field. The schema (name, field names)
+/// lives on the shared type value, not the instance, so it is not charged here.
+fn rec_payload(o: &RecObj) -> u64 {
+    o.fields.len() as u64 * VALUE_BYTES
 }
 
 /// A bignum's payload: its magnitude size in bytes (bit length rounded up); `bits`
@@ -134,6 +140,7 @@ pub struct Heap {
     bytes: Slab<BytesObj>,
     lists: Slab<ListObj>,
     dicts: Slab<DictObj>,
+    records: Slab<RecObj>,
     bigints: Slab<BigIntObj>,
     cells: Slab<CellObj>,
     callables: Slab<CalObj>,
@@ -157,6 +164,7 @@ impl Heap {
             bytes: Slab::new(),
             lists: Slab::new(),
             dicts: Slab::new(),
+            records: Slab::new(),
             bigints: Slab::new(),
             cells: Slab::new(),
             callables: Slab::new(),
@@ -277,6 +285,20 @@ impl Heap {
         self.dicts.get_mut(idx.0).entries[pos as usize].1 = value;
     }
 
+    /// Allocates a record instance of type `type_idx` with `fields` in the type's
+    /// declaration order (L§9).
+    pub fn alloc_record(&mut self, type_idx: TypeIdx, fields: Box<[Value]>) -> RecIdx {
+        let obj = RecObj { type_idx, fields };
+        self.charge_object(rec_payload(&obj));
+        let serial = self.next_serial();
+        RecIdx(self.records.alloc(obj, serial))
+    }
+
+    /// Borrows the record at `idx`.
+    pub fn record(&self, idx: RecIdx) -> &RecObj {
+        self.records.get(idx.0)
+    }
+
     /// Borrows the bignum at `idx`.
     pub fn bigint(&self, idx: BigIntIdx) -> &BigIntObj {
         self.bigints.get(idx.0)
@@ -374,6 +396,7 @@ impl Heap {
             + self.bytes.live_count()
             + self.lists.live_count()
             + self.dicts.live_count()
+            + self.records.live_count()
             + self.bigints.live_count()
             + self.cells.live_count()
             + self.callables.live_count()

@@ -334,6 +334,7 @@ fn exception_tag(kind: ExceptionKind) -> &'static str {
         ExceptionKind::ArgumentError => "argument-error",
         ExceptionKind::UnhashableKey => "unhashable-key",
         ExceptionKind::KeyNotFound => "key-not-found",
+        ExceptionKind::NoSuchField => "no-such-field",
         ExceptionKind::NoValueDestination => "no-value-destination",
         ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
         ExceptionKind::HostRaised => "host-raised",

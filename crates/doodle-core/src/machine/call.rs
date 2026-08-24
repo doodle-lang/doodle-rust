@@ -135,6 +135,13 @@ fn apply(
     arg_values: Vec<Value>,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(call);
+    // A **record type value** used as a callee constructs an instance (L§9); a built-in
+    // type value is not callable and falls through to the error below.
+    if let Value::Type(idx) = callee
+        && matches!(heap.type_value(idx).kind, super::TypeKind::Record(_))
+    {
+        return super::record::construct(resolved, heap, machine, call, idx, arg_values);
+    }
     let Value::Callable(cal) = callee else {
         return Err(Raise::new(
             ExceptionKind::NotCallable,

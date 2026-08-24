@@ -4,7 +4,7 @@
 //! indices name. Payload accounting (per-kind size, GC sweep) lives in the parent
 //! [`heap`](super) module, which owns the [`Heap`](super::Heap) itself.
 
-use crate::machine::{BuiltinType, CellIdx, Value};
+use crate::machine::{CellIdx, TypeIdx, TypeKind, Value};
 use crate::span::ModuleId;
 use num_bigint::BigInt;
 use std::collections::HashMap;
@@ -137,13 +137,26 @@ impl CalObj {
     }
 }
 
-/// A type value (L§4.12): a built-in type denoted for use with `is` (L§6.5) and
-/// reflection (L§13). Record types and protocol values join at M4/M5.
+/// A type value (L§4.12): a built-in type or a user-declared record type, for use
+/// with `is` (L§6.5), construction, and reflection (L§13). Protocol values join at M5.
 #[derive(Clone, Debug)]
 pub struct TypeObj {
-    /// Which built-in type this value denotes. Crate-internal: `BuiltinType` is a
-    /// machine detail, not part of the heap's public surface.
-    pub(crate) builtin: BuiltinType,
+    /// What this type value denotes (built-in or record). Crate-internal: `TypeKind`
+    /// is a machine detail, not part of the heap's public surface.
+    pub(crate) kind: TypeKind,
+}
+
+/// A record instance (L§9): a reference to its record type (which carries the
+/// schema — name, field order, `ref`-ness) and its field values in declaration
+/// order. The value-vs-reference copy behavior (L§4.14) is a property of the type,
+/// read through [`type_idx`](RecObj::type_idx); it becomes observable with mutation
+/// (M4.3).
+#[derive(Clone, Debug)]
+pub struct RecObj {
+    /// The record type this instantiates (nominal identity for `is`, L§6.5).
+    pub type_idx: TypeIdx,
+    /// Field values, in the type's declaration order.
+    pub fields: Box<[Value]>,
 }
 
 /// A foreign value's finalizer (engine spec E§4.5): a host callback run **exactly

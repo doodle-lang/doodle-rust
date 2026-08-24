@@ -54,6 +54,9 @@ pub enum ExceptionKind {
     UnhashableKey,
     /// A dict was indexed (`d[k]`) with a key it does not contain (L§4.8).
     KeyNotFound,
+    /// A field access (`r.name`) named a field the record's type does not declare
+    /// (L§9). Records are dynamically typed, so this is a runtime error.
+    NoSuchField,
     /// A valued `break` exited a block-consuming call whose callee is a **procedure**
     /// (yields no value), so the value has no destination (L§7.10, §8.5). This is
     /// the **open** S-10 to-consumer half; the machine raises **provisionally**

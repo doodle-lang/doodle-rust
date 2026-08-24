@@ -17,7 +17,7 @@
 
 use super::{
     Heap, OBJECT_OVERHEAD, bigint_payload, bytes_payload, cal_payload, cell_payload, dict_payload,
-    foreign_payload, list_payload, str_payload, type_payload,
+    foreign_payload, list_payload, rec_payload, str_payload, type_payload,
 };
 use crate::machine::{CalIdx, CellIdx, Value};
 
@@ -64,6 +64,11 @@ impl Tracer<'_> {
                     self.stack.push(v);
                 }
             }
+            Value::Record(i) => {
+                if self.heap.records.mark(i.0) {
+                    self.stack.push(v);
+                }
+            }
             Value::Callable(i) => {
                 if self.heap.callables.mark(i.0) {
                     self.stack.push(v);
@@ -90,10 +95,6 @@ impl Tracer<'_> {
             }
             // Non-heap scalars: nothing to mark.
             Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Module(_) => {}
-            // Records join at M4.2/M4.4 — not allocatable yet, so reaching here is a bug.
-            Value::Record(_) => {
-                unreachable!("GC reached {v:?} — records are not allocatable yet")
-            }
         }
     }
 
@@ -128,6 +129,17 @@ impl Tracer<'_> {
                         let (key, value) = self.heap.dicts.get(i.0).entries[k];
                         self.enqueue(key);
                         self.enqueue(value);
+                    }
+                }
+                Value::Record(i) => {
+                    // A record's children are its field values; it also keeps its type
+                    // value alive (a `Type` leaf) so `is`/reflection stay valid even if
+                    // the type binding is gone.
+                    self.enqueue(Value::Type(self.heap.records.get(i.0).type_idx));
+                    let n = self.heap.records.get(i.0).fields.len();
+                    for k in 0..n {
+                        let field = self.heap.records.get(i.0).fields[k];
+                        self.enqueue(field);
                     }
                 }
                 Value::Callable(i) => {
@@ -184,6 +196,8 @@ impl Heap {
             .sweep(|o| freed += OBJECT_OVERHEAD + list_payload(o));
         self.dicts
             .sweep(|o| freed += OBJECT_OVERHEAD + dict_payload(o));
+        self.records
+            .sweep(|o| freed += OBJECT_OVERHEAD + rec_payload(o));
         self.bigints
             .sweep(|o| freed += OBJECT_OVERHEAD + bigint_payload(o));
         self.cells

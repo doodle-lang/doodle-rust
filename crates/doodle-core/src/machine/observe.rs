@@ -134,8 +134,10 @@ impl Instance {
             Cont::BlockGotArg { call, .. } => ast.span(*call),
             Cont::ListGotElem { list, .. } => ast.span(*list),
             Cont::DictGotKey { dict, .. } | Cont::DictGotValue { dict, .. } => ast.span(*dict),
+            Cont::FieldRead { field } => ast.span(*field),
             Cont::BindDefault { default, .. } => ast.span(*default),
             Cont::DefineCallable { decl } => ast.span(*decl),
+            Cont::DefineRecord { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
             // Operator plumbing carries the operator's span directly.
             Cont::BinRhs { span, .. }

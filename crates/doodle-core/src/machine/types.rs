@@ -16,6 +16,29 @@ use super::error::{ExceptionKind, Raise};
 use crate::heap::Heap;
 use crate::span::Span;
 
+/// A type value (L§4.12): a **built-in** type or a user-declared **record** type.
+/// Stored in a [`TypeObj`](crate::heap::TypeObj); a `Value::Type` names it.
+#[derive(Clone, Debug)]
+pub(crate) enum TypeKind {
+    /// A built-in type (`Int`, `List`, …).
+    Builtin(BuiltinType),
+    /// A record type declared with `record …` (L§9).
+    Record(RecordType),
+}
+
+/// A record type's schema (L§9): its name and its field names in declaration order.
+/// The schema lives on the type value; an instance ([`RecObj`](crate::heap::RecObj))
+/// stores only its field values positionally and a reference back to this type. The
+/// value-vs-reference distinction (`ref record`, L§4.14) joins here at M4.3, where
+/// copy-on-bind first reads it (it is unobservable without mutation until then).
+#[derive(Clone, Debug)]
+pub(crate) struct RecordType {
+    /// The declared type name (for reflection and error messages).
+    pub name: Box<str>,
+    /// Field names, in declaration order — the order an instance's values follow.
+    pub fields: Box<[Box<str>]>,
+}
+
 /// A built-in type value (L§4.12). The spellings are provisional (L Appendix D).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BuiltinType {
@@ -90,8 +113,16 @@ pub(crate) fn is_op(lhs: Value, rhs: Value, heap: &Heap, span: Span) -> Result<V
             span,
         ));
     };
-    let ty = heap.type_value(idx).builtin;
-    Ok(Value::Bool(value_is(lhs, ty)))
+    let matches = match &heap.type_value(idx).kind {
+        TypeKind::Builtin(b) => value_is(lhs, *b),
+        // Records are **nominal** (L§6.5): `x is Point` holds iff `x` is a record whose
+        // type is this exact declared type — compared by the type value's identity, so
+        // two same-shaped records of different declarations are different types.
+        TypeKind::Record(_) => {
+            matches!(lhs, Value::Record(r) if heap.record(r).type_idx == idx)
+        }
+    };
+    Ok(Value::Bool(matches))
 }
 
 #[cfg(test)]

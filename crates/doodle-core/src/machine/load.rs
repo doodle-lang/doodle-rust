@@ -95,7 +95,8 @@ impl Instance {
             .map(|g| (g.name.clone(), heap.alloc_cell(None)))
             .collect();
         for &(name, builtin) in types::BUILTINS {
-            let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { builtin }));
+            let kind = crate::machine::TypeKind::Builtin(builtin);
+            let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
             namespace.push((name.into(), heap.alloc_cell(Some(ty))));
         }
         for (i, intrinsic) in intrinsics.iter().enumerate() {

@@ -1,0 +1,5 @@
+#! clause: L9.1
+#! mode: run
+#! expect-raise: no field `z` @ 5:9
+record Point with x, y end
+let p = Point(x: 3, y: 4, z: 5)

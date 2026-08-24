@@ -13,7 +13,9 @@ use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
-use super::{Halt, Machine, Value, arith, block, call, compare, dict, limits, types, unwind};
+use super::{
+    Halt, Machine, Value, arith, block, call, compare, dict, limits, record, types, unwind,
+};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart, UnaryOp};
 use crate::drive::EngineFault;
 use crate::heap::Heap;
@@ -209,6 +211,11 @@ fn dispatch(
             call::define_callable(resolved, heap, machine, namespace, decl);
             Ok(())
         }
+        Some(Cont::DefineRecord { decl }) => {
+            record::define(resolved, heap, machine, namespace, decl);
+            Ok(())
+        }
+        Some(Cont::FieldRead { field }) => record::field_read(resolved, heap, machine, field),
         Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
         // The frame's work is drained: return from it.
@@ -302,6 +309,9 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
         // the statement runs (call.rs). Anonymous `fn` never reaches here — it is
         // an expression, wrapped in an `ExprStmt`.
         Node::Callable { .. } => frame.conts.push(Cont::DefineCallable { decl: stmt }),
+        // A `record …` declaration binds its type value when the statement runs (L§9);
+        // the body is docstring-only, so nothing is evaluated first (record.rs).
+        Node::Record { .. } => frame.conts.push(Cont::DefineRecord { decl: stmt }),
         // A non-local exit (§7.10): evaluate its operand (if any), then arm the
         // unwind toward the resolver-annotated target (unwind.rs).
         Node::Return(op) | Node::Break(op) | Node::Continue(op) => {
@@ -437,6 +447,15 @@ fn eval(
         // keys are literal strings), then build the dict applying first-key-wins.
         // `dict_advance` handles the empty `{}` (it allocates immediately).
         Node::Dict(_) => return dict::dict_advance(resolved, heap, machine, node, Vec::new(), 0),
+        // A field read `object.name` (L§9): evaluate the object, then read the field.
+        // (Assignment `object.name = v` is the place-chain path, M4.3.)
+        Node::Field { object, .. } => {
+            let object = *object;
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            frame.conts.push(Cont::FieldRead { field: node });
+            frame.conts.push(Cont::Eval { node: object });
+            return Ok(());
+        }
         // An index read `object[key]` (L§4.8): evaluate the object, then the key, then
         // look it up. (Assignment `object[key] = v` is the place-chain path, M4.3.)
         Node::Index { object, index } => {

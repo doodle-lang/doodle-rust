@@ -33,6 +33,7 @@ mod limits;
 mod load;
 mod local;
 mod observe;
+mod record;
 mod ring;
 mod step;
 mod types;
@@ -50,7 +51,7 @@ pub use intrinsic::{
     sin as sin_intrinsic,
 };
 pub use observe::{FrameObservation, Position};
-pub(crate) use types::BuiltinType;
+pub(crate) use types::{RecordType, TypeKind};
 pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };

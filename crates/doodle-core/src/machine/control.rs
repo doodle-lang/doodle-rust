@@ -335,6 +335,7 @@ fn decl_name(resolved: &ResolvedModule, decl: NodeId) -> &str {
         Node::Callable {
             name: Some(name), ..
         } => name,
+        Node::Record { name, .. } => name,
         _ => unreachable!("bind_decl over a node with no binding name"),
     }
 }

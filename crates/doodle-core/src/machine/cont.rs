@@ -183,6 +183,12 @@ pub(crate) enum Cont {
         /// This entry's already-evaluated key.
         key: Value,
     },
+    /// A field expression's object (`r` in `r.name`) is now in the register: read the
+    /// named field (L§9). The `Field` node names both the object and the field.
+    FieldRead {
+        /// The `Field` node (for its field name and span).
+        field: NodeId,
+    },
     /// An index expression's object (`d` in `d[k]`) is now in the register: stash it,
     /// then evaluate the key `k` (L§4.8).
     IndexGotObject {
@@ -212,6 +218,12 @@ pub(crate) enum Cont {
     /// (a module cell or a frame slot). The statement yields Void.
     DefineCallable {
         /// The `Callable` declaration node.
+        decl: NodeId,
+    },
+    /// Bind a `record` declaration's type value to its name (L§9) when the statement
+    /// runs. The body is docstring-only, so there is nothing to evaluate first.
+    DefineRecord {
+        /// The `Record` declaration node.
         decl: NodeId,
     },
     /// The root of a callable body's continuation stack (machine-design §8/§10):
@@ -257,6 +269,8 @@ impl Cont {
             Cont::IndexApply { object, .. } => f(*object),
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
+            | Cont::FieldRead { .. }
+            | Cont::DefineRecord { .. }
             | Cont::IndexGotObject { .. }
             | Cont::Eval { .. }
             | Cont::BinRhs { .. }
