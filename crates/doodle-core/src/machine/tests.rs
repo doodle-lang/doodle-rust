@@ -798,6 +798,35 @@ fn a_garbage_loop_reclaims_under_a_heap_limit_below_the_gc_floor() {
     );
 }
 
+// --- M4.7: string repetition resource bound (L§4.4, S-59) ---
+
+/// A string `*` whose result would exceed the heap limit faults rather than attempting an
+/// allocation that could overflow `usize` or exhaust memory — the single-allocation bound
+/// (the R8 interior magnitude cap is later). Both a bignum count (unrepresentable) and a
+/// representable count over a tight configured limit fault as `LimitExceeded(Heap)`.
+#[test]
+fn a_string_repeat_over_the_heap_limit_faults() {
+    let mut inst = load_source("let x = \"a\" * (10 ** 30)\n");
+    assert!(
+        matches!(
+            drive_to_fault(&mut inst),
+            EngineFault::LimitExceeded(LimitKind::Heap)
+        ),
+        "a bignum repeat count must fault, not panic"
+    );
+    let mut inst = load_source_with_limits(
+        "let x = \"abcdefgh\" * 100000\n",
+        Limits {
+            heap_bytes: 4096,
+            ..Limits::default()
+        },
+    );
+    assert!(matches!(
+        drive_to_fault(&mut inst),
+        EngineFault::LimitExceeded(LimitKind::Heap)
+    ));
+}
+
 // --- M2a.11: host handles (engine spec E§4.2, machine-design §16) ---
 
 /// A retained handle keeps its value reachable across a collection (the M2a.11

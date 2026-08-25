@@ -163,7 +163,7 @@ impl Instance {
                 output: Vec::new(),
                 pending: None,
                 directive: Directive::RunToCompletion,
-                reentry_fault: None,
+                pending_fault: None,
                 foreign_roots: Vec::new(),
                 dyn_stack: Vec::new(),
                 handling: Vec::new(),

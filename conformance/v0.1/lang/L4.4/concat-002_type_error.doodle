@@ -1,0 +1,5 @@
+#! clause: L4.4
+#! mode: run
+#! expect-raise: won't add a string and a non-string @ 5:7
+let s = "a"
+print(s + 1)

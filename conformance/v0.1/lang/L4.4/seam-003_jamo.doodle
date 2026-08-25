@@ -1,0 +1,6 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+#! expect-out: true
+print(("\u{1100}" + "\u{1161}") == "\u{ac00}")
+print(("\u{ac00}" + "\u{11a8}") == "\u{ac01}")

@@ -15,7 +15,7 @@ use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::{Frame, FrameKind};
 use super::{
     Halt, Machine, Value, arith, block, call, compare, dict, dynamic, eval, limits, protect,
-    record, types, unwind,
+    record, strop, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -98,7 +98,7 @@ pub(crate) fn step(
     // inside the native consumer, forbidden — Decision #2). It parks the fault because
     // the Raise-typed `apply` chain cannot carry an `EngineFault`; surface it here as
     // this transition's fault (MD §14). A fault takes priority over a raise.
-    if let Some(fault) = machine.take_reentry_fault() {
+    if let Some(fault) = machine.take_pending_fault() {
         return Err(Halt::Fault(fault));
     }
     // A raise from the transition begins a **Raise unwind** (machine-design §12): it
@@ -160,7 +160,14 @@ fn dispatch(
             let result = match op {
                 // `x is T`: the right operand is a type value (L§6.5).
                 BinaryOp::Is => types::is_op(lhs, rhs, heap, span)?,
-                _ if is_arithmetic(op) => arith::binary(op, lhs, rhs, heap, span)?,
+                // String `+`/`*` branch off the numeric path (L§4.4, S-59); a pair with no
+                // string operand falls through to numeric arithmetic.
+                _ if is_arithmetic(op) => {
+                    match strop::try_binary(op, lhs, rhs, heap, machine, span)? {
+                        Some(v) => v,
+                        None => arith::binary(op, lhs, rhs, heap, span)?,
+                    }
+                }
                 // A comparison or equality operator (`== != < > <= >=`).
                 _ => compare::binary(op, lhs, rhs, heap, span)?,
             };

@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+print(("x\u{301}" + "\u{323}") == "x\u{323}\u{301}")

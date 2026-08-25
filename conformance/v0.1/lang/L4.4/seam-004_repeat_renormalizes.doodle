@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+print(("\u{301}e" * 2) == "\u{301}\u{e9}e")

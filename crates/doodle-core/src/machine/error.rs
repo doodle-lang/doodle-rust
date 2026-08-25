@@ -62,6 +62,10 @@ pub enum ExceptionKind {
     /// the **open** S-10 to-consumer half; the machine raises **provisionally**
     /// (rather than silently discard the value) pending the user's ruling.
     NoValueDestination,
+    /// String repetition (`*`) was given a negative count (L§4.4, S-59): a miscomputed
+    /// count is a bug, not a request for `""`, so it raises rather than clamping — an
+    /// operand-domain error parallel to `DivisionByZero`.
+    NegativeCount,
     /// A function (`fn`) reached its completion without producing a value (L§8.4):
     /// it fell off the end. The resolver catches this statically where it can
     /// (`function-falls-off-end`, S-5); this is the runtime backstop for the cases
@@ -95,6 +99,7 @@ impl ExceptionKind {
             ExceptionKind::KeyNotFound => "key-not-found",
             ExceptionKind::NoSuchField => "no-such-field",
             ExceptionKind::NoValueDestination => "no-value-destination",
+            ExceptionKind::NegativeCount => "negative-count",
             ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
             ExceptionKind::HostRaised => "host-raised",
         }

@@ -1,0 +1,6 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: ababab
+#! expect-out: ababab
+print("ab" * 3)
+print(3 * "ab")

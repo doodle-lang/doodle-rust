@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: foobar
+print("foo" + "bar")

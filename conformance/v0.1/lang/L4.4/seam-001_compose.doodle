@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+print(("e" + "\u{301}") == "\u{e9}")

@@ -240,7 +240,7 @@ impl IntrinsicCtx<'_> {
         // this backstops a misbehaving host callback once the C-ABI FFI lands, M7.)
         if self.machine.unwind.is_some() {
             self.machine.unwind = None;
-            self.machine.reentry_fault = Some(EngineFault::Internal);
+            self.machine.pending_fault = Some(EngineFault::Internal);
             return Ok(BlockResult::Halted);
         }
         // A reentrant drive nests on the host's Rust stack (MD §14): bound the depth so a
@@ -248,7 +248,7 @@ impl IntrinsicCtx<'_> {
         // overflowing the native stack. Park the fault and return `Halted` (like a nested
         // limit) so the callback stops without pushing a deeper frame.
         if self.machine.reentry_would_overflow() {
-            self.machine.reentry_fault = Some(EngineFault::LimitExceeded(LimitKind::StackDepth));
+            self.machine.pending_fault = Some(EngineFault::LimitExceeded(LimitKind::StackDepth));
             return Ok(BlockResult::Halted);
         }
         self.machine.enter_reentry();
@@ -298,7 +298,7 @@ impl IntrinsicCtx<'_> {
                     // and deterministic.
                     if self.machine.pending.is_some() {
                         self.machine.pending = None;
-                        self.machine.reentry_fault = Some(EngineFault::NestedSuspend);
+                        self.machine.pending_fault = Some(EngineFault::NestedSuspend);
                         return Ok(BlockResult::Halted);
                     }
                 }
@@ -311,7 +311,7 @@ impl IntrinsicCtx<'_> {
                     unreachable!("a nested-drive raise unwinds to the boundary, not to Halt::Raise")
                 }
                 Err(Halt::Fault(fault)) => {
-                    self.machine.reentry_fault = Some(fault);
+                    self.machine.pending_fault = Some(fault);
                     return Ok(BlockResult::Halted);
                 }
             }
@@ -373,7 +373,7 @@ pub(crate) fn apply(
             // A reentrant nested drive may have parked a fault (`invoke_block`): a nested
             // limit, or a host-contract violation. `step` surfaces it, so stop here — do
             // not propagate the callback's result (a raise it returned is superseded).
-            if machine.reentry_fault.is_some() {
+            if machine.pending_fault.is_some() {
                 return Ok(());
             }
             // A `break`/`return` in a block this callback drove crossed the native
@@ -386,7 +386,7 @@ pub(crate) fn apply(
             if machine.unwind.is_some() {
                 if !matches!(result, Ok(None)) {
                     machine.unwind = None;
-                    machine.reentry_fault = Some(EngineFault::Internal);
+                    machine.pending_fault = Some(EngineFault::Internal);
                     return Ok(());
                 }
                 unwind::resume_native_boundary(machine, boundary, kind)?;

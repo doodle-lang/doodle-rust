@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-raise: count must be an Int @ 4:7
+print("ab" * 2.0)

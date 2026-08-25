@@ -1,0 +1,6 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: empty
+#! expect-out: empty
+print("ab" * 0 + "empty")
+print("" * 999 + "empty")

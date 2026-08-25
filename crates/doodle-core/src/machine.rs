@@ -40,6 +40,7 @@ mod protect;
 mod record;
 mod ring;
 mod step;
+mod strop;
 mod types;
 mod unwind;
 mod value;
@@ -162,12 +163,13 @@ pub(crate) struct Machine {
     /// The directive the current drive runs under, remembered across a suspend so
     /// `resolve` resumes under the same directive (E§7.3).
     directive: Directive,
-    /// A fault raised **inside a reentrant nested drive** (a limit tripped while a
-    /// native block-consumer ran its block, or the deferred S-15 nested-suspend), parked
-    /// here because the Raise-typed intrinsic `apply` chain cannot carry an
-    /// `EngineFault`. `step` surfaces it as its `Err(Halt::Fault)` after the outer
-    /// transition returns. `None` in normal execution.
-    reentry_fault: Option<EngineFault>,
+    /// A fault parked during a transition because the Raise-typed dispatch/`apply` chain
+    /// cannot carry an `EngineFault`: a fault raised **inside a reentrant nested drive** (a
+    /// limit tripped while a native block-consumer ran its block, or the deferred S-15
+    /// nested-suspend), or a **resource limit hit mid-transition** (a string `*` whose
+    /// result would exceed the heap limit). `step` surfaces it as its `Err(Halt::Fault)`
+    /// after the transition returns. `None` in normal execution.
+    pending_fault: Option<EngineFault>,
     /// The bound arguments of **in-flight synchronous foreign calls** (MD §15): while a
     /// callback runs — and, for a native block-consumer, while its reentrant nested drive
     /// runs and may collect — its arguments are held only on the host's Rust stack, so
@@ -218,9 +220,15 @@ impl Machine {
         serial
     }
 
-    /// Takes any fault parked by a reentrant nested drive (`step` surfaces it, MD §14).
-    pub(crate) fn take_reentry_fault(&mut self) -> Option<EngineFault> {
-        self.reentry_fault.take()
+    /// Takes any fault parked during the transition (`step` surfaces it, MD §14).
+    pub(crate) fn take_pending_fault(&mut self) -> Option<EngineFault> {
+        self.pending_fault.take()
+    }
+
+    /// Parks a fault for `step` to surface, for a transition that cannot return an
+    /// `EngineFault` through its Raise-typed result (a string `*` over the heap limit).
+    pub(crate) fn set_pending_fault(&mut self, fault: EngineFault) {
+        self.pending_fault = Some(fault);
     }
 
     /// Roots the arguments of an entering synchronous foreign call (MD §15), returning

@@ -12,6 +12,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::canonical_combining_class;
 
 /// A Unicode/UCD version, `major.minor.micro` (L§4.4). Names the release whose
 /// normalization and (at M4) grapheme behavior an instance uses; carried in the
@@ -77,6 +78,81 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
 /// text (L§3.1).
 pub fn is_nfc(s: &str) -> bool {
     unicode_normalization::is_nfc(s)
+}
+
+/// Concatenates two **NFC** strings, producing the NFC of their concatenation while
+/// renormalizing only the **seam** (plan AD4, MD §5). The result is exactly
+/// `nfc(&format!("{a}{b}"))`, but the prefix of `a` before its last normalization
+/// boundary and the suffix of `b` after its first are already NFC and are copied
+/// verbatim — only the boundary region is re-normalized. Both inputs must be NFC.
+///
+/// "Around the seam" is defined against true UAX #15 boundaries, not "back to the last
+/// starter" naively: the region extends across `a`'s trailing non-starter run (canonical
+/// reordering can move a mark from `b` into it) up to and including the starter that
+/// anchors it, and across `b`'s leading non-starters **and** leading Hangul V/T jamo,
+/// which compose backward onto a trailing L/LV even though they are starters.
+pub fn seam_concat(a: &str, b: &str) -> String {
+    debug_assert!(
+        is_nfc(a) && is_nfc(b),
+        "seam_concat requires NFC inputs (AD4)"
+    );
+    if a.is_empty() {
+        return b.to_owned();
+    }
+    if b.is_empty() {
+        return a.to_owned();
+    }
+    let a_split = seam_start_in_a(a);
+    let b_split = seam_end_in_b(b);
+    let mut out = String::with_capacity(a.len() + b.len());
+    out.push_str(&a[..a_split]);
+    let seam: String = a[a_split..]
+        .chars()
+        .chain(b[..b_split].chars())
+        .nfc()
+        .collect();
+    out.push_str(&seam);
+    out.push_str(&b[b_split..]);
+    out
+}
+
+/// The byte index in `a` where the seam region begins: the start of `a`'s last
+/// normalization unit — its trailing non-starter run together with the starter that
+/// anchors it (or `0` if `a` has no starter). Everything before it is unaffected by an
+/// append, since composition and canonical reordering never reach back past a starter.
+fn seam_start_in_a(a: &str) -> usize {
+    let mut anchor = 0;
+    for (i, c) in a.char_indices().rev() {
+        anchor = i;
+        if canonical_combining_class(c) == 0 {
+            break; // the starter anchoring the trailing non-starter run
+        }
+    }
+    anchor
+}
+
+/// The byte index in `b` where the seam region ends: past `b`'s leading non-starters and
+/// leading Hangul V/T jamo — the characters that can reorder into `a`'s tail or compose
+/// backward onto a trailing L/LV. Stops at the first clean starter (a normal starter, or
+/// an L jamo, which begins a fresh syllable and never composes backward).
+fn seam_end_in_b(b: &str) -> usize {
+    let mut end = 0;
+    for (i, c) in b.char_indices() {
+        if canonical_combining_class(c) == 0 && !is_backward_composing_jamo(c) {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    end
+}
+
+/// Whether `c` is a Hangul **V** (medial vowel) or **T** (trailing consonant) conjoining
+/// jamo — a starter (CCC 0) that nonetheless composes *backward* onto a preceding L or LV
+/// at a seam (L+V→LV, LV+T→LVT, UAX #15 §Hangul). L jamo and precomposed syllables do
+/// not compose backward, so they are excluded.
+fn is_backward_composing_jamo(c: char) -> bool {
+    let u = c as u32;
+    (0x1161..=0x1175).contains(&u) || (0x11A8..=0x11C2).contains(&u)
 }
 
 /// Whether `c` may start an identifier (L§3.4): `_`, or a UAX#31 `XID_Start`
@@ -164,6 +240,71 @@ mod tests {
         assert!(!is_module_name("mod-name"));
         assert!(!is_module_name("café")); // non-ASCII not allowed in module names
         assert!(!is_module_name(""));
+    }
+
+    /// The seam concat must equal whole-string NFC of the concatenation — the AD4
+    /// correctness contract. Covers ASCII, seam composition, canonical reordering across
+    /// the seam, Hangul jamo (L|V and LV|T), non-starter runs, empties, and the
+    /// regional-indicator case (RIs do not compose under NFC, so the seam is a no-op).
+    /// The seam concat must equal whole-string NFC of the concatenation — the AD4
+    /// correctness contract. Inputs are normalized first (seam_concat requires NFC),
+    /// chosen so the seam still does real work: composition, canonical reordering, and
+    /// Hangul jamo (L|V, LV|T) all straddle the join.
+    #[test]
+    fn seam_concat_equals_whole_string_nfc() {
+        let raw: &[(&str, &str)] = &[
+            ("ab", "cd"),                     // pure ASCII — no seam work
+            ("e", "\u{301}"),                 // base + lone acute → é composes at the seam
+            ("cafe", "\u{301}"),              // composition reaches back to `e`
+            ("e\u{301}", "\u{323}"),          // é + dot-below → reorder + recompose at seam
+            ("\u{1100}", "\u{1161}"),         // Hangul L + V → 가
+            ("\u{ac00}", "\u{11a8}"),         // Hangul LV (가) + T → 각
+            ("\u{1100}", "\u{1161}\u{11a8}"), // L + (V T) → 각
+            ("\u{301}", "\u{300}"),           // two lone non-starters (no starter in `a`)
+            ("\u{1f1fa}", "\u{1f1f8}"),       // RI + RI — no NFC composition (seam no-op)
+            ("", "abc"),                      // empty left
+            ("abc", ""),                      // empty right
+            ("A\u{30a}", "b"),                // Å (from A + ring) then a clean starter
+        ];
+        for (a_raw, b_raw) in raw {
+            let a: String = a_raw.nfc().collect();
+            let b: String = b_raw.nfc().collect();
+            let whole: String = format!("{a}{b}").nfc().collect();
+            assert_eq!(
+                seam_concat(&a, &b),
+                whole,
+                "seam != whole-string NFC for {a:?}+{b:?}"
+            );
+            assert!(
+                is_nfc(&seam_concat(&a, &b)),
+                "seam result not NFC: {a:?}+{b:?}"
+            );
+        }
+    }
+
+    /// Exhaustive small-alphabet check: over every pair of NFC strings of length ≤ 2 built
+    /// from bases, combining marks of two combining classes, and Hangul L/V/T/LV jamo, the
+    /// seam concat must equal whole-string NFC. Catches boundary bugs the hand-picked cases
+    /// might miss (wrong reorder window, jamo mishandled, an off-by-one seam split).
+    #[test]
+    fn seam_concat_matches_whole_string_exhaustively() {
+        let alphabet = [
+            'a', 'e', '\u{301}', '\u{323}', '\u{300}', '\u{1100}', '\u{1161}', '\u{11a8}',
+            '\u{ac00}',
+        ];
+        let mut strings: Vec<String> = alphabet.iter().map(|c| c.to_string()).collect();
+        for &c1 in &alphabet {
+            for &c2 in &alphabet {
+                strings.push(format!("{c1}{c2}"));
+            }
+        }
+        let nfc_strings: Vec<String> = strings.iter().map(|s| s.nfc().collect()).collect();
+        for a in &nfc_strings {
+            for b in &nfc_strings {
+                let whole: String = format!("{a}{b}").nfc().collect();
+                assert_eq!(seam_concat(a, b), whole, "seam mismatch for {a:?}+{b:?}");
+            }
+        }
     }
 
     #[test]
