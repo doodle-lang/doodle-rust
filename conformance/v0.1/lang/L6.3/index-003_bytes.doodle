@@ -1,0 +1,4 @@
+#! clause: L6.3
+#! mode: run
+#! expect-out: 98
+print(b"abc"[1])

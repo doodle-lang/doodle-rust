@@ -48,20 +48,29 @@ pub const UNICODE_VERSION: UnicodeVersion = UnicodeVersion {
 };
 
 // The reported version must cover EVERY UCD-dependent, language-observable path, not
-// just normalization. `unicode-ident` is versioned independently and — AD4 warns —
-// has historically skewed from `unicode-normalization`; both are caret-pinned, so a
-// routine `cargo update` could move one without the other. Both crates export their
-// pinned UCD version, so cross-check them here: a skew is a **build failure**, not a
-// silent lex/replay divergence (E§11) hidden behind a reported version that only
-// reflects normalization. This is the compile-time half of AD4's per-crate pin
-// verification; the behavioral XID conformance vector is deeper and lands at M4.
-// (`unicode-segmentation` joins this check when grapheme segmentation lands, M4.)
+// just normalization. All three Unicode crates are versioned independently and — AD4
+// warns — have historically shipped skewed UCD versions; they are caret-pinned, so a
+// routine `cargo update` could move one without the others. Each exports its pinned UCD
+// version, so cross-check all three here: a skew is a **build failure**, not a silent
+// lex/normalization/grapheme/replay divergence (E§11) hidden behind a single reported
+// version. This is the compile-time half of AD4's per-crate pin verification (D-M4-3);
+// the behavioral XID and grapheme conformance vectors are deeper. `unicode-segmentation`
+// reports a `(u64, u64, u64)` tuple, so compare all three widened to `u64`.
 const _: () = assert!(
-    unicode_ident::UNICODE_VERSION.0 == unicode_normalization::UNICODE_VERSION.0
-        && unicode_ident::UNICODE_VERSION.1 == unicode_normalization::UNICODE_VERSION.1
-        && unicode_ident::UNICODE_VERSION.2 == unicode_normalization::UNICODE_VERSION.2,
-    "unicode-ident and unicode-normalization pin different UCD versions: the engine's \
-     reported Unicode version would not cover identifier classification (AD4, S-41)"
+    unicode_normalization::UNICODE_VERSION.0 as u64 == unicode_ident::UNICODE_VERSION.0 as u64
+        && unicode_normalization::UNICODE_VERSION.1 as u64
+            == unicode_ident::UNICODE_VERSION.1 as u64
+        && unicode_normalization::UNICODE_VERSION.2 as u64
+            == unicode_ident::UNICODE_VERSION.2 as u64
+        && unicode_normalization::UNICODE_VERSION.0 as u64
+            == unicode_segmentation::UNICODE_VERSION.0
+        && unicode_normalization::UNICODE_VERSION.1 as u64
+            == unicode_segmentation::UNICODE_VERSION.1
+        && unicode_normalization::UNICODE_VERSION.2 as u64
+            == unicode_segmentation::UNICODE_VERSION.2,
+    "the pinned Unicode crates disagree on UCD version: NFC, identifier classification, \
+     and grapheme segmentation must share one UCD, or the engine's single reported \
+     version (AD4, S-41) would not cover every UCD-dependent path"
 );
 
 /// Normalizes `s` to Unicode Normalization Form C (L§3.1). Idempotent; borrows
@@ -78,6 +87,15 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
 /// text (L§3.1).
 pub fn is_nfc(s: &str) -> bool {
     unicode_normalization::is_nfc(s)
+}
+
+/// The byte offset of each **extended grapheme cluster**'s start (UAX #29, L§4.4) — the
+/// lazy grapheme memo (MD §5). Empty for `""`; otherwise begins with `0`. The number of
+/// clusters is the slice length (a string's grapheme `length`), and cluster `i` spans
+/// `offsets[i] .. offsets.get(i + 1).copied().unwrap_or(s.len())`.
+pub fn grapheme_offsets(s: &str) -> Box<[u32]> {
+    use unicode_segmentation::UnicodeSegmentation;
+    s.grapheme_indices(true).map(|(i, _)| i as u32).collect()
 }
 
 /// Concatenates two **NFC** strings, producing the NFC of their concatenation while
@@ -305,6 +323,29 @@ mod tests {
                 assert_eq!(seam_concat(a, b), whole, "seam mismatch for {a:?}+{b:?}");
             }
         }
+    }
+
+    /// Grapheme counts (UAX #29, L§4.4 accept #2/#3): `"café"` is 4 graphemes however the
+    /// `é` was composed (count over the NFC form), a party emoji is 1, a family ZWJ
+    /// sequence is 1, and a two-scalar flag is 1.
+    #[test]
+    fn grapheme_offsets_count_extended_clusters() {
+        let count = |s: &str| grapheme_offsets(&nfc(s)).len();
+        assert_eq!(count("caf\u{e9}"), 4); // composed é
+        assert_eq!(count("cafe\u{301}"), 4); // decomposed → NFC composes, still 4 graphemes
+        assert_eq!(count("\u{1f389}"), 1); // 🎉
+        assert_eq!(
+            count("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"),
+            1
+        ); // 👨‍👩‍👧‍👦
+        assert_eq!(count("\u{1f1fa}\u{1f1f8}"), 1); // 🇺🇸 flag (two regional indicators)
+        assert_eq!(count(""), 0);
+        // The offsets are cluster starts: begins at 0, strictly increasing, within bounds.
+        let s = nfc("a\u{301}b\u{1f1fa}\u{1f1f8}");
+        let offs = grapheme_offsets(&s);
+        assert_eq!(offs.first().copied(), Some(0));
+        assert!(offs.windows(2).all(|w| w[0] < w[1]));
+        assert!(offs.iter().all(|&o| (o as usize) < s.len()));
     }
 
     #[test]

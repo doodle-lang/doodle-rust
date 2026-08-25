@@ -57,36 +57,95 @@ pub fn each() -> Intrinsic {
             },
         ],
         body: ForeignBody::Sync(|ctx| {
-            let Value::List(idx) = ctx.args()[0] else {
-                return Err(Raise::new(
-                    ExceptionKind::TypeMismatch,
-                    "`each` needs a list to iterate",
-                    ctx.span(),
-                ));
-            };
-            // Iterate a **fixed count** (the length at entry) over the live heap list —
-            // which stays rooted through `each`'s `foreign_roots` entry (MD §15), so the
-            // block's reentrant drive may collect. The fixed count bounds a block that
-            // appends; `.get` guards a block that shrinks the list.
-            let count = ctx.heap().list(idx).items.len();
-            for i in 0..count {
-                let Some(&element) = ctx.heap().list(idx).items.get(i) else {
-                    break; // the block shrank the list past here
-                };
-                match ctx.invoke_block(vec![element])? {
-                    // The block completed (or `continue`d): go to the next element.
-                    BlockResult::Completed => {}
-                    // A `break`/`return` crossed the native boundary (S-46): stop
-                    // iterating and return promptly; the parked exit is resumed at the
-                    // apply site (a `break` completes this `each`, a `return`/outer break
-                    // unwinds past it). The callback must not drive further here.
-                    BlockResult::NonLocalExit => break,
-                    // A nested fault was parked (a limit inside the block, or S-15): stop;
-                    // `step` surfaces it after this call returns.
-                    BlockResult::Halted => break,
+            match ctx.args()[0] {
+                // Iterate a **fixed count** (the length at entry) over the live heap list —
+                // which stays rooted through `each`'s `foreign_roots` entry (MD §15), so the
+                // block's reentrant drive may collect. The fixed count bounds a block that
+                // appends; `.get` guards a block that shrinks the list.
+                Value::List(idx) => {
+                    let count = ctx.heap().list(idx).items.len();
+                    for i in 0..count {
+                        let Some(&element) = ctx.heap().list(idx).items.get(i) else {
+                            break; // the block shrank the list past here
+                        };
+                        if !each_continues(ctx.invoke_block(vec![element])?) {
+                            break;
+                        }
+                    }
+                }
+                // Iterate a string one **extended grapheme cluster** at a time (L§4.4), each
+                // a length-one string. The source string stays rooted (`foreign_roots`), so
+                // its bytes and grapheme memo survive each block's reentrant drive.
+                Value::Str(idx) => {
+                    let count = ctx.heap().grapheme_offsets(idx).len();
+                    for i in 0..count {
+                        let grapheme = extract_grapheme(ctx.heap(), idx, i);
+                        let value = ctx.alloc_string(grapheme);
+                        if !each_continues(ctx.invoke_block(vec![value])?) {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Raise::new(
+                        ExceptionKind::TypeMismatch,
+                        "`each` needs a list or a string to iterate",
+                        ctx.span(),
+                    ));
                 }
             }
             Ok(None)
+        }),
+    }
+}
+
+/// Whether `each` continues to the next element after a block invocation. A normal
+/// completion (fall-off or `continue`) continues; a `break`/`return` across the native
+/// boundary (an S-46 `NonLocalExit`, resumed at the apply site) or a parked fault
+/// (`Halted`, surfaced by `step`) stops the iteration — the callback must not drive on.
+fn each_continues(result: BlockResult) -> bool {
+    matches!(result, BlockResult::Completed)
+}
+
+/// The `i`-th extended grapheme cluster of the string at `idx`, as an owned NFC string (a
+/// slice at cluster boundaries of an NFC string is itself NFC). `i` must be in range.
+fn extract_grapheme(heap: &Heap, idx: crate::machine::StrIdx, i: usize) -> Box<str> {
+    let offsets = heap.grapheme_offsets(idx);
+    let start = offsets[i] as usize;
+    let end = offsets
+        .get(i + 1)
+        .map_or(heap.string(idx).utf8.len(), |&e| e as usize);
+    heap.string(idx).utf8[start..end].into()
+}
+
+/// The provisional demo intrinsic `length` (L§4.4/§4.6/§4.7/§4.5, §15): a `fn` taking one
+/// container and yielding its length as an `Int` — a `String` counts **extended grapheme
+/// clusters** (L§4.4, O(n)), a `List`/`Dict` its elements, `Bytes` its bytes. Superseded by
+/// the standard library's `length` (M9a); a non-container raises `TypeMismatch`.
+pub fn length() -> Intrinsic {
+    Intrinsic {
+        name: "length".into(),
+        kind: BodyKind::Func,
+        params: vec![ForeignParam {
+            name: "value".into(),
+            default: None,
+            is_block: false,
+        }],
+        body: ForeignBody::Sync(|ctx| {
+            let n = match ctx.args()[0] {
+                Value::Str(s) => ctx.heap().grapheme_offsets(s).len(),
+                Value::List(l) => ctx.heap().list(l).items.len(),
+                Value::Dict(d) => ctx.heap().dict(d).entries.len(),
+                Value::Bytes(b) => ctx.heap().byte_string(b).bytes.len(),
+                _ => {
+                    return Err(Raise::new(
+                        ExceptionKind::TypeMismatch,
+                        "`length` needs a string, list, dict, or bytes",
+                        ctx.span(),
+                    ));
+                }
+            };
+            Ok(Some(Value::Int(n as i64)))
         }),
     }
 }

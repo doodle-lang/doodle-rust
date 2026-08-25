@@ -21,15 +21,14 @@
 //! M2b.5; foreign *heap-backed* defaults are S-42/M7 — a default here is an inline
 //! value (the registry is built before the heap exists, so it can hold no heap ref).
 
-use super::call::bind_arguments;
 use super::control::Namespace;
-use super::error::{ExceptionKind, Raise};
+use super::error::Raise;
 use super::frame::BlockDescriptor;
 use super::{Halt, Machine, Value, block, step, unwind};
 use crate::ast::NodeId;
 use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
-use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
+use crate::resolve::{BodyKind, ResolvedModule};
 use crate::span::Span;
 
 /// A parked capability request (engine spec E§7.5, MD §14): a call to a **suspending
@@ -203,6 +202,15 @@ impl IntrinsicCtx<'_> {
         self.heap
     }
 
+    /// Allocates a result string (`utf8` must be NFC, [`StrObj`](crate::heap::StrObj)) and
+    /// returns its value — for an intrinsic that builds a string result (e.g. `each`
+    /// yielding a grapheme). Freshly allocated, so it must be handed straight to
+    /// [`invoke_block`](Self::invoke_block) or returned; there is no GC between here and the
+    /// block's argument binding that roots it.
+    pub(crate) fn alloc_string(&mut self, utf8: Box<str>) -> Value {
+        Value::Str(self.heap.alloc_string(utf8))
+    }
+
     /// The call site's span, for a diagnostic a callback raises.
     pub(crate) fn span(&self) -> Span {
         self.call_span
@@ -340,8 +348,15 @@ pub(crate) fn apply(
     let intrinsic = machine.intrinsics.get(id);
     let body = intrinsic.body.clone();
     let kind = intrinsic.kind;
-    let param_infos = param_infos(&intrinsic.params);
-    let args = bind_foreign_arguments(resolved, heap, call, &intrinsic.params, &arg_values, span)?;
+    let param_infos = binding::param_infos(&intrinsic.params);
+    let args = binding::bind_foreign_arguments(
+        resolved,
+        heap,
+        call,
+        &intrinsic.params,
+        &arg_values,
+        span,
+    )?;
     // Bind the `do … end` block argument to the intrinsic's block parameter, checking
     // consistency (§8.3/§8.5) — reusing the source-callable path: a block passed to a
     // block-less intrinsic raises, and a block parameter with no block raises. `each`
@@ -415,75 +430,14 @@ pub(crate) fn apply(
     }
 }
 
-/// The [`ParamInfo`] view of an intrinsic's parameters (slot = index), for the shared
-/// argument- and block-binding helpers.
-fn param_infos(params: &[ForeignParam]) -> Vec<ParamInfo> {
-    params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| ParamInfo {
-            name: p.name.clone(),
-            slot: i as u16,
-            is_block: p.is_block,
-            has_default: p.default.is_some(),
-        })
-        .collect()
-}
-
-/// Binds call-site arguments to an intrinsic's ordinary parameters (L§8.3), returning
-/// the values in parameter order. Reuses [`bind_arguments`] for the positional/
-/// keyword/too-many/unknown-keyword/duplicate logic (parity with Doodle calls), then
-/// fills each unbound parameter from its inline default or raises a missing-argument
-/// error. A block parameter is not a value here (invoked reentrantly, M2b.5).
-fn bind_foreign_arguments(
-    resolved: &ResolvedModule,
-    heap: &mut Heap,
-    call: NodeId,
-    params: &[ForeignParam],
-    arg_values: &[Value],
-    span: Span,
-) -> Result<Vec<Value>, Raise> {
-    // ParamInfo drives `bind_arguments`; slot = parameter index, so `slots` comes back
-    // in parameter order.
-    let param_infos = param_infos(params);
-    let (slots, filled) = bind_arguments(
-        resolved,
-        heap,
-        call,
-        &param_infos,
-        params.len() as u16,
-        arg_values,
-        span,
-    )?;
-    let mut args = Vec::with_capacity(params.len());
-    for (i, p) in params.iter().enumerate() {
-        // The trailing block parameter is bound separately (invoked reentrantly, MD §14),
-        // never as an ordinary value here.
-        if p.is_block {
-            continue;
-        }
-        let value = match slots[i] {
-            Some(v) => v,
-            None => match (filled[i], p.default) {
-                (false, Some(d)) => d,
-                _ => {
-                    return Err(Raise::new(
-                        ExceptionKind::ArgumentError,
-                        format!("missing argument `{}` for this call", p.name),
-                        span,
-                    ));
-                }
-            },
-        };
-        args.push(value);
-    }
-    Ok(args)
-}
+/// Argument binding for an intrinsic call (`param_infos`, `bind_foreign_arguments`), split
+/// out for length.
+mod binding;
 
 /// The provisional demo intrinsics (`print`, `each`, `read_line`) and the value
 /// renderer, built on the mechanism above. Split out for length.
 mod builtins;
-pub use builtins::{cos, each, print, read_line, sin};
+pub use builtins::{cos, each, length, print, read_line, sin};
 
 /// The M3 platform primitives (`draw_line`/`set_turtle`/`clear_canvas`) the turtle
 /// library draws through — suspending capabilities with no engine-side drawing logic

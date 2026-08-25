@@ -194,8 +194,10 @@ pub(super) fn index_got_object(
     Ok(())
 }
 
-/// An index expression's key is in the register: look it up in the object (L§4.8).
-/// Dicts index by key now; list/string indexing joins the same arm at M4.8.
+/// An index expression's key is in the register: `object[key]` (L§6.3). A `Dict` indexes
+/// by key (absent → `KeyNotFound`); a `List`/`String`/`Bytes` indexes by an `Int` position
+/// in `0 <= k < length` (out of range → `IndexOutOfRange`) — a `String` by extended
+/// grapheme cluster (yielding a length-one string), `Bytes` by byte (yielding an `Int`).
 pub(super) fn index_apply(
     heap: &mut Heap,
     machine: &mut Machine,
@@ -215,6 +217,32 @@ pub(super) fn index_apply(
                 span,
             )),
         },
+        Value::List(l) => {
+            let i = sequence_index(heap, key, heap.list(l).items.len(), span)?;
+            machine.reg = Some(heap.list(l).items[i]);
+            Ok(())
+        }
+        Value::Bytes(b) => {
+            let i = sequence_index(heap, key, heap.byte_string(b).bytes.len(), span)?;
+            machine.reg = Some(Value::Int(heap.byte_string(b).bytes[i] as i64));
+            Ok(())
+        }
+        Value::Str(s) => {
+            let i = sequence_index(heap, key, heap.grapheme_offsets(s).len(), span)?;
+            // The i-th grapheme: the substring between cluster boundaries. It is a slice of
+            // an NFC string at normalization boundaries, so it is itself NFC.
+            let (start, end) = {
+                let offsets = heap.grapheme_offsets(s);
+                let start = offsets[i] as usize;
+                let end = offsets
+                    .get(i + 1)
+                    .map_or(heap.string(s).utf8.len(), |&e| e as usize);
+                (start, end)
+            };
+            let grapheme: Box<str> = heap.string(s).utf8[start..end].into();
+            machine.reg = Some(Value::Str(heap.alloc_string(grapheme)));
+            Ok(())
+        }
         other => Err(Raise::new(
             ExceptionKind::TypeMismatch,
             format!("you can't index {} with `[…]`", compare::kind_name(other)),
@@ -223,12 +251,52 @@ pub(super) fn index_apply(
     }
 }
 
+/// Resolves a sequence index `key` against a container of `length` positions (L§6.3): a
+/// non-negative `Int` in range yields the `usize` position; a negative or too-large `Int`
+/// (or a bignum, which no real container can index) raises `IndexOutOfRange`; a non-`Int`
+/// raises `TypeMismatch`. The out-of-range message branches on sign — a negative index
+/// gets the deliberate no-negative-positions hint (a Python habit).
+fn sequence_index(heap: &Heap, key: Value, length: usize, span: Span) -> Result<usize, Raise> {
+    match key {
+        Value::Int(n) if n >= 0 && (n as u128) < length as u128 => Ok(n as usize),
+        Value::Int(n) => Err(out_of_range(&n.to_string(), n < 0, length, span)),
+        Value::BigInt(idx) => {
+            let value = &heap.bigint(idx).value;
+            let negative = value.sign() == num_bigint::Sign::Minus;
+            Err(out_of_range(&value.to_string(), negative, length, span))
+        }
+        other => Err(Raise::new(
+            ExceptionKind::TypeMismatch,
+            format!(
+                "an index must be a whole number (an Int), not {}",
+                compare::kind_name(other)
+            ),
+            span,
+        )),
+    }
+}
+
+/// The `IndexOutOfRange` raise (L§6.3, S-58), its message branching on sign: a negative
+/// index carries the no-negative-positions hint; a too-large one names the length.
+fn out_of_range(index: &str, negative: bool, length: usize, span: Span) -> Raise {
+    let message = if negative {
+        format!(
+            "there's no position {index} — Doodle has no negative positions; to reach the \
+             last item, use `length - 1`"
+        )
+    } else {
+        format!("there's no position {index} — the length is {length}")
+    };
+    Raise::new(ExceptionKind::IndexOutOfRange, message, span)
+}
+
 /// Completes an index place assignment `object[key] = rhs` (L§5.3): `object` (the
 /// place, no copy) and `key` are passed in; the RHS is in the register. For a dict,
-/// stores `key → rhs` ([`insert`] applies first-key-wins and copies a value-record
-/// RHS for binding). List/string index assignment joins this arm at M4.8, when list
-/// indexing lands; until then a non-dict object raises `TypeMismatch`, matching the
-/// index *read* path ([`index_apply`]). The statement yields Void.
+/// stores `key → rhs` ([`insert`] applies first-key-wins and copies a value-record RHS
+/// for binding). A `String`/`Bytes` is immutable (L§4.4/§4.5) so its index is never an
+/// assignment target; a `List` element assignment (`xs[i] = v`) is a separate, still-
+/// pending list-mutation item — until it lands, a non-dict object raises `TypeMismatch`.
+/// The statement yields Void.
 pub(super) fn index_set(
     resolved: &ResolvedModule,
     heap: &mut Heap,

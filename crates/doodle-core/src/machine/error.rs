@@ -54,6 +54,10 @@ pub enum ExceptionKind {
     UnhashableKey,
     /// A dict was indexed (`d[k]`) with a key it does not contain (L§4.8).
     KeyNotFound,
+    /// A list/string/bytes was indexed outside `0 <= k < length` — too large or negative
+    /// (L§6.3, S-58): both directions are "no such position", one slug. Completes the
+    /// access-miss triad with `KeyNotFound` (dict) and `NoSuchField` (record).
+    IndexOutOfRange,
     /// A field access (`r.name`) named a field the record's type does not declare
     /// (L§9). Records are dynamically typed, so this is a runtime error.
     NoSuchField,
@@ -97,6 +101,7 @@ impl ExceptionKind {
             ExceptionKind::ArgumentError => "argument-error",
             ExceptionKind::UnhashableKey => "unhashable-key",
             ExceptionKind::KeyNotFound => "key-not-found",
+            ExceptionKind::IndexOutOfRange => "index-out-of-range",
             ExceptionKind::NoSuchField => "no-such-field",
             ExceptionKind::NoValueDestination => "no-value-destination",
             ExceptionKind::NegativeCount => "negative-count",

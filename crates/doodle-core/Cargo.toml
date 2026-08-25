@@ -28,6 +28,9 @@ num-integer = "0.1"
 num-traits = "0.2"
 unicode-ident = "1"
 unicode-normalization = "0.1"
+# UAX #29 extended grapheme clusters (AD4, D-M4-3): the third pinned Unicode crate,
+# UCD 17.0 — matching `unicode-normalization` (verified by the cross-check in `unicode.rs`).
+unicode-segmentation = "1"
 
 [dev-dependencies]
 insta = "1"

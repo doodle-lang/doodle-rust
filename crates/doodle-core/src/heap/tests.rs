@@ -30,6 +30,26 @@ fn bytes_allocated_counts_payload_plus_per_object_overhead_across_kinds() {
 }
 
 #[test]
+fn the_grapheme_memo_is_excluded_from_bytes_allocated() {
+    // The lazy grapheme memo is a PURE CACHE (MD §5): building it must not change
+    // `bytes_allocated`, or a host inspection that triggers the build (E§8.4) would shift a
+    // GC/heap-limit trigger point and diverge from an unobserved run (determinism, E§7.7).
+    let mut heap = Heap::new();
+    let s = heap.alloc_string("caf\u{e9} \u{1f1fa}\u{1f1f8}!".into());
+    let before = heap.bytes_allocated();
+    let count = heap.grapheme_offsets(s).len(); // builds the memo
+    assert!(count > 0);
+    assert_eq!(
+        heap.bytes_allocated(),
+        before,
+        "building the grapheme memo must not change bytes_allocated (MD §5)"
+    );
+    // Cached: a second request reuses the memo and still charges nothing.
+    let _ = heap.grapheme_offsets(s);
+    assert_eq!(heap.bytes_allocated(), before);
+}
+
+#[test]
 fn list_push_charges_one_value_width_and_the_sweep_reclaims_it_exactly() {
     let mut heap = Heap::new();
     let l = heap.alloc_list(Vec::new()); // empty: overhead only

@@ -7,17 +7,25 @@
 use crate::machine::{CellIdx, TypeIdx, TypeKind, Value};
 use crate::span::ModuleId;
 use num_bigint::BigInt;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// A string object: its UTF-8 payload, **NFC by construction** (MD §5) — every
-/// construction path (literal decode, concat seam pass, `make_string`) produces
-/// NFC, so consumers never re-normalize. The lazy grapheme memo (MD §5) joins
-/// with the M4 grapheme operations.
+/// construction path (literal decode, concat seam pass, `make_string`) produces NFC, so
+/// consumers never re-normalize.
 #[derive(Clone, Debug)]
 pub struct StrObj {
     /// The NFC UTF-8 bytes.
     pub utf8: Box<str>,
+    /// The lazy grapheme memo (MD §5): the byte offset of each extended-grapheme-cluster
+    /// start (UAX #29), built on the first grapheme operation (`length`, `s[i]`,
+    /// iteration). A **pure cache** — it is **excluded from `bytes_allocated`** (the
+    /// payload charge counts only `utf8`), because a *host inspection* can trigger its
+    /// construction (E§8.4) and an observed run must hit the same GC/heap-limit points as
+    /// an unobserved one (determinism, E§7.7). Interior-mutable so a shared `&StrObj` can
+    /// fill it in place.
+    pub graphemes: OnceCell<Box<[u32]>>,
 }
 
 /// A byte-string object (L§4.5): an immutable sequence of bytes, distinct from a

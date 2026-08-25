@@ -195,10 +195,26 @@ impl Heap {
             unicode_normalization::is_nfc(&utf8),
             "alloc_string requires NFC input (machine-design §5)"
         );
-        let obj = StrObj { utf8 };
+        let obj = StrObj {
+            utf8,
+            graphemes: std::cell::OnceCell::new(),
+        };
         self.charge_object(str_payload(&obj));
         let serial = self.next_serial();
         StrIdx(self.strings.alloc(obj, serial))
+    }
+
+    /// The extended-grapheme-cluster start offsets of the string at `idx` (L§4.4), building
+    /// the lazy grapheme memo (MD §5) on first request. The memo is a **pure cache**
+    /// excluded from [`bytes_allocated`](Self::bytes_allocated) — building it (which a host
+    /// inspection can trigger, E§8.4) must not shift any GC/heap-limit point (E§7.7). The
+    /// grapheme count is the slice length; cluster `i` spans
+    /// `offsets[i] .. offsets.get(i + 1).copied().unwrap_or(utf8.len())`.
+    pub(crate) fn grapheme_offsets(&self, idx: StrIdx) -> &[u32] {
+        let obj = self.string(idx);
+        obj.graphemes
+            .get_or_init(|| crate::unicode::grapheme_offsets(&obj.utf8))
+            .as_ref()
     }
 
     /// Allocates a byte string.

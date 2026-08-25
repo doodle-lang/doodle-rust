@@ -1,0 +1,4 @@
+#! clause: L6.3
+#! mode: run
+#! expect-out: 20
+print([10, 20, 30][1])

@@ -1,0 +1,8 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: 3
+let count = 0
+each("ab\u{1f1fa}\u{1f1f8}") do (g)
+    count = count + 1
+end
+print(count)

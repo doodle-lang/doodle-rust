@@ -1,0 +1,12 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: 4
+#! expect-out: 4
+#! expect-out: 1
+#! expect-out: 1
+#! expect-out: 1
+print(length("caf\u{e9}"))
+print(length("cafe\u{301}"))
+print(length("\u{1f389}"))
+print(length("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"))
+print(length("\u{1f1fa}\u{1f1f8}"))

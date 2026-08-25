@@ -1,0 +1,8 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: a
+#! expect-out: b
+#! expect-out: c
+each("abc") do (g)
+    print(g)
+end
