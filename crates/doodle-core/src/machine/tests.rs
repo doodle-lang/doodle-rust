@@ -1172,7 +1172,7 @@ fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
     );
     inst.machine.unwind = Some(super::unwind::Unwind::Raise {
         value: raised_value,
-        trace: Trace { raised_at: None },
+        trace: Trace::at(None),
     });
     let mut raised = None;
     for _ in 0..100 {
@@ -1228,6 +1228,46 @@ fn an_uncaught_engine_error_describes_with_its_kind_slug() {
             Err(Halt::Raise(value, _)) => {
                 let (kind, _message) = inst.describe_raised(value);
                 assert_eq!(kind, "type-mismatch");
+                return;
+            }
+            Err(other) => panic!("unexpected halt: {other:?}"),
+        }
+    }
+    panic!("the raise never reached the boundary");
+}
+
+// --- M4.5c: trace capture (E§8.2/§9, L§12.1) ---
+
+#[test]
+fn a_raise_in_tail_recursion_captures_frames_and_tail_elided_history() {
+    // `countdown` tail-calls itself (last expression of the last statement), so PTC reuses
+    // one frame; at n == 0 it raises a type error. The trace, captured at the raise, shows
+    // the live frames (one with a nonzero tail_count) and the bounded tail-elided history.
+    let mut inst = load_source(
+        "to countdown(n)\n\
+         if n == 0 then\n\
+         1 + true\n\
+         else\n\
+         countdown(n - 1)\n\
+         end\n\
+         end\n\
+         countdown(5)\n",
+    );
+    for _ in 0..100_000 {
+        match inst.step() {
+            Ok(_) => assert!(!inst.is_halted(), "raised before halting"),
+            Err(Halt::Raise(value, trace)) => {
+                assert_eq!(inst.describe_raised(value).0, "type-mismatch");
+                assert!(!trace.frames.is_empty(), "the trace has live frames");
+                assert!(
+                    trace.frames.iter().any(|f| f.tail_count > 0),
+                    "a tail-reused frame is recorded, got {:?}",
+                    trace.frames
+                );
+                assert!(
+                    !trace.tail_elided.is_empty(),
+                    "the tail-elided history is captured"
+                );
                 return;
             }
             Err(other) => panic!("unexpected halt: {other:?}"),

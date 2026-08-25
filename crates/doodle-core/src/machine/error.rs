@@ -110,15 +110,42 @@ pub struct Exception {
     pub message: String,
 }
 
-/// The trace accompanying a raise (E§8.2/§9), captured at the raise site.
-///
-/// M2a.3a records the raising **position** only; the live-frame list and the
-/// bounded tail-elided history (E§8.3) join with the call stack and unwinder
-/// (M2a.5/M2a.6/M6).
+/// One frame in a raise's captured trace (E§8.2/§9), innermost first: where it was
+/// entered and how many tail-call iterations it absorbed (E§8.3).
+#[derive(Clone, Copy, Debug)]
+pub struct TraceFrame {
+    /// The call-site span the frame was entered at, if any (`None` for the module top
+    /// level and for a block invoked by a native consumer — host code, no call site).
+    pub call_site: Option<Span>,
+    /// Tail-iterations absorbed into this frame by proper-tail-call reuse (E§8.3): `0`
+    /// for a fresh frame, `n` after `n` tail calls reused the same slot.
+    pub tail_count: u64,
+}
+
+/// The trace accompanying a raise (E§8.2/§9), captured **at the raise site**, before any
+/// unwinding (L§12.1): the raising position, the live call stack, and the bounded
+/// tail-elided history. Deterministic (E§11) — a pure function of the machine state.
 #[derive(Clone, Debug)]
 pub struct Trace {
     /// The source span the raise occurred at, if known.
     pub raised_at: Option<Span>,
+    /// The live call stack at the raise (E§8.2), innermost first.
+    pub frames: Vec<TraceFrame>,
+    /// The bounded tail-elided history at the raise (E§8.3), most-recent first: the decl
+    /// span of each callable whose activation a tail call overwrote.
+    pub tail_elided: Vec<Span>,
+}
+
+impl Trace {
+    /// A trace with only its raising position — the live frames and tail-elided history
+    /// are captured (`observe::capture_trace`) when the raise enters the unwind channel.
+    pub(crate) fn at(raised_at: Option<Span>) -> Self {
+        Trace {
+            raised_at,
+            frames: Vec::new(),
+            tail_elided: Vec::new(),
+        }
+    }
 }
 
 /// A raise in flight to the drive boundary: the exception and its trace. Carried
@@ -138,9 +165,7 @@ impl Raise {
                 kind,
                 message: message.into(),
             },
-            trace: Trace {
-                raised_at: Some(span),
-            },
+            trace: Trace::at(Some(span)),
         }
     }
 }

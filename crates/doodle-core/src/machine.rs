@@ -45,7 +45,7 @@ mod value;
 
 pub use boundary::{Kind, ValueError};
 pub(crate) use error::Halt;
-pub use error::{Exception, ExceptionKind, Trace};
+pub use error::{Exception, ExceptionKind, Trace, TraceFrame};
 pub use handle::{Handle, HandleError};
 pub use intrinsic::{
     HostError, Intrinsic, IntrinsicCtx, Registry, clear_canvas as clear_canvas_intrinsic,

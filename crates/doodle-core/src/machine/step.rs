@@ -49,7 +49,7 @@ pub(crate) fn step(
         let settle = match unwind::step(resolved, heap, machine) {
             Ok(settle) => settle,
             Err(raise) => {
-                arm_raise(machine, heap, raise);
+                arm_raise(resolved, machine, heap, raise);
                 return Ok(None);
             }
         };
@@ -106,7 +106,7 @@ pub(crate) fn step(
     // rather than propagating straight to the boundary. An uncaught raise drains the
     // stack and surfaces as the terminal `Raised` in the unwind branch above.
     if let Err(raise) = dispatched {
-        arm_raise(machine, heap, raise);
+        arm_raise(resolved, machine, heap, raise);
         return Ok(None);
     }
     // The frame depth where a safe point fired this transition (for `Step*` anchoring),
@@ -264,7 +264,7 @@ fn dispatch(
         Some(Cont::TryHandler { .. }) => Ok(()),
         // A `raise` throws its operand (or re-raises the handled exception), arming the
         // Raise unwind (protect.rs).
-        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, machine, raise),
+        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, heap, machine, raise),
         // A rescue body finished normally: pop the exception it was handling (L§12.2).
         Some(Cont::PopHandler) => {
             machine.pop_handling();
@@ -395,17 +395,23 @@ fn return_from_top_frame(machine: &mut Machine) {
 /// surfaced during a transition, replacing any current transfer: the raise's kind +
 /// message **materialize** an `Error` record value (L§12.1), and the unwinder then walks
 /// the frames running `WithRestore` cleanup and seeking a `TryHandler`.
-pub(crate) fn arm_raise(machine: &mut Machine, heap: &mut Heap, raise: Raise) {
+pub(crate) fn arm_raise(
+    resolved: &ResolvedModule,
+    machine: &mut Machine,
+    heap: &mut Heap,
+    raise: Raise,
+) {
+    // Capture the trace from the raise-site frames before materializing anything (L§12.1:
+    // captured at the point of raise). The Rust `?` that surfaced the raise did not touch
+    // the CESK frames, so they still reflect the raise site.
+    let trace = super::observe::capture_trace(resolved, heap, machine, raise.trace.raised_at);
     let value = super::exception::make_error(
         heap,
         machine.error_type,
         raise.exception.kind.slug(),
         &raise.exception.message,
     );
-    machine.unwind = Some(unwind::Unwind::Raise {
-        value,
-        trace: raise.trace,
-    });
+    machine.unwind = Some(unwind::Unwind::Raise { value, trace });
 }
 
 /// Takes the in-flight Raise unwind's value + trace and clears the transfer — for the

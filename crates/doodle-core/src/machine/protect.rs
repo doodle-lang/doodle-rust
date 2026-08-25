@@ -100,19 +100,21 @@ pub(crate) fn catch(
 /// handled — the top of the handling stack — with its **original** trace.
 pub(crate) fn raise_apply(
     resolved: &ResolvedModule,
+    heap: &Heap,
     machine: &mut Machine,
     node: NodeId,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(node);
     let (value, trace) = match resolved.ast.node(node) {
-        Node::Raise(Some(_)) => (
-            take_value(machine, span)?,
-            Trace {
-                raised_at: Some(span),
-            },
-        ),
-        // A bare `raise` is valid only inside a rescue body (L§12.1); the handling stack
-        // is non-empty there.
+        Node::Raise(Some(_)) => {
+            // `raise value`: throw the evaluated value with a trace captured here.
+            let value = take_value(machine, span)?;
+            let trace = super::observe::capture_trace(resolved, heap, machine, Some(span));
+            (value, trace)
+        }
+        // A bare `raise` re-raises the exception being handled, with its **original**
+        // trace (L§12.1). Valid only inside a rescue body, so the handling stack is
+        // non-empty there.
         Node::Raise(None) => machine
             .current_handling()
             .expect("a bare `raise` outside a rescue body"),

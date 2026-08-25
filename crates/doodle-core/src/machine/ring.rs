@@ -60,4 +60,12 @@ impl RingBuffer {
     pub(crate) fn callables(&self) -> impl Iterator<Item = CalIdx> + '_ {
         self.entries.iter().map(|e| e.callable)
     }
+
+    /// The retained elided callables **most-recent first** (E§8.3), for a raise trace
+    /// (L§12.1). Walks back from the last write position, wrapping — so a debugger sees
+    /// the frames a tail loop overwrote in reverse chronological order.
+    pub(crate) fn most_recent_first(&self) -> impl Iterator<Item = CalIdx> + '_ {
+        let n = self.entries.len();
+        (0..n).map(move |i| self.entries[(self.next + n - 1 - i) % n].callable)
+    }
 }

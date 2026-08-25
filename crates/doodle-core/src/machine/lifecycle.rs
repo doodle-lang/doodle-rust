@@ -4,7 +4,6 @@
 //! definition and load path) so that file stays within the hygiene length limit; the
 //! drive loop that calls these lives in [`crate::drive`].
 
-use super::error::Trace;
 use super::handle::HandleError;
 use super::{Handle, Instance, Value};
 use crate::drive::{CapabilityId, CapabilityRequest, Directive};
@@ -87,12 +86,13 @@ impl Instance {
         // still clear the suspension so the drive can fault it terminally.
         let pending = self.machine.pending.take().expect("a parked request");
         let value = self.machine.handles.resolve(handle)?;
-        self.machine.arm_raise_value(
-            value,
-            Trace {
-                raised_at: Some(pending.span),
-            },
+        let trace = super::observe::capture_trace(
+            &self.resolved,
+            &self.heap,
+            &self.machine,
+            Some(pending.span),
         );
+        self.machine.arm_raise_value(value, trace);
         Ok(())
     }
 
