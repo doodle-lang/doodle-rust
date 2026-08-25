@@ -17,9 +17,8 @@ use doodle_core::drive::{
     Directive, EngineFault, LimitKind, Outcome, PauseReason, Resolution, resolve_slice, run_slice,
 };
 use doodle_core::machine::{
-    ExceptionKind, Handle, HandleError, Instance, Kind, Registry, ValueError,
-    clear_canvas_intrinsic, cos_intrinsic, draw_line_intrinsic, print_intrinsic,
-    set_turtle_intrinsic, sin_intrinsic,
+    Handle, HandleError, Instance, Kind, Registry, ValueError, clear_canvas_intrinsic,
+    cos_intrinsic, draw_line_intrinsic, print_intrinsic, set_turtle_intrinsic, sin_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -64,10 +63,12 @@ pub enum DriveOutcome {
     /// Stopped at a safe point (`"slice-end"`, `"step"`, `"breakpoint"`, `"raise-trap"`,
     /// `"host-pause"`); `"slice-end"` is the pump's resumable yield.
     Paused(&'static str),
-    /// An uncaught Doodle exception reached the boundary.
+    /// An uncaught Doodle exception reached the boundary (E§9): the raised value's
+    /// described `kind`/`message` (an `Error` record's own fields, or `"raised"` for any
+    /// other value).
     Raised {
-        /// The exception kind, kebab-cased.
-        kind: &'static str,
+        /// The exception kind, kebab-cased (the `Error`'s `kind`, or `"raised"`).
+        kind: String,
         /// The exception message.
         message: String,
         /// The raising site's byte span in the module source, if known.
@@ -149,7 +150,7 @@ impl Session {
     /// starting or resuming from a `Paused`; the pump's slice step.
     pub fn drive(&mut self, fuel: Option<u64>) -> DriveOutcome {
         let outcome = run_slice(&mut self.instance, Directive::RunToCompletion, fuel);
-        to_drive_outcome(outcome)
+        to_drive_outcome(&self.instance, outcome)
     }
 
     /// Resolves a pending capability with a host value (or a raise), then resumes the
@@ -163,7 +164,7 @@ impl Session {
             Resolution::Value(value)
         };
         let outcome = resolve_slice(&mut self.instance, resolution, fuel);
-        to_drive_outcome(outcome)
+        to_drive_outcome(&self.instance, outcome)
     }
 
     /// Requests cancellation (E§10.1); the next safe point faults `Cancelled`. In the
@@ -280,8 +281,9 @@ fn errors_of(diagnostics: &[doodle_core::diag::Diagnostic]) -> Option<LoadError>
     })
 }
 
-/// Maps a drive [`Outcome`] to the facade's string-tagged [`DriveOutcome`].
-fn to_drive_outcome(outcome: Outcome) -> DriveOutcome {
+/// Maps a drive [`Outcome`] to the facade's string-tagged [`DriveOutcome`]. Takes the
+/// `instance` so a `Raised` value can be described (its `Error` `kind`/`message`, E§9).
+fn to_drive_outcome(instance: &Instance, outcome: Outcome) -> DriveOutcome {
     match outcome {
         Outcome::Completed(_) => DriveOutcome::Completed,
         Outcome::Suspended(request) => DriveOutcome::Suspended {
@@ -289,11 +291,14 @@ fn to_drive_outcome(outcome: Outcome) -> DriveOutcome {
             args: request.args,
         },
         Outcome::Paused(reason) => DriveOutcome::Paused(pause_tag(reason)),
-        Outcome::Raised(exception, trace) => DriveOutcome::Raised {
-            kind: exception_tag(exception.kind),
-            message: exception.message,
-            span: trace.raised_at,
-        },
+        Outcome::Raised(value, trace) => {
+            let (kind, message) = instance.describe_raised(value);
+            DriveOutcome::Raised {
+                kind,
+                message,
+                span: trace.raised_at,
+            }
+        }
         Outcome::Faulted(fault) => DriveOutcome::Faulted(fault_tag(fault)),
     }
 }
@@ -317,27 +322,6 @@ fn fault_tag(fault: EngineFault) -> &'static str {
         EngineFault::Cancelled => "cancelled",
         EngineFault::NestedSuspend => "nested-suspend",
         EngineFault::Internal => "internal",
-    }
-}
-
-fn exception_tag(kind: ExceptionKind) -> &'static str {
-    match kind {
-        ExceptionKind::TypeMismatch => "type-mismatch",
-        ExceptionKind::DivisionByZero => "division-by-zero",
-        ExceptionKind::NonFiniteFloat => "non-finite-float",
-        ExceptionKind::UndefinedOrdering => "undefined-ordering",
-        ExceptionKind::ProcedureInExpression => "procedure-in-expression",
-        ExceptionKind::NameNotDefined => "name-not-defined",
-        ExceptionKind::UsedBeforeDefined => "used-before-defined",
-        ExceptionKind::ExponentTooLarge => "exponent-too-large",
-        ExceptionKind::NotCallable => "not-callable",
-        ExceptionKind::ArgumentError => "argument-error",
-        ExceptionKind::UnhashableKey => "unhashable-key",
-        ExceptionKind::KeyNotFound => "key-not-found",
-        ExceptionKind::NoSuchField => "no-such-field",
-        ExceptionKind::NoValueDestination => "no-value-destination",
-        ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
-        ExceptionKind::HostRaised => "host-raised",
     }
 }
 

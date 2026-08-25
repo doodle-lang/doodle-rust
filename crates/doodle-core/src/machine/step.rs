@@ -11,10 +11,11 @@
 
 use super::cont::Cont;
 use super::control::{self, Namespace};
-use super::error::{ExceptionKind, Raise};
+use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::{Frame, FrameKind};
 use super::{
-    Halt, Machine, Value, arith, block, call, compare, dict, eval, limits, record, types, unwind,
+    Halt, Machine, Value, arith, block, call, compare, dict, eval, limits, protect, record, types,
+    unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -48,7 +49,7 @@ pub(crate) fn step(
         let settle = match unwind::step(resolved, heap, machine) {
             Ok(settle) => settle,
             Err(raise) => {
-                arm_raise(machine, raise);
+                arm_raise(machine, heap, raise);
                 return Ok(None);
             }
         };
@@ -63,7 +64,8 @@ pub(crate) fn step(
         // reaches the outermost boundary as the terminal `Raised` outcome (E§9).
         if machine.frames.is_empty() && matches!(machine.unwind, Some(unwind::Unwind::Raise { .. }))
         {
-            return Err(Halt::Raise(take_raise(machine)));
+            let (value, trace) = take_raise(machine);
+            return Err(Halt::Raise(value, trace));
         }
         return match settle {
             Some(depth) => {
@@ -104,7 +106,7 @@ pub(crate) fn step(
     // rather than propagating straight to the boundary. An uncaught raise drains the
     // stack and surfaces as the terminal `Raised` in the unwind branch above.
     if let Err(raise) = dispatched {
-        arm_raise(machine, raise);
+        arm_raise(machine, heap, raise);
         return Ok(None);
     }
     // The frame depth where a safe point fired this transition (for `Step*` anchoring),
@@ -260,6 +262,14 @@ fn dispatch(
         // A `try` body completed normally: its handler is not run, and the body's value
         // is the `try`'s value (already in the register). Discard the handler cont.
         Some(Cont::TryHandler { .. }) => Ok(()),
+        // A `raise` throws its operand (or re-raises the handled exception), arming the
+        // Raise unwind (protect.rs).
+        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, machine, raise),
+        // A rescue body finished normally: pop the exception it was handling (L§12.2).
+        Some(Cont::PopHandler) => {
+            machine.pop_handling();
+            Ok(())
+        }
         Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
         // The frame's work is drained: return from it.
@@ -351,6 +361,16 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
                 frame.conts.push(Cont::Eval { node: *operand });
             }
         }
+        // A `try`: run the protected body under a `TryHandler` (protect.rs).
+        Node::Try { .. } => protect::schedule_try(frame, resolved, stmt),
+        // A `raise` (L§12.1): evaluate its operand (if any), then throw. A bare `raise`
+        // re-raises the exception being handled (RaiseApply, protect.rs).
+        Node::Raise(op) => {
+            frame.conts.push(Cont::RaiseApply { raise: stmt });
+            if let Some(operand) = op {
+                frame.conts.push(Cont::Eval { node: *operand });
+            }
+        }
         other => unimplemented!("statement not yet in the machine (M4+): {other:?}"),
     }
 }
@@ -371,21 +391,28 @@ fn return_from_top_frame(machine: &mut Machine) {
     }
 }
 
-/// Arms an in-flight **Raise unwind** (machine-design §12) from a raise that surfaced
-/// during a transition, replacing any current transfer: the unwinder then walks the
-/// frames running `WithRestore` cleanup and seeking a `TryHandler`.
-fn arm_raise(machine: &mut Machine, raise: Raise) {
+/// Arms an in-flight **Raise unwind** (machine-design §12) from an engine raise that
+/// surfaced during a transition, replacing any current transfer: the raise's kind +
+/// message **materialize** an `Error` record value (L§12.1), and the unwinder then walks
+/// the frames running `WithRestore` cleanup and seeking a `TryHandler`.
+pub(crate) fn arm_raise(machine: &mut Machine, heap: &mut Heap, raise: Raise) {
+    let value = super::exception::make_error(
+        heap,
+        machine.error_type,
+        raise.exception.kind.slug(),
+        &raise.exception.message,
+    );
     machine.unwind = Some(unwind::Unwind::Raise {
-        exception: raise.exception,
+        value,
         trace: raise.trace,
     });
 }
 
-/// Takes the in-flight Raise unwind's exception + trace back into a [`Raise`] and clears
-/// the transfer — for the drained, uncaught raise reaching the boundary.
-fn take_raise(machine: &mut Machine) -> Raise {
+/// Takes the in-flight Raise unwind's value + trace and clears the transfer — for the
+/// drained, uncaught raise reaching the boundary.
+fn take_raise(machine: &mut Machine) -> (Value, Trace) {
     match machine.unwind.take() {
-        Some(unwind::Unwind::Raise { exception, trace }) => Raise { exception, trace },
+        Some(unwind::Unwind::Raise { value, trace }) => (value, trace),
         _ => unreachable!("take_raise with no in-flight raise"),
     }
 }

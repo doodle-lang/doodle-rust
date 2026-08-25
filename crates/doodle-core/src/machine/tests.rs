@@ -673,7 +673,7 @@ fn drive_to_fault(inst: &mut Instance) -> EngineFault {
         assert!(!inst.is_halted(), "completed without faulting");
         match inst.step() {
             Ok(_) => {}
-            Err(Halt::Raise(r)) => panic!("unexpected raise: {r:?}"),
+            Err(Halt::Raise(v, _)) => panic!("unexpected raise: {v:?}"),
             Err(Halt::Fault(f)) => return f,
         }
         steps += 1;
@@ -845,7 +845,7 @@ fn a_retained_handle_keeps_its_value_alive_across_collection() {
 #[derive(PartialEq, Eq, Debug)]
 enum Terminal {
     Value(ValueRepr),
-    Raised(ExceptionKind),
+    Raised(String),
     Faulted(crate::drive::EngineFault),
 }
 
@@ -892,7 +892,7 @@ fn drive_terminal(inst: &mut Instance, force_gc: bool) -> Terminal {
         }
         match inst.step() {
             Ok(_) => {}
-            Err(Halt::Raise(raise)) => return Terminal::Raised(raise.exception.kind),
+            Err(Halt::Raise(value, _)) => return Terminal::Raised(inst.describe_raised(value).0),
             Err(Halt::Fault(fault)) => return Terminal::Faulted(fault),
         }
         steps += 1;
@@ -1164,30 +1164,74 @@ fn cancellation_runs_withrestore_as_it_unwinds() {
 fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
     let mut inst = load_source("let x = 1\n");
     let cell = simulate_with(&mut inst, Value::Int(10), Value::Int(99));
+    let raised_value = super::exception::make_error(
+        &mut inst.heap,
+        inst.machine.error_type,
+        "type-mismatch",
+        "boom",
+    );
     inst.machine.unwind = Some(super::unwind::Unwind::Raise {
-        exception: Exception {
-            kind: ExceptionKind::TypeMismatch,
-            message: "boom".into(),
-        },
+        value: raised_value,
         trace: Trace { raised_at: None },
     });
     let mut raised = None;
     for _ in 0..100 {
         match inst.step() {
             Ok(_) => {}
-            Err(Halt::Raise(r)) => {
-                raised = Some(r);
+            Err(Halt::Raise(value, _)) => {
+                raised = Some(value);
                 break;
             }
             Err(other) => panic!("unexpected halt during raise: {other:?}"),
         }
     }
     let raised = raised.expect("the uncaught raise reached the boundary");
-    assert_eq!(raised.exception.message, "boom", "exception preserved");
+    let (kind, message) = inst.describe_raised(raised);
+    assert_eq!((kind.as_str(), message.as_str()), ("type-mismatch", "boom"));
     assert_eq!(
         cell_int(&inst, cell),
         Some(10),
         "raise restored the binding"
     );
     assert!(inst.machine.dyn_stack.is_empty(), "dyn stack drained");
+}
+
+// --- M4.5b: exceptions-as-values at the boundary (L§12.1, E§9) ---
+
+#[test]
+fn a_user_raised_string_describes_as_the_generic_raised_kind() {
+    // `raise value` with a non-`Error` value: the boundary reports kind `"raised"` and
+    // the value's own rendering (a string renders as its contents).
+    let mut inst = load_source("raise \"nope\"\n");
+    for _ in 0..100 {
+        match inst.step() {
+            Ok(_) => assert!(!inst.is_halted(), "raised before halting"),
+            Err(Halt::Raise(value, _)) => {
+                let (kind, message) = inst.describe_raised(value);
+                assert_eq!((kind.as_str(), message.as_str()), ("raised", "nope"));
+                return;
+            }
+            Err(other) => panic!("unexpected halt: {other:?}"),
+        }
+    }
+    panic!("the raise never reached the boundary");
+}
+
+#[test]
+fn an_uncaught_engine_error_describes_with_its_kind_slug() {
+    // An engine raise materializes an `Error` record; the boundary reads its own
+    // `kind`/`message` fields (L§12.1).
+    let mut inst = load_source("1 + true\n");
+    for _ in 0..100 {
+        match inst.step() {
+            Ok(_) => assert!(!inst.is_halted(), "raised before halting"),
+            Err(Halt::Raise(value, _)) => {
+                let (kind, _message) = inst.describe_raised(value);
+                assert_eq!(kind, "type-mismatch");
+                return;
+            }
+            Err(other) => panic!("unexpected halt: {other:?}"),
+        }
+    }
+    panic!("the raise never reached the boundary");
 }

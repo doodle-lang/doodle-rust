@@ -1,0 +1,10 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: my-error
+#! expect-out: oops
+try
+  raise Error(kind: "my-error", message: "oops", details: {})
+rescue e
+  print(e.kind)
+  print(e.message)
+end

@@ -14,7 +14,7 @@
 //! (M4.6) and the `try`/`rescue` handler binding (M4.5b) fill in the conts' producers;
 //! M4.5a builds the mechanism and routes raises through this channel.
 
-use super::error::{Exception, ExceptionKind, Raise, Trace};
+use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::Consumer;
 use super::step::take_value;
 use super::{Machine, Value};
@@ -98,13 +98,13 @@ pub(crate) enum Unwind {
     /// A **raise** in flight (machine-design §12; L§12): unwind every frame toward the
     /// nearest [`TryHandler`](super::cont::Cont::TryHandler) — the one genuinely dynamic
     /// target — running each [`WithRestore`](super::cont::Cont::WithRestore) as it pops.
-    /// Carries the exception and trace captured at the raise site. A handler catches it;
-    /// uncaught, it drains the whole stack and `step` reports the terminal `Raised`
-    /// outcome. (The exception is host-facing kind+message today; it becomes a Doodle
-    /// **value** — and thus a GC root — at M4.5b.)
+    /// Carries the raised **value** and the trace captured at the raise site. A handler
+    /// catches it; uncaught, it drains the whole stack and `step` reports the terminal
+    /// `Raised` outcome. The value is an `Error` record for an engine raise (materialized
+    /// as the raise enters the channel), or any value a program `raise`d (L§12.1).
     Raise {
-        /// The raised exception (E§9).
-        exception: Exception,
+        /// The raised value (E§9) — a GC root.
+        value: Value,
         /// The trace captured at the raise site (E§8.2).
         trace: Trace,
     },
@@ -121,12 +121,9 @@ impl Unwind {
             | Unwind::BlockBreak { value, .. }
             | Unwind::Return { value, .. }
             | Unwind::NativeBreak { value, .. } => *value,
-            // A `Raise`'s exception is host-facing kind+message (no heap value) until
-            // exceptions-as-values (M4.5b), when this arm returns the exception value.
-            Unwind::LoopBreak { .. }
-            | Unwind::LoopContinue { .. }
-            | Unwind::Cancel
-            | Unwind::Raise { .. } => None,
+            // The raised value stays reachable while the raise is in flight (E§9).
+            Unwind::Raise { value, .. } => Some(*value),
+            Unwind::LoopBreak { .. } | Unwind::LoopContinue { .. } | Unwind::Cancel => None,
         }
     }
 }

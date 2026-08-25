@@ -302,7 +302,14 @@ impl IntrinsicCtx<'_> {
                         return Ok(BlockResult::Halted);
                     }
                 }
-                Err(Halt::Raise(raise)) => return Err(raise),
+                // A raise now unwinds through the frame channel (machine-design §12): it
+                // pops toward this native `boundary` and is reported as `NonLocalExit`
+                // (parked) at the `frames.len() <= boundary` check above, then continues
+                // in the outer drive. Because `boundary >= 1`, it never drains the stack to
+                // empty here, so `step` never returns `Halt::Raise` inside a nested drive.
+                Err(Halt::Raise(..)) => {
+                    unreachable!("a nested-drive raise unwinds to the boundary, not to Halt::Raise")
+                }
                 Err(Halt::Fault(fault)) => {
                     self.machine.reentry_fault = Some(fault);
                     return Ok(BlockResult::Halted);
@@ -474,10 +481,8 @@ fn bind_foreign_arguments(
 }
 
 /// The provisional demo intrinsics (`print`, `each`, `read_line`) and the value
-/// renderer, built on the mechanism above. Split out for length; re-exported so hosts
-/// and `resolve(Raise)` reach them at the `intrinsic::` path.
+/// renderer, built on the mechanism above. Split out for length.
 mod builtins;
-pub(crate) use builtins::render;
 pub use builtins::{cos, each, print, read_line, sin};
 
 /// The M3 platform primitives (`draw_line`/`set_turtle`/`clear_canvas`) the turtle

@@ -72,8 +72,11 @@ pub(super) fn raise_unwind(resolved: &ResolvedModule, heap: &mut Heap, machine: 
         };
         match cont {
             Cont::WithRestore { dyn_mark } => restore(machine, heap, dyn_mark),
+            // A rescue body abandoned mid-raise pops its handling entry (L§12.2), like a
+            // `WithRestore` — the raise punches through an inner `try`'s handler.
+            Cont::PopHandler => machine.pop_handling(),
             Cont::TryHandler { try_node } => {
-                try_catch(resolved, machine, try_node);
+                try_catch(resolved, heap, machine, try_node);
                 return;
             }
             _ => {} // discarded inertly
@@ -81,15 +84,13 @@ pub(super) fn raise_unwind(resolved: &ResolvedModule, heap: &mut Heap, machine: 
     }
 }
 
-/// Catches a raise at a [`TryHandler`](Cont::TryHandler) (machine-design §12): stops the
-/// unwind and hands off to the rescue handler.
-///
-/// **M4.5a** installs the recognition seam — it clears the in-flight raise so unwinding
-/// halts at this frame (the `TryHandler`'s frame, whose remaining conts stay in place).
-/// **M4.5b** fills in binding the caught exception value to the `Try`'s `rescue_name`
-/// and entering `rescue_body`, leaving its value in the register as the `try`'s value.
-/// There is no `try` producer until M4.5b, so this is reached only via a direct test.
-fn try_catch(_resolved: &ResolvedModule, machine: &mut Machine, _try_node: NodeId) {
-    machine.unwind = None;
-    // M4.5b: bind `rescue_name` = the caught exception value, then run `rescue_body`.
+/// Catches a raise at a [`TryHandler`](Cont::TryHandler) (machine-design §12, L§12.2):
+/// takes the raised value + trace off the in-flight raise, clears it (the unwind stops
+/// here), and hands them to [`protect::catch`](super::super::protect::catch), which binds
+/// the rescue variable and schedules the rescue body.
+fn try_catch(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, try_node: NodeId) {
+    let Some(super::Unwind::Raise { value, trace }) = machine.unwind.take() else {
+        unreachable!("a TryHandler is reached only while a raise is in flight");
+    };
+    super::super::protect::catch(resolved, heap, machine, try_node, value, trace);
 }

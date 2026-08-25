@@ -4,9 +4,9 @@
 //! definition and load path) so that file stays within the hygiene length limit; the
 //! drive loop that calls these lives in [`crate::drive`].
 
-use super::error::{Exception, ExceptionKind, Trace};
+use super::error::Trace;
 use super::handle::HandleError;
-use super::{Handle, Instance, intrinsic};
+use super::{Handle, Instance, Value};
 use crate::drive::{CapabilityId, CapabilityRequest, Directive};
 use crate::resolve::BodyKind;
 
@@ -77,29 +77,30 @@ impl Instance {
         Ok(())
     }
 
-    /// Resolves a suspension with a host raise (E§7.5): clears the pending request and
-    /// builds the exception + trace to surface as `Raised` at the capability call site.
-    /// **Provisional (M2b.4):** the host-raised value is rendered into the message; the
-    /// value-carrying exception that `rescue` binds arrives with exceptions-as-values
-    /// (M4, E§9). Errors on a stale handle.
-    pub(crate) fn resume_with_raise(
-        &mut self,
-        handle: Handle,
-    ) -> Result<(Exception, Trace), HandleError> {
+    /// Resolves a suspension with a host raise (E§7.5/§9): clears the pending request and
+    /// **arms a Raise unwind** carrying the host-supplied value at the capability call
+    /// site. The value *is* the raised exception (a program `rescue e` binds it as-is);
+    /// re-driving runs cleanup and lets a `try` around the call catch it, or drains to the
+    /// terminal `Raised`. Errors on a stale handle.
+    pub(crate) fn resume_with_raise(&mut self, handle: Handle) -> Result<(), HandleError> {
         // Take the pending request first (see `resume_with_value`): a stale handle must
         // still clear the suspension so the drive can fault it terminally.
         let pending = self.machine.pending.take().expect("a parked request");
         let value = self.machine.handles.resolve(handle)?;
-        let rendered = intrinsic::render(&self.heap, value);
-        let exception = Exception {
-            kind: ExceptionKind::HostRaised,
-            message: format!("a capability call was rejected by the host: {rendered}"),
-        };
-        Ok((
-            exception,
+        self.machine.arm_raise_value(
+            value,
             Trace {
                 raised_at: Some(pending.span),
             },
-        ))
+        );
+        Ok(())
+    }
+
+    /// Describes a raised value for host display (E§9): its `(kind_slug, message)`. An
+    /// `Error` record reports its own `kind`/`message` fields; any other raised value the
+    /// generic `"raised"` with a best-effort message. For a host mapping an
+    /// [`Outcome::Raised`](crate::drive::Outcome::Raised) to a diagnostic.
+    pub fn describe_raised(&self, value: Value) -> (String, String) {
+        super::exception::describe(&self.heap, self.machine.error_type, value)
     }
 }

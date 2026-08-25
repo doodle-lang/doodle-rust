@@ -1,0 +1,11 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: caught
+to boom()
+  raise "kaboom"
+end
+try
+  boom()
+rescue e
+  print("caught")
+end

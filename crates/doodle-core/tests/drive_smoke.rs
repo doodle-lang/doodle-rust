@@ -78,7 +78,10 @@ fn drives_a_multi_statement_program_to_void_completion() {
 fn assert_raises(src: &str, kind: ExceptionKind) {
     let mut inst = instance(src);
     match run(&mut inst, Directive::RunToCompletion) {
-        Outcome::Raised(exception, _trace) => assert_eq!(exception.kind, kind),
+        Outcome::Raised(value, _trace) => {
+            let (slug, _) = inst.describe_raised(value);
+            assert_eq!(slug, kind.slug());
+        }
         other => panic!("expected Raised({kind:?}), got {other:?}"),
     }
 }

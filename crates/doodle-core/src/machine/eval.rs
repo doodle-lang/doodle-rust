@@ -8,7 +8,7 @@ use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::Raise;
 use super::step::take_value;
-use super::{Machine, Value, arith, call, compare, dict, record};
+use super::{Machine, Value, arith, call, compare, dict, protect, record};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -135,6 +135,13 @@ pub(super) fn eval(
         Node::If { .. } => {
             let frame = machine.frames.last_mut().expect("eval with no frame");
             control::schedule_if(frame, resolved, node);
+            return Ok(());
+        }
+        // `try` in expression position (L§6.9): its value is the protected body's value,
+        // or the rescue body's if it caught. Same machinery as the statement form.
+        Node::Try { .. } => {
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            protect::schedule_try(frame, resolved, node);
             return Ok(());
         }
         Node::Binary { op, lhs, rhs } => {

@@ -6,7 +6,7 @@
 //! outcomes' payloads (suspension, raise, fault) are shells the later M2a/M2b
 //! chunks fill in.
 
-use crate::machine::{Exception, Halt, Handle, Instance, InstanceState, Trace, Value};
+use crate::machine::{Halt, Handle, Instance, InstanceState, Trace, Value};
 use crate::unicode::UnicodeVersion;
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
@@ -36,8 +36,10 @@ pub enum Outcome {
     Suspended(CapabilityRequest),
     /// Execution stopped at a safe point for observation.
     Paused(PauseReason),
-    /// An uncaught exception reached the boundary.
-    Raised(Exception, Trace),
+    /// An uncaught exception reached the boundary (E§9): the raised **value** (an
+    /// `Error` record for an engine raise, or any value a program `raise`d) and its
+    /// trace. Describe it for display with [`Instance::describe_raised`].
+    Raised(Value, Trace),
     /// A limit, cancellation, nested-suspend, or internal fault stopped execution.
     Faulted(EngineFault),
 }
@@ -277,24 +279,19 @@ pub fn resolve_slice(
             // `Faulted` — a `Faulted` outcome always implies `state() == Faulted` (E§3.3).
             Err(_) => fault(instance),
         },
-        // The host rejected the capability: raise at its call site. No handlers yet
-        // (`try`/`rescue` is M4), so it reaches the boundary → the terminal `Raised` state
-        // (E§3.3), like any uncaught raise — **unless a cancellation is pending**: a cancel
-        // with program work still ahead wins over a host raise (E§10.1, S-23). The raise arm
-        // never drives, so unlike the value arm it cannot reap a cancel at a safe point;
-        // discard the rejection and tear the stack down to `Faulted(Cancelled)`. The raise
-        // never surfaces, and — unlike unsticking with a fabricated value — the parked call's
-        // continuation never runs, so the discarded resolution has no program-visible effect.
+        // The host rejected the capability: arm a raise carrying the host's value at the
+        // call site and re-drive, so it unwinds through the frames running cleanup and a
+        // `try` around the capability call can catch it (L§12), or it drains to the
+        // terminal `Raised` state (E§3.3) — **unless a cancellation is pending**: a cancel
+        // with program work still ahead wins over a host raise (E§10.1, S-23), so discard
+        // the rejection and tear the stack down to `Faulted(Cancelled)` instead.
         Resolution::Raise(handle) => {
             if instance.cancel_requested() {
                 instance.discard_pending_and_cancel();
                 return drive(instance, instance.resume_directive(), fuel);
             }
             match instance.resume_with_raise(handle) {
-                Ok((exception, trace)) => {
-                    instance.set_state(InstanceState::Raised);
-                    Outcome::Raised(exception, trace)
-                }
+                Ok(()) => drive(instance, instance.resume_directive(), fuel),
                 Err(_) => fault(instance),
             }
         }
@@ -351,9 +348,9 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
             // An uncaught raise reached the outermost boundary (no handlers yet;
             // `try`/`rescue` is M4). The instance enters the terminal `Raised` state
             // (E§3.3/§9), distinct from `Faulted`; the outcome carries exception + trace.
-            Err(Halt::Raise(raise)) => {
+            Err(Halt::Raise(value, trace)) => {
                 instance.set_state(InstanceState::Raised);
-                return Outcome::Raised(raise.exception, raise.trace);
+                return Outcome::Raised(value, trace);
             }
             // A resource limit (E§10.2), host cancellation (E§10.1), or the S-15
             // `NestedSuspend` relayed from a native consumer's reentrant drive (§7.6): a

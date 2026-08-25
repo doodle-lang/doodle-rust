@@ -289,12 +289,21 @@ pub(crate) enum Cont {
     /// the `try`'s value). Only a **raise** unwind stops here — binding the exception
     /// and entering the rescue body. The bind-and-enter is M4.5b; M4.5a adds the cont
     /// and the unwinder's recognition of it as the raise catch-point.
-    // Constructed by the `try` producer (M4.5b); the M4.5a mechanism matches it only.
-    #[allow(dead_code)]
     TryHandler {
-        /// The `Try` node (its `rescue_name`/`rescue_body` drive the M4.5b catch).
+        /// The `Try` node (its `rescue_name`/`rescue_body` drive the catch).
         try_node: NodeId,
     },
+    /// A `raise`'s operand (if any) is now in the register: throw it (L§12.1). `raise
+    /// value` arms a Raise unwind carrying the value; a bare `raise` re-raises the
+    /// exception currently being handled, with its original trace.
+    RaiseApply {
+        /// The `Raise` node (its operand-or-not and span).
+        raise: NodeId,
+    },
+    /// **Cleanup** (L§12.2): pop the exception being handled off the handling stack, as a
+    /// rescue body finishes — normally, or (like [`WithRestore`](Cont::WithRestore)) as a
+    /// raise unwinds past it. So a bare re-raise resolves against the correct exception.
+    PopHandler,
 }
 
 impl Cont {
@@ -353,7 +362,9 @@ impl Cont {
             | Cont::ReturnBarrier
             | Cont::ExitApply { .. }
             | Cont::WithRestore { .. }
-            | Cont::TryHandler { .. } => {}
+            | Cont::TryHandler { .. }
+            | Cont::RaiseApply { .. }
+            | Cont::PopHandler => {}
         }
     }
 }

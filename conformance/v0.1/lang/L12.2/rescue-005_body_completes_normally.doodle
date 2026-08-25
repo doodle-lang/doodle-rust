@@ -1,0 +1,10 @@
+#! clause: L12.2
+#! mode: run
+#! expect-out: 42
+#! expect-out: done
+try
+  print(42)
+rescue e
+  print("not reached")
+end
+print("done")

@@ -23,6 +23,7 @@ mod control;
 mod dict;
 mod error;
 mod eval;
+mod exception;
 mod foreign;
 mod frame;
 mod gc;
@@ -34,6 +35,7 @@ mod limits;
 mod load;
 mod local;
 mod observe;
+mod protect;
 mod record;
 mod ring;
 mod step;
@@ -178,6 +180,17 @@ pub(crate) struct Machine {
     /// each saved value back into its cell. Its saved values are GC roots. The `with`/
     /// `parameter` producers are M4.6; the save stack and restore mechanism are M4.5a.
     dyn_stack: Vec<(CellIdx, Value)>,
+    /// The **handling stack** (L§12.2): the exceptions whose rescue bodies are currently
+    /// running, innermost last, as `(value, trace)`. A bare `raise` re-raises the top
+    /// entry with its original trace; the entry is pushed on catch and popped (a
+    /// [`PopHandler`](cont::Cont::PopHandler)) as the rescue body finishes. Its values
+    /// are GC roots.
+    handling: Vec<(Value, error::Trace)>,
+    /// The built-in `Error` record type (L§12.1, S-58): the type index of the value
+    /// record `Error(kind, message, details)` the engine raises. Seeded at load (also
+    /// bound as the `Error` global), remembered here so an engine raise can materialize
+    /// an instance without a namespace scan.
+    error_type: TypeIdx,
     /// The current **reentrant-drive nesting depth** (MD §14): each reentrant block
     /// invocation (`intrinsic::invoke_block`) runs a nested drive on the **host's Rust
     /// stack**, so a program that recurses through a native block-consumer grows the Rust

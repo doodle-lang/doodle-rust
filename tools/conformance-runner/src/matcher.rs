@@ -55,7 +55,7 @@ fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
     // Check the outcome (raise/completion) and the captured output independently, so
     // a fixture asserting both, or either alone, gets every mismatch reported.
     let mut reasons = Vec::new();
-    if let Err(mut e) = match_run_outcome(test, &outcome, nfc.as_ref(), &index) {
+    if let Err(mut e) = match_run_outcome(test, &instance, &outcome, nfc.as_ref(), &index) {
         reasons.append(&mut e);
     }
     if let Err(mut e) = match_output(test, instance.output()) {
@@ -117,6 +117,7 @@ fn error_messages(diagnostics: &[Diagnostic]) -> Vec<String> {
 /// which terminates the program), plus the empty transcript of a clean completion.
 fn match_run_outcome(
     test: &Test,
+    instance: &Instance,
     outcome: &Outcome,
     nfc: &str,
     index: &LineIndex,
@@ -131,26 +132,29 @@ fn match_run_outcome(
         .collect();
 
     match outcome {
-        Outcome::Raised(exception, trace) => {
+        Outcome::Raised(value, trace) => {
+            // The raised value is a Doodle value (an `Error` record, or any `raise`d
+            // value, E§9); match `expect-raise` against its described message.
+            let (_kind, message) = instance.describe_raised(*value);
             let pos = trace.raised_at.map(|s| index.position_at(nfc, s.start));
             // An uncaught raise terminates, so the transcript is exactly one raise:
             // exactly one `expect-raise` must match it (substring + position).
             if expected.len() != 1 {
                 return Err(vec![format!(
                     "program raised ({}), but the test declares {} expect-raise expectation(s)",
-                    describe_raise(&exception.message, pos),
+                    describe_raise(&message, pos),
                     expected.len()
                 )]);
             }
             let (substring, want) = expected[0];
-            if exception.message.contains(substring.as_str()) && pos == Some(*want) {
+            if message.contains(substring.as_str()) && pos == Some(*want) {
                 Ok(())
             } else {
                 Err(vec![format!(
                     "expected raise {substring:?} @ {}:{}, got {}",
                     want.line,
                     want.column,
-                    describe_raise(&exception.message, pos)
+                    describe_raise(&message, pos)
                 )])
             }
         }

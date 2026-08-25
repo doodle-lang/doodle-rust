@@ -1,0 +1,5 @@
+#! clause: L12.1
+#! mode: run
+#! expect-raise: boom @ 5:1
+let x = 1
+raise "boom"

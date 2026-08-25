@@ -75,6 +75,32 @@ pub enum ExceptionKind {
     HostRaised,
 }
 
+impl ExceptionKind {
+    /// The stable **kebab-case slug** naming this error class (L§12.1, S-58): the
+    /// `kind` field of the `Error` record an engine raise materializes, and the host's
+    /// error tag. The catalog is part of the language's stable surface.
+    pub fn slug(self) -> &'static str {
+        match self {
+            ExceptionKind::TypeMismatch => "type-mismatch",
+            ExceptionKind::DivisionByZero => "division-by-zero",
+            ExceptionKind::NonFiniteFloat => "non-finite-float",
+            ExceptionKind::UndefinedOrdering => "undefined-ordering",
+            ExceptionKind::ProcedureInExpression => "procedure-in-expression",
+            ExceptionKind::NameNotDefined => "name-not-defined",
+            ExceptionKind::UsedBeforeDefined => "used-before-defined",
+            ExceptionKind::ExponentTooLarge => "exponent-too-large",
+            ExceptionKind::NotCallable => "not-callable",
+            ExceptionKind::ArgumentError => "argument-error",
+            ExceptionKind::UnhashableKey => "unhashable-key",
+            ExceptionKind::KeyNotFound => "key-not-found",
+            ExceptionKind::NoSuchField => "no-such-field",
+            ExceptionKind::NoValueDestination => "no-value-destination",
+            ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
+            ExceptionKind::HostRaised => "host-raised",
+        }
+    }
+}
+
 /// A Doodle exception reaching a drive boundary (E§9).
 #[derive(Clone, Debug)]
 pub struct Exception {
@@ -130,16 +156,11 @@ impl Raise {
 /// [`Outcome::Faulted`]: crate::drive::Outcome::Faulted
 #[derive(Clone, Debug)]
 pub(crate) enum Halt {
-    /// An uncaught Doodle exception (no handler; `try`/`rescue` is M4).
-    Raise(Raise),
+    /// An uncaught Doodle exception reaching the boundary (E§9): the raised **value**
+    /// (an `Error` record, or any value a program `raise`d) and its trace.
+    Raise(super::Value, Trace),
     /// An engine fault — a configured limit was exceeded (E§10.2).
     Fault(EngineFault),
-}
-
-impl From<Raise> for Halt {
-    fn from(raise: Raise) -> Self {
-        Halt::Raise(raise)
-    }
 }
 
 impl From<EngineFault> for Halt {

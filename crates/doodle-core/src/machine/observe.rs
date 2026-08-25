@@ -144,8 +144,9 @@ impl Instance {
             Cont::DefineRecord { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
             Cont::TryHandler { try_node } => ast.span(*try_node),
-            // A cleanup marker restores a binding; it occupies no construct of its own.
-            Cont::WithRestore { .. } => return None,
+            Cont::RaiseApply { raise } => ast.span(*raise),
+            // A cleanup marker restores a binding / clears a handler; no construct of its own.
+            Cont::WithRestore { .. } | Cont::PopHandler => return None,
             // Operator plumbing carries the operator's span directly.
             Cont::BinRhs { span, .. }
             | Cont::BinApply { span, .. }

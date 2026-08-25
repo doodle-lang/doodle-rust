@@ -99,6 +99,21 @@ impl Instance {
             let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
             namespace.push((name.into(), heap.alloc_cell(Some(ty))));
         }
+        // The built-in `Error` record type (L§12.1, S-58): the value record
+        // `Error(kind, message, details)` the engine raises and Doodle code can
+        // construct/inspect. Seeded as a type-value global like the built-ins above; its
+        // type index is remembered on the machine so an engine raise can materialize one.
+        let error_type = heap.alloc_type(crate::heap::TypeObj {
+            kind: crate::machine::TypeKind::Record(crate::machine::RecordType {
+                name: "Error".into(),
+                fields: Box::new(["kind".into(), "message".into(), "details".into()]),
+                is_ref: false,
+            }),
+        });
+        namespace.push((
+            "Error".into(),
+            heap.alloc_cell(Some(Value::Type(error_type))),
+        ));
         for (i, intrinsic) in intrinsics.iter().enumerate() {
             // Each intrinsic interns to one foreign `CalObj` (its registration index is
             // the `CallableTarget::Intrinsic` id) held by a read-only global cell.
@@ -151,6 +166,8 @@ impl Instance {
                 reentry_fault: None,
                 foreign_roots: Vec::new(),
                 dyn_stack: Vec::new(),
+                handling: Vec::new(),
+                error_type,
                 reentry_depth: 0,
                 gc_every_safe_point: false,
                 cancel: Arc::new(AtomicBool::new(false)),

@@ -1,0 +1,16 @@
+#! clause: L12.2
+#! mode: run
+#! expect-out: 5
+#! expect-out: 99
+let a = try
+  5
+rescue e
+  0
+end
+let b = try
+  1 + true
+rescue e
+  99
+end
+print(a)
+print(b)

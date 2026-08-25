@@ -1,0 +1,10 @@
+#! clause: L12.2
+#! mode: run
+#! expect-out: true
+#! expect-out: type-mismatch
+try
+  1 + true
+rescue e
+  print(e is Error)
+  print(e.kind)
+end

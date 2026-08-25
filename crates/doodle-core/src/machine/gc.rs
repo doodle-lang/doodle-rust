@@ -78,5 +78,10 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine, namespace: &Namespace)
         for (_, value) in &machine.dyn_stack {
             tracer.value(*value);
         }
+        // The handling stack (L§12.2): an exception whose rescue body is running stays
+        // reachable, so a bare `raise` can re-raise it.
+        for (value, _) in &machine.handling {
+            tracer.value(*value);
+        }
     });
 }

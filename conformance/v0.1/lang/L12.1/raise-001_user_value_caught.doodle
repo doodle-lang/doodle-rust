@@ -1,0 +1,8 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: boom
+try
+  raise "boom"
+rescue e
+  print(e)
+end
