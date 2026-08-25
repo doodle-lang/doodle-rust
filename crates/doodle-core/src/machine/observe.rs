@@ -146,6 +146,7 @@ impl Instance {
             Cont::DefineCallable { decl } => ast.span(*decl),
             Cont::DefineRecord { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
+            Cont::WithBind { with } => ast.span(*with),
             Cont::TryHandler { try_node } => ast.span(*try_node),
             Cont::RaiseApply { raise } => ast.span(*raise),
             // A cleanup marker restores a binding / clears a handler; no construct of its own.

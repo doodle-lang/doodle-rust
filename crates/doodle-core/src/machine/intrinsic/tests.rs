@@ -61,6 +61,21 @@ fn returns_a_value_after_a_non_local_exit() -> Intrinsic {
     }
 }
 
+/// A **well-behaved** native block-consumer that is a **procedure** (yields no value):
+/// it invokes its block once and returns none. For the S-46 parity check — a foreign
+/// function that yields no value is a `to` for the valued-`break` rule (S-10).
+fn proc_consumer() -> Intrinsic {
+    Intrinsic {
+        name: "consume".into(),
+        kind: BodyKind::Proc,
+        params: vec![block_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let _ = ctx.invoke_block(vec![Value::Int(0)])?;
+            Ok(None)
+        }),
+    }
+}
+
 /// Loads `src` (which must load clean) with `registry`, driving it to completion
 /// and returning the instance so the caller can read its output/outcome.
 fn run_with(src: &str, registry: Registry) -> (Instance, Outcome) {
@@ -174,6 +189,26 @@ fn a_to_intrinsic_result_used_as_a_value_raises() {
     // voidcheck only knows current-module `to`s, not intrinsics).
     let (_, outcome) = run_with("print(1) + 1\n", registry_with(vec![print()]));
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
+}
+
+#[test]
+fn a_valued_break_into_a_native_procedure_consumer_raises_no_value_destination() {
+    // S-46 parity for the S-10 to-consumer half: a foreign function that yields no value
+    // is a `to` for this purpose, so a `break 5` targeting a native Proc consumer has no
+    // value destination and raises `no-value-destination` — the same as a Doodle `to`
+    // consumer (conformance L7.10 `s10-001`).
+    let (inst, outcome) = run_with(
+        "consume() do (x)\nbreak 5\nend\n",
+        registry_with(vec![proc_consumer()]),
+    );
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised(NoValueDestination), got {outcome:?}");
+    };
+    let (slug, _) = inst.describe_raised(value);
+    assert_eq!(
+        slug,
+        crate::machine::ExceptionKind::NoValueDestination.slug()
+    );
 }
 
 /// A test intrinsic that **requests cancellation** when called — for exercising a cancel

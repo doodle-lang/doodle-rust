@@ -1196,6 +1196,55 @@ fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
     assert!(inst.machine.dyn_stack.is_empty(), "dyn stack drained");
 }
 
+// --- M4.6: the `with`/`parameter` producer, end to end (L§5.5, machine-design §13) ---
+//
+// The M4.5a tests above drive the cleanup mechanism with a *simulated* binding; these
+// run a real `with` and confirm the producer builds a binding the exit paths restore.
+// Normal completion and the non-local exits are conformance-tested (L5.5 `with-*`);
+// cancellation is host-driven, so it is exercised here.
+
+#[test]
+fn cancelling_mid_with_restores_the_binding_before_faulting() {
+    // A cancel that arrives while the drive is inside a `with` body tears the stack down
+    // through the `WithRestore` the producer pushed, restoring the parameter to its
+    // pre-`with` value before the terminal `Faulted(Cancelled)` (accept #5).
+    let mut inst = load_source("parameter p = 1\nwith p = 2 do\nloop do\n1\nend\nend\n");
+    // Step until the `with` binding is live — the drive is now inside the body's loop.
+    for _ in 0..100 {
+        if !inst.machine.dyn_stack.is_empty() {
+            break;
+        }
+        inst.step().expect("no halt before the with binding opens");
+    }
+    assert_eq!(inst.machine.dyn_stack.len(), 1, "the with is active");
+    let cell = inst.machine.dyn_stack[0].0;
+    assert_eq!(
+        cell_int(&inst, cell),
+        Some(2),
+        "p reads the with-bound value"
+    );
+    // Press the stop button, then drive to the fault.
+    inst.cancel_token().cancel();
+    let mut fault = None;
+    for _ in 0..1000 {
+        match inst.step() {
+            Ok(_) => {}
+            Err(Halt::Fault(f)) => {
+                fault = Some(f);
+                break;
+            }
+            Err(other) => panic!("unexpected halt during cancel: {other:?}"),
+        }
+    }
+    assert!(matches!(fault, Some(EngineFault::Cancelled)), "{fault:?}");
+    assert_eq!(
+        cell_int(&inst, cell),
+        Some(1),
+        "cancel restored p to its default"
+    );
+    assert!(inst.machine.dyn_stack.is_empty(), "dyn stack drained");
+}
+
 // --- M4.5b: exceptions-as-values at the boundary (L§12.1, E§9) ---
 
 #[test]

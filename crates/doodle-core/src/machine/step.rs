@@ -14,8 +14,8 @@ use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::{Frame, FrameKind};
 use super::{
-    Halt, Machine, Value, arith, block, call, compare, dict, eval, limits, protect, record, types,
-    unwind,
+    Halt, Machine, Value, arith, block, call, compare, dict, dynamic, eval, limits, protect,
+    record, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -253,6 +253,11 @@ fn dispatch(
             Ok(())
         }
         Some(Cont::FieldRead { field }) => record::field_read(resolved, heap, machine, field),
+        // A `with`'s value is now in the register: open its dynamic binding and run the
+        // body under a `WithRestore` (dynamic.rs).
+        Some(Cont::WithBind { with }) => {
+            dynamic::with_bind(resolved, heap, machine, namespace, with)
+        }
         // A `with` body completed normally: restore its dynamic binding (machine-design
         // §13). The body's value stays in the register as the `with`'s value.
         Some(Cont::WithRestore { dyn_mark }) => {
@@ -311,9 +316,20 @@ fn seq_step(resolved: &ResolvedModule, machine: &mut Machine, block: NodeId, nex
 fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
     match resolved.ast.node(stmt) {
         Node::ExprStmt(expr) => frame.conts.push(Cont::Eval { node: *expr }),
-        // Evaluate the initializer, then bind it (LIFO: the `Eval` runs first).
+        // Evaluate the initializer, then bind it (LIFO: the `Eval` runs first). A
+        // `parameter`'s default seeds its module cell through the same path (§5.5).
         Node::Let { value, .. } | Node::Const { value, .. } => {
             frame.conts.push(Cont::BindLet { decl: stmt });
+            frame.conts.push(Cont::Eval { node: *value });
+        }
+        Node::Parameter { default, .. } => {
+            frame.conts.push(Cont::BindLet { decl: stmt });
+            frame.conts.push(Cont::Eval { node: *default });
+        }
+        // A `with`: evaluate the bound value, then open the dynamic binding for the body
+        // (WithBind, dynamic.rs), which runs the body under a restoring cleanup cont.
+        Node::With { value, .. } => {
+            frame.conts.push(Cont::WithBind { with: stmt });
             frame.conts.push(Cont::Eval { node: *value });
         }
         // A name target evaluates only the RHS, then binds. A `Field`/`Index` place

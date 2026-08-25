@@ -21,6 +21,7 @@ mod compare;
 mod cont;
 mod control;
 mod dict;
+mod dynamic;
 mod error;
 mod eval;
 mod exception;

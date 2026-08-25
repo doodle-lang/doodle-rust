@@ -124,6 +124,13 @@ pub(crate) struct Frame {
     /// consumer (its invocation is host code, not a Doodle call). Updated on tail
     /// reuse to the new call.
     pub(crate) call_site: Option<NodeId>,
+    /// The `dyn_stack` depth when this frame was entered (machine-design §13): the
+    /// dynamic bindings this frame established are the entries above it, so E§8.2 can
+    /// report per frame which `with`s it opened. Preserved across tail reuse — a tail
+    /// call is never inside a `with` body (a barrier, L§8.7), so the stack is back at
+    /// this depth when the reuse happens. Not yet read (the E§8.2 surface is later).
+    #[allow(dead_code)]
+    pub(crate) dyn_depth: u32,
 }
 
 impl Frame {
@@ -138,6 +145,8 @@ impl Frame {
             block_param: None,
             tail_count: 0,
             call_site: None,
+            // The module frame is the first frame — nothing has opened a `with` yet.
+            dyn_depth: 0,
         }
     }
 
@@ -153,6 +162,7 @@ impl Frame {
         serial: u64,
         block_param: Option<BlockDescriptor>,
         call_site: NodeId,
+        dyn_depth: u32,
     ) -> Self {
         Frame {
             kind: FrameKind::Callable { cal },
@@ -162,6 +172,7 @@ impl Frame {
             block_param,
             tail_count: 0,
             call_site: Some(call_site),
+            dyn_depth,
         }
     }
 
@@ -185,7 +196,9 @@ impl Frame {
         self.block_param = block_param;
         self.tail_count += 1;
         self.call_site = Some(call_site);
-        // `serial` and the stack slot are deliberately preserved (E§8.5).
+        // `serial`, the stack slot, and `dyn_depth` are deliberately preserved (E§8.5):
+        // a tail call is never inside a `with` body (a barrier, L§8.7), so `dyn_stack`
+        // is back at this frame's entry depth when the reuse happens.
     }
 
     /// A fresh block frame for one invocation of a `do … end` block, with `locals`
@@ -193,6 +206,9 @@ impl Frame {
     /// from the [`BlockDescriptor`]; its `consumer` is who invoked it (§12). Like a
     /// callable, its work is the body `Seq` over a [`ReturnBarrier`](Cont::ReturnBarrier),
     /// which delivers the block's value to the invoker (§8.5).
+    // A block frame carries every field its two call sites must supply; there is no
+    // cohesive sub-group to extract, so the argument count is inherent.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn block(
         defining: usize,
         defining_serial: u64,
@@ -201,6 +217,7 @@ impl Frame {
         body: NodeId,
         serial: u64,
         call_site: Option<NodeId>,
+        dyn_depth: u32,
     ) -> Self {
         Frame {
             kind: FrameKind::Block {
@@ -214,6 +231,7 @@ impl Frame {
             block_param: None,
             tail_count: 0,
             call_site,
+            dyn_depth,
         }
     }
 }

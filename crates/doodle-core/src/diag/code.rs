@@ -67,6 +67,11 @@ pub enum DiagnosticCode {
     /// A valued `return` inside a procedure (`to`), which yields no value (L§8.4):
     /// the returned value has no destination. Use a plain `return`, or an `fn`.
     ValuedReturnInProcedure,
+    /// A `with` whose target name is not a module-level dynamic `parameter` (L§5.5):
+    /// a different global kind (`let`/`const`, `to`/`fn`, a record/protocol/module),
+    /// or no such declaration. `with` never rebinds a lexical binding, and there is
+    /// no auto-creation of a parameter.
+    WithTargetNotParameter,
     /// A `do name` block parameter used as a **value** rather than invoked (L§8.5):
     /// a block is second-class — it may only be invoked (`name(…)`), never stored,
     /// returned, assigned, or passed on.
@@ -117,6 +122,7 @@ impl DiagnosticCode {
             DiagnosticCode::MisplacedExit => "misplaced-exit",
             DiagnosticCode::ValuedExitInLoop => "valued-exit-in-loop",
             DiagnosticCode::ValuedReturnInProcedure => "valued-return-in-procedure",
+            DiagnosticCode::WithTargetNotParameter => "with-target-not-parameter",
             DiagnosticCode::BlockUsedAsValue => "block-used-as-value",
             DiagnosticCode::DuplicateDeclaration => "duplicate-declaration",
             DiagnosticCode::UndeclaredAssignment => "undeclared-assignment",

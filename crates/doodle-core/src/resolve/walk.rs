@@ -109,6 +109,10 @@ pub(super) struct Resolver<'a> {
     /// assignability is checked in a post-pass, once `globals` is complete (a
     /// module-level `let` may be declared after the assignment).
     pending_assigns: Vec<(NodeId, Box<str>)>,
+    /// `with` binding sites as `(with-node, parameter-name)`: their target must be a
+    /// module-level `parameter` (§5.5), checked in a post-pass once `globals` is
+    /// complete (the `parameter` may be declared later in the module).
+    pending_with_targets: Vec<(NodeId, Box<str>)>,
     /// Selective (non-wildcard) imports as `bound-name → source display`, so an
     /// assignment to an imported name gets a specific "imported from …" message
     /// (imports are read-only, S-39). Wildcard sources aren't nameable until load
@@ -142,6 +146,7 @@ impl<'a> Resolver<'a> {
             stmt_spans: Vec::new(),
             diagnostics: Vec::new(),
             pending_assigns: Vec::new(),
+            pending_with_targets: Vec::new(),
             selective_imports: Vec::new(),
             loops_with_break: Vec::new(),
             frames: Vec::new(),
@@ -151,6 +156,7 @@ impl<'a> Resolver<'a> {
         };
         r.resolve_module(root);
         r.check_pending_assigns(); // now that `globals` is complete
+        r.check_with_targets(); // `with` binds a `parameter` (§5.5), globals complete
         r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
         r.check_void_sites(root); // Void consumed as a value (S-6), globals complete
         r.mark_tail_calls(); // tail positions (L§8.7/§11); reads only ast + callables

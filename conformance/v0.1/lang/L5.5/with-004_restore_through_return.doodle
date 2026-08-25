@@ -1,0 +1,12 @@
+#! clause: L5.5
+#! mode: run
+#! expect-out: 2
+#! expect-out: 1
+parameter p = 1
+fn probe()
+    with p = 2 do
+        return p
+    end
+end
+print(probe())
+print(p)

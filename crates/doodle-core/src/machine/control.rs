@@ -368,6 +368,24 @@ fn read_cell(heap: &Heap, cell: Option<CellIdx>, name: &str, span: Span) -> Resu
     }
 }
 
+/// Resolves a dynamic-parameter cell and reads its current value — for `with` to save
+/// before it rebinds (machine-design §13). Raises `NameNotDefined` if the name has no
+/// cell (an undeclared parameter, §5.5) or `UsedBeforeDefined` if the cell is not yet
+/// initialized (a `with` reached before the `parameter` declaration ran).
+pub(super) fn param_cell(
+    heap: &Heap,
+    namespace: &Namespace,
+    name: &str,
+    span: Span,
+) -> Result<(CellIdx, Value), Raise> {
+    let cell = find_cell(namespace, name);
+    let old = read_cell(heap, cell, name, span)?;
+    Ok((
+        cell.expect("read_cell returned Ok, so the cell exists"),
+        old,
+    ))
+}
+
 /// Finds a module cell by name (linear scan — the namespace is small and this
 /// keeps lookup deterministic and hashing-free).
 fn find_cell(namespace: &Namespace, name: &str) -> Option<CellIdx> {
@@ -394,7 +412,7 @@ fn ident_name(resolved: &ResolvedModule, node: NodeId) -> &str {
 
 fn decl_name(resolved: &ResolvedModule, decl: NodeId) -> &str {
     match resolved.ast.node(decl) {
-        Node::Let { name, .. } | Node::Const { name, .. } => name,
+        Node::Let { name, .. } | Node::Const { name, .. } | Node::Parameter { name, .. } => name,
         Node::Callable {
             name: Some(name), ..
         } => name,

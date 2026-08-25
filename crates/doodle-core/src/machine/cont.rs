@@ -273,13 +273,19 @@ pub(crate) enum Cont {
         /// The `Return`/`Break`/`Continue` node.
         exit: NodeId,
     },
+    /// A `with`'s value is now in the register: **open** its dynamic binding (§5.5,
+    /// machine-design §13). Look up the named `parameter` cell, save `(cell, old)` on
+    /// `dyn_stack`, write the value in, then schedule the body under a
+    /// [`WithRestore`](Cont::WithRestore). Pushed by the `with` statement (`dynamic.rs`).
+    WithBind {
+        /// The `With` node — its name selects the cell, its body runs under the binding.
+        with: NodeId,
+    },
     /// **Cleanup** (machine-design §12/§13): restore a dynamic-parameter binding. On
     /// normal completion of a `with` body, and as the unwinder pops past this cont on
     /// **any** exit (break/continue/return/raise/cancel), pop `dyn_stack` down to
-    /// `dyn_mark`, writing each saved value back into its cell. The producer (`with`)
-    /// is M4.6; the restore mechanism and its execution during unwind are M4.5a.
-    // Constructed by the `with` producer (M4.6); the M4.5a mechanism matches it only.
-    #[allow(dead_code)]
+    /// `dyn_mark`, writing each saved value back into its cell. Paired with the
+    /// [`WithBind`](Cont::WithBind) that opened the binding.
     WithRestore {
         /// The `dyn_stack` length to restore to — entries above it are this `with`'s.
         dyn_mark: u32,
@@ -361,6 +367,7 @@ impl Cont {
             | Cont::DefineCallable { .. }
             | Cont::ReturnBarrier
             | Cont::ExitApply { .. }
+            | Cont::WithBind { .. }
             | Cont::WithRestore { .. }
             | Cont::TryHandler { .. }
             | Cont::RaiseApply { .. }

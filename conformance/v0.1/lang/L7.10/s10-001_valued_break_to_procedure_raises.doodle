@@ -1,0 +1,10 @@
+#! clause: L7.10
+#! mode: run
+#! expect-raise: the block-consuming call is a procedure @ 9:5
+to each1(do body)
+    body()
+end
+let consume = each1
+consume() do
+    break 5
+end

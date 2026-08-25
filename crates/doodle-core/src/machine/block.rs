@@ -185,6 +185,7 @@ fn block_apply(
     // be cell-boxed (a nested `fn` inside the block captured one), so build slots.
     let locals = local::build(resolved, heap, block_id, &slots, &[]);
     let serial = machine.next_frame_serial();
+    let dyn_depth = machine.dyn_stack.len() as u32;
     machine.frames.push(Frame::block(
         desc.defining,
         desc.defining_serial,
@@ -196,6 +197,7 @@ fn block_apply(
         body,
         serial,
         Some(call),
+        dyn_depth,
     ));
     Ok(())
 }
@@ -240,6 +242,7 @@ pub(crate) fn invoke_native(
     // just above it, and a `break` targeting it unwinds back down to here (§12).
     let boundary = machine.frames.len();
     let serial = machine.next_frame_serial();
+    let dyn_depth = machine.dyn_stack.len() as u32;
     machine.frames.push(Frame::block(
         desc.defining,
         desc.defining_serial,
@@ -250,6 +253,7 @@ pub(crate) fn invoke_native(
         // A native consumer invokes the block from host code, not a Doodle call, so this
         // block frame has no Doodle call-site position (E§8.2).
         None,
+        dyn_depth,
     ));
     Ok(())
 }

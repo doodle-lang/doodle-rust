@@ -129,8 +129,11 @@ impl super::Resolver<'_> {
             Node::With { name, value, body } => {
                 let (name, value, body) = (name.clone(), *value, *body);
                 // The dynamic-parameter name references a `parameter` cell (a free
-                // module name); record the reference site on the `with` node.
+                // module name); record the reference site on the `with` node. That the
+                // target is a `parameter` (not a `let`/`const`, §5.5) needs the complete
+                // `globals`, so defer it to `check_with_targets`.
                 self.record_name_ref(node, &name);
+                self.pending_with_targets.push((node, name));
                 self.resolve(value);
                 self.resolve_construct_body(body);
             }

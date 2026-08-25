@@ -1,0 +1,8 @@
+#! clause: L5.5
+#! mode: static
+#! stage: full
+#! expect-static-error: is a mutable `let` @ 6:1
+let pen = 0
+with pen = 1 do
+    pen
+end

@@ -576,6 +576,12 @@ fn fn_falls_off_end_when_tail_is_value_less() {
         diags(&resolved("fn f()\n  loop do break end\nend")),
         vec![dup]
     ); // a `loop` that can exit
+    assert_eq!(
+        diags(&resolved(
+            "parameter p = 0\nfn f()\n  with p = 1 do\n    5\n  end\nend"
+        )),
+        vec![dup]
+    ); // a `with` body produces, but `with` is not an expression → the fn falls off
 }
 
 #[test]
@@ -596,6 +602,29 @@ fn fn_does_not_fall_off_when_tail_produces_or_diverges() {
     assert!(diags(&resolved("to p()\n  let x = 1\nend")).is_empty());
     // try: a produces-or-diverges mix is fine (the ruling's example).
     assert!(diags(&resolved("fn f()\n  try h() rescue e raise end\nend")).is_empty());
+    // A `with` whose body always exits non-locally: the fn leaves through the body and
+    // never reaches the fall-off point after the `with` (L§8.7). A `return` crosses the
+    // `with` (so it diverges here, though it *produces* at a bare fn tail); a `raise`
+    // diverges; an `if` whose branches all return is exhaustive divergence.
+    assert!(
+        diags(&resolved(
+            "parameter p = 0\nfn f()\n  with p = 1 do\n    return 1\n  end\nend"
+        ))
+        .is_empty()
+    );
+    assert!(
+        diags(&resolved(
+            "parameter p = 0\nfn f()\n  with p = 1 do\n    raise err\n  end\nend"
+        ))
+        .is_empty()
+    );
+    assert!(
+        diags(&resolved(
+            "parameter p = 0\nfn f()\n  with p = 1 do\n    \
+             if c then return 1 else return 2 end\n  end\nend"
+        ))
+        .is_empty()
+    );
     // `return expr` PRODUCES (the fn doesn't fall off), so S-5 never flags it. But
     // `return p()` for a `to` p uses Void as the return value — an S-6 consuming-
     // site error at the operand (`procedure-in-expression`), NOT falls-off-end.
@@ -603,6 +632,29 @@ fn fn_does_not_fall_off_when_tail_produces_or_diverges() {
         diags(&resolved("to p() end\nfn f()\n  return p()\nend")),
         vec!["procedure-in-expression"]
     );
+}
+
+#[test]
+fn with_binds_only_a_dynamic_parameter() {
+    // `with` rebinds a dynamic `parameter` (§5.5); its target must be one.
+    let slug = "with-target-not-parameter";
+    assert!(diags(&resolved("parameter p = 0\nwith p = 1 do\n  p\nend")).is_empty());
+    // A lexical binding (`let`/`const`) is a distinct facility — `with` never rebinds it.
+    assert_eq!(
+        diags(&resolved("let p = 0\nwith p = 1 do\n  1\nend")),
+        vec![slug]
+    );
+    assert_eq!(
+        diags(&resolved("const p = 0\nwith p = 1 do\n  1\nend")),
+        vec![slug]
+    );
+    // Nor a callable or a type — any non-parameter global.
+    assert_eq!(
+        diags(&resolved("to p() end\nwith p = 1 do\n  1\nend")),
+        vec![slug]
+    );
+    // An undeclared name: there is no auto-creation of a parameter (§5.5).
+    assert_eq!(diags(&resolved("with p = 1 do\n  1\nend")), vec![slug]);
 }
 
 #[test]

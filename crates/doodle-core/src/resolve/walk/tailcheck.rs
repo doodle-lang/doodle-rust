@@ -90,8 +90,21 @@ impl Resolver<'_> {
             | Node::Const { .. }
             | Node::Assign { .. }
             | Node::While { .. }
-            | Node::With { .. }
             | Node::Return(None) => Tail::ValueLess,
+            // A `with` is not an expression, so on normal completion it yields no value —
+            // the function falls off the end after it. But if the body never completes
+            // normally (every path exits via a `return`/`raise`/`break`/`continue` or an
+            // infinite `loop`), control leaves through the body and never reaches that
+            // fall-off point. This is a distinct never-falls-through test, not the value
+            // lattice: a `return x` PRODUCES at the fn tail but DIVERGES when it crosses
+            // the `with`.
+            Node::With { body, .. } => {
+                if self.block_diverges(*body) {
+                    Tail::Diverges
+                } else {
+                    Tail::ValueLess
+                }
+            }
             Node::If { arms, else_body } => self.classify_if(arms, *else_body),
             Node::Try {
                 body, rescue_body, ..
@@ -138,6 +151,45 @@ impl Resolver<'_> {
                 }
             }
             _ => Tail::Indeterminate,
+        }
+    }
+
+    /// Whether a block never completes normally — every path transfers control away via
+    /// a non-local exit or an infinite loop, so control never falls through past it.
+    /// Distinct from the value lattice ([`classify_stmt`](Self::classify_stmt)): a
+    /// `return x` *produces* at the fn tail but *diverges* when it crosses a `with`
+    /// barrier. Used to judge whether a `with` body lets the function fall off the end
+    /// (L§8.4/§8.7).
+    fn block_diverges(&self, block: NodeId) -> bool {
+        self.last_stmt(block).is_some_and(|s| self.stmt_diverges(s))
+    }
+
+    /// Whether a tail statement never falls through (see [`block_diverges`](Self::block_diverges)).
+    fn stmt_diverges(&self, stmt: NodeId) -> bool {
+        match self.ast.node(stmt) {
+            // The parser wraps a statement-position `if`/`try` in an `ExprStmt`; recurse
+            // to reach the branch analysis below.
+            Node::ExprStmt(inner) => self.stmt_diverges(*inner),
+            Node::Return(_) | Node::Raise(_) | Node::Break(_) | Node::Continue(_) => true,
+            // A `loop` with no `break` bound to it is infinite; one that can `break` may
+            // complete.
+            Node::Loop { .. } => !self.loops_with_break.contains(&stmt),
+            // An `if` diverges only if it is exhaustive (has an `else`) and every branch
+            // diverges; a missing `else` or a falling-through branch completes.
+            Node::If { arms, else_body } => {
+                let Some(else_body) = *else_body else {
+                    return false;
+                };
+                self.block_diverges(else_body) && arms.iter().all(|a| self.block_diverges(a.body))
+            }
+            // A `try` completes if its body falls through, or its rescue does after a
+            // raise; it diverges only when neither can.
+            Node::Try {
+                body, rescue_body, ..
+            } => self.block_diverges(*body) && self.block_diverges(*rescue_body),
+            // A nested `with` completes exactly when its body does.
+            Node::With { body, .. } => self.block_diverges(*body),
+            _ => false,
         }
     }
 

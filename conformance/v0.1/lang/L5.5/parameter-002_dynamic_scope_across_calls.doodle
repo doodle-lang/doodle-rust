@@ -1,0 +1,14 @@
+#! clause: L5.5
+#! mode: run
+#! expect-out: 1
+#! expect-out: 2
+#! expect-out: 1
+parameter p = 1
+to show()
+    print(p)
+end
+show()
+with p = 2 do
+    show()
+end
+show()

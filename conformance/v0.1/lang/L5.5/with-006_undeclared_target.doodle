@@ -1,0 +1,7 @@
+#! clause: L5.5
+#! mode: static
+#! stage: full
+#! expect-static-error: needs a dynamic parameter @ 5:1
+with pen = 1 do
+    pen
+end

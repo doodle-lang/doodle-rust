@@ -220,6 +220,7 @@ fn apply(
             .reuse_as_callable(cal, locals, body, block_param, call);
     } else {
         let serial = machine.next_frame_serial();
+        let dyn_depth = machine.dyn_stack.len() as u32;
         machine.frames.push(Frame::callable(
             cal,
             locals,
@@ -227,6 +228,7 @@ fn apply(
             serial,
             block_param,
             call,
+            dyn_depth,
         ));
     }
     // Defaults are evaluated in the callee activation, before the body (LIFO: push

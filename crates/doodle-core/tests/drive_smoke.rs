@@ -226,18 +226,6 @@ fn a_block_program_with_exits_drives_to_void_completion() {
     ));
 }
 
-/// The open S-10 to-consumer half: a **valued** `break` exiting a **procedure**
-/// consuming call has no value destination (a `to` yields Void), so the machine
-/// raises **provisionally** rather than silently discard the value. Tracked
-/// pending the user's ruling on the S-10 to-consumer half.
-#[test]
-fn a_valued_break_into_a_procedure_consumer_raises_provisionally() {
-    assert_raises(
-        "to each1(do body)\nbody()\nend\nto wrap()\neach1() do break 5 end\nend\nwrap()\n",
-        ExceptionKind::NoValueDestination,
-    );
-}
-
 /// A block whose tail is value-less yields **Void**, not the previous statement's
 /// transient value (the register is cleared at each statement boundary). Here the
 /// block ends in a `while … break` (a loop yields Void, L§7.6), so `body()` yields

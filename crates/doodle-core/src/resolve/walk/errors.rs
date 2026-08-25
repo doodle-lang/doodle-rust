@@ -76,6 +76,44 @@ impl Resolver<'_> {
         }
     }
 
+    /// Post-pass: each `with` binds a dynamic parameter (L§5.5), so its target name
+    /// must resolve to a module-level `parameter`. A different global kind (a lexical
+    /// binding, a callable, a type/protocol/module) or no such declaration is a static
+    /// error — `with` never rebinds a `let`/`const`, and there is no auto-creation.
+    pub(super) fn check_with_targets(&mut self) {
+        let pending = std::mem::take(&mut self.pending_with_targets);
+        for (node, name) in pending {
+            match self
+                .globals
+                .iter()
+                .find(|g| *g.name == *name)
+                .map(|g| g.kind)
+            {
+                Some(GlobalKind::Parameter) => {}
+                Some(kind) => {
+                    let what = with_target_kind(kind);
+                    self.error(
+                        DiagnosticCode::WithTargetNotParameter,
+                        node,
+                        &format!(
+                            "`with` rebinds a dynamic parameter for a block, but `{name}` \
+                             is {what} — declare it with `parameter`, or change a `let` \
+                             with `=`"
+                        ),
+                    );
+                }
+                None => self.error(
+                    DiagnosticCode::WithTargetNotParameter,
+                    node,
+                    &format!(
+                        "`with` needs a dynamic parameter named `{name}`, but none is \
+                         declared — declare it with `parameter {name} = default`"
+                    ),
+                ),
+            }
+        }
+    }
+
     /// A `const`/declaration assignment target — the const-reassignment family
     /// (S-6 rule 2a: declaration bindings are non-assignable).
     fn non_assignable_error(&mut self, node: NodeId, name: &str, kind: GlobalKind) {
@@ -146,5 +184,20 @@ impl Resolver<'_> {
             });
         }
         self.diagnostics.push(diag);
+    }
+}
+
+/// How a non-`parameter` global reads in a `with`-target error (L§5.5). `Parameter`
+/// is the valid target and never reaches this.
+fn with_target_kind(kind: GlobalKind) -> &'static str {
+    match kind {
+        GlobalKind::Let => "a mutable `let`",
+        GlobalKind::Const => "a constant (`const`)",
+        GlobalKind::Proc => "a procedure (`to`)",
+        GlobalKind::Fn => "a function (`fn`)",
+        GlobalKind::Record => "a record type",
+        GlobalKind::Protocol => "a protocol",
+        GlobalKind::Module => "a module",
+        GlobalKind::Parameter => "a dynamic parameter",
     }
 }
