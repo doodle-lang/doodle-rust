@@ -31,3 +31,14 @@ unicode-normalization = "0.1"
 
 [dev-dependencies]
 insta = "1"
+# The benchmark harness (plan R3 / implementation.md §5). `default-features = false`
+# drops the plotters/HTML-report and rayon trees — the CLI `cargo_bench_support`
+# harness is all the benches need, and it keeps the dev-dependency graph (and its
+# license surface, `deny.toml`) small.
+criterion = { version = "0.5", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+[[bench]]
+name = "strings"
+harness = false
