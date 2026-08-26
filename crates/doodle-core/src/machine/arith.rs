@@ -203,13 +203,21 @@ fn power(
 ) -> Result<Value, Raise> {
     match (a, b) {
         (Num::Int(base), Num::Int(exp)) if !exp.is_negative() => {
-            let e = exp.to_u32().ok_or_else(|| exponent_too_large(span))?;
-            // R8: bound the power's size before computing — `Pow::pow` is one unbounded,
-            // uninterruptible allocation (MD §9). The result is at most `e * base.bits()`
-            // bits (and trivial when |base| <= 1).
-            if !machine.admit_bignum(pow_result_bytes(&base, e)) {
+            // A base of magnitude <= 1 yields 0, 1, or ±1 whatever the exponent, so even a
+            // huge exponent is harmless — compute it directly.
+            if base.bits() <= 1 {
+                return Ok(int_value(small_base_pow(&base, &exp), heap));
+            }
+            // Otherwise the result grows with the exponent. Bound its size before computing
+            // (R8): an exponent past the engine's computable range (u32), or a result over a
+            // limit, is a magnitude *fault* (via `admit_bignum`), not a raise — the same
+            // "too big" story as `"a" * 10**9` (a limit is a fault, uncatchable, E§10.2).
+            if !machine.admit_bignum(pow_result_bytes(base.bits(), &exp)) {
                 return Ok(Value::Nil); // placeholder; the parked fault surfaces first
             }
+            let e = exp
+                .to_u32()
+                .expect("admit_bignum passes only when the exponent fits u32");
             Ok(int_value(Pow::pow(base, e), heap))
         }
         (a, b) => {
@@ -220,16 +228,38 @@ fn power(
     }
 }
 
-/// An upper bound on the byte-length of `base ** e`'s magnitude, for the R8 size guard.
-/// `|base| <= 1` gives `0`/`±1` (a byte); otherwise the magnitude is at most `e *
-/// base.bits()` bits. Widened to `u128` so a large exponent times a large base cannot
-/// overflow the estimate itself.
-fn pow_result_bytes(base: &BigInt, e: u32) -> u128 {
-    let bits = base.bits();
-    if bits <= 1 {
-        1
+/// `base ** exp` where `|base| <= 1` (`base` is `0`, `1`, or `-1`) and `exp >= 0`: the
+/// result depends only on the base and the exponent's parity, so a huge exponent still
+/// computes in constant work. Matches `Pow::pow`'s conventions (`0 ** 0 == 1`).
+fn small_base_pow(base: &BigInt, exp: &BigInt) -> BigInt {
+    if base.is_zero() {
+        // 0 ** 0 == 1; 0 ** n == 0 for n > 0.
+        if exp.is_zero() {
+            BigInt::from(1)
+        } else {
+            BigInt::from(0)
+        }
+    } else if base.is_negative() {
+        // (-1) ** exp: 1 if even, -1 if odd.
+        if exp.is_even() {
+            BigInt::from(1)
+        } else {
+            BigInt::from(-1)
+        }
     } else {
-        u128::from(e) * u128::from(bits) / 8 + 1
+        BigInt::from(1) // 1 ** exp == 1
+    }
+}
+
+/// An upper bound on the byte-length of `base ** exp`'s magnitude (with `|base| >= 2`), for
+/// the R8 size guard: the magnitude is at most `exp * base.bits()` bits. An exponent beyond
+/// the engine's computable range (`u32`) is reported as unboundedly large (`u128::MAX`), so
+/// `admit_bignum` faults rather than the operation attempting the impossible. Widened to
+/// `u128` so the product cannot overflow the estimate itself.
+fn pow_result_bytes(base_bits: u64, exp: &BigInt) -> u128 {
+    match exp.to_u32() {
+        Some(e) => u128::from(e) * u128::from(base_bits) / 8 + 1,
+        None => u128::MAX,
     }
 }
 
@@ -276,14 +306,6 @@ fn nonfinite(span: Span) -> Raise {
     Raise::new(
         ExceptionKind::NonFiniteFloat,
         "that number got too big to be a real number",
-        span,
-    )
-}
-
-fn exponent_too_large(span: Span) -> Raise {
-    Raise::new(
-        ExceptionKind::ExponentTooLarge,
-        "that power is too big to work out",
         span,
     )
 }

@@ -869,9 +869,8 @@ fn a_string_repeat_over_the_heap_limit_faults() {
 }
 
 /// R8: `**` whose result would exceed the heap limit faults `LimitExceeded(Heap)` from the
-/// pre-size estimate — a *representable* exponent producing a huge magnitude, distinct from
-/// the `exponent-too-large` guard on a u32-overflowing exponent. `2 ** 10_000_000` is a
-/// ~1.25 MB integer, so it faults before the bignum is ever built.
+/// pre-size estimate, before the bignum is built. `2 ** 10_000_000` is a ~1.25 MB integer;
+/// under a tight heap it faults without allocating.
 #[test]
 fn a_power_over_the_heap_limit_faults_before_computing() {
     let mut inst = load_source_with_limits(
@@ -881,6 +880,19 @@ fn a_power_over_the_heap_limit_faults_before_computing() {
             ..Limits::default()
         },
     );
+    assert!(matches!(
+        drive_to_fault(&mut inst),
+        EngineFault::LimitExceeded(LimitKind::Heap)
+    ));
+}
+
+/// R8: an exponent beyond the engine's computable range (u32) is a magnitude *fault*, not a
+/// catchable raise — the retired `exponent-too-large` behavior, folded into the size cap.
+/// `2 ** (10 ** 20)` has a u32-overflowing exponent, so it faults `LimitExceeded(Heap)` even
+/// under the default heap; a magnitude-<= 1 base (`1 ** huge`) still computes (unit-tested).
+#[test]
+fn a_power_with_an_exponent_beyond_u32_faults() {
+    let mut inst = load_source("let e = 10 ** 20\nlet x = 2 ** e\n");
     assert!(matches!(
         drive_to_fault(&mut inst),
         EngineFault::LimitExceeded(LimitKind::Heap)

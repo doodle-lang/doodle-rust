@@ -108,6 +108,24 @@ fn power_is_int_for_nonnegative_int_exponent_else_float() {
 }
 
 #[test]
+fn power_with_a_small_base_ignores_a_huge_exponent() {
+    // A base of magnitude <= 1 gives a trivial result whatever the exponent, so a huge
+    // (u32-overflowing) exponent computes directly rather than faulting — including the old
+    // `1 ** huge`, which once wrongly raised `exponent-too-large` (now retired).
+    let mut h = Heap::new();
+    let huge = int_value(big("10000000000"), &mut h); // 1e10 > u32::MAX, even
+    let one = binary(BinaryOp::Pow, Value::Int(1), huge, &mut h, S).unwrap();
+    assert_eq!(int_of(one, &h), big("1"));
+    let zero = binary(BinaryOp::Pow, Value::Int(0), huge, &mut h, S).unwrap();
+    assert_eq!(int_of(zero, &h), big("0"));
+    let even = binary(BinaryOp::Pow, Value::Int(-1), huge, &mut h, S).unwrap();
+    assert_eq!(int_of(even, &h), big("1"));
+    let odd_exp = int_value(big("10000000001"), &mut h);
+    let odd = binary(BinaryOp::Pow, Value::Int(-1), odd_exp, &mut h, S).unwrap();
+    assert_eq!(int_of(odd, &h), big("-1"));
+}
+
+#[test]
 fn float_power_is_deterministic_via_libm() {
     // The `**` float path uses the bundled `libm::pow` (not `f64::powf`), so this
     // exact-bit golden must hold identically on every target (E§11). `2 ** 3.5`

@@ -36,13 +36,6 @@ pub enum ExceptionKind {
     /// A binding was used before its declaration executed — the temporal dead
     /// zone (cell present but uninitialized).
     UsedBeforeDefined,
-    /// `**` with an exponent that overflows `u32` — the guard that keeps a single
-    /// `Int ** Int` transition's bignum finite (S-12 resource half). The M2a.9
-    /// heap/step limits now bound `**` deterministically (it faults at a
-    /// deterministic step); because that check is post-allocation (at a safe point),
-    /// this guard also caps the one-transition overshoot. A tight pre-allocation
-    /// size estimate is a tracked refinement (claude-todo).
-    ExponentTooLarge,
     /// A call whose callee is not a callable value (L§6.4/§8).
     NotCallable,
     /// A call's arguments do not match the callee's parameters (L§8.3): a missing
@@ -101,7 +94,6 @@ impl ExceptionKind {
             ExceptionKind::ProcedureInExpression => "procedure-in-expression",
             ExceptionKind::NameNotDefined => "name-not-defined",
             ExceptionKind::UsedBeforeDefined => "used-before-defined",
-            ExceptionKind::ExponentTooLarge => "exponent-too-large",
             ExceptionKind::NotCallable => "not-callable",
             ExceptionKind::ArgumentError => "argument-error",
             ExceptionKind::UnhashableKey => "unhashable-key",
