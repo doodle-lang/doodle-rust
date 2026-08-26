@@ -11,8 +11,8 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::canonical_combining_class;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// A Unicode/UCD version, `major.minor.micro` (L§4.4). Names the release whose
 /// normalization and (at M4) grapheme behavior an instance uses; carried in the
@@ -107,8 +107,9 @@ pub fn grapheme_offsets(s: &str) -> Box<[u32]> {
 /// "Around the seam" is defined against true UAX #15 boundaries, not "back to the last
 /// starter" naively: the region extends across `a`'s trailing non-starter run (canonical
 /// reordering can move a mark from `b` into it) up to and including the starter that
-/// anchors it, and across `b`'s leading non-starters **and** leading Hangul V/T jamo,
-/// which compose backward onto a trailing L/LV even though they are starters.
+/// anchors it, and across `b`'s leading non-starters **and** leading backward-composing
+/// starters (composition second elements — Hangul V/T jamo, Sinhala vowel signs, …), which
+/// compose backward onto a trailing starter even though they are starters themselves.
 pub fn seam_concat(a: &str, b: &str) -> String {
     debug_assert!(
         is_nfc(a) && is_nfc(b),
@@ -150,13 +151,14 @@ fn seam_start_in_a(a: &str) -> usize {
 }
 
 /// The byte index in `b` where the seam region ends: past `b`'s leading non-starters and
-/// leading Hangul V/T jamo — the characters that can reorder into `a`'s tail or compose
-/// backward onto a trailing L/LV. Stops at the first clean starter (a normal starter, or
-/// an L jamo, which begins a fresh syllable and never composes backward).
+/// leading **backward-composing starters** — the characters that can reorder into `a`'s
+/// tail or compose backward onto a trailing starter (and, chaining, onto the result of
+/// such a composition). Stops at the first *clean* starter, which begins a fresh
+/// normalization unit and can never compose backward.
 fn seam_end_in_b(b: &str) -> usize {
     let mut end = 0;
     for (i, c) in b.char_indices() {
-        if canonical_combining_class(c) == 0 && !is_backward_composing_jamo(c) {
+        if canonical_combining_class(c) == 0 && !composes_backward(c) {
             break;
         }
         end = i + c.len_utf8();
@@ -164,13 +166,16 @@ fn seam_end_in_b(b: &str) -> usize {
     end
 }
 
-/// Whether `c` is a Hangul **V** (medial vowel) or **T** (trailing consonant) conjoining
-/// jamo — a starter (CCC 0) that nonetheless composes *backward* onto a preceding L or LV
-/// at a seam (L+V→LV, LV+T→LVT, UAX #15 §Hangul). L jamo and precomposed syllables do
-/// not compose backward, so they are excluded.
-fn is_backward_composing_jamo(c: char) -> bool {
-    let u = c as u32;
-    (0x1161..=0x1175).contains(&u) || (0x11A8..=0x11C2).contains(&u)
+/// Whether `c` can compose *backward* onto a preceding starter at a seam — the general
+/// class of canonical-composition second elements. It is exactly the NFC_Quick_Check =
+/// `Maybe` set (UAX #15 §Detecting_Normalization_Forms): a lone `c` quick-checks as
+/// `Maybe` iff some starter composes with it. This subsumes the Hangul V/T jamo
+/// (L+V→LV, LV+T→LVT) *and* scripts whose spacing vowel signs compose (e.g. Sinhala
+/// `U+0DD9 + U+0DCF → U+0DDC`), which a hardcoded jamo range would miss — leaving the
+/// seam un-composed and the result non-NFC. A plain starter (e.g. Hangul L, ASCII)
+/// quick-checks `Yes` and is a clean boundary.
+fn composes_backward(c: char) -> bool {
+    matches!(is_nfc_quick(core::iter::once(c)), IsNormalized::Maybe)
 }
 
 /// Whether `c` may start an identifier (L§3.4): `_`, or a UAX#31 `XID_Start`
@@ -283,6 +288,12 @@ mod tests {
             ("", "abc"),                      // empty left
             ("abc", ""),                      // empty right
             ("A\u{30a}", "b"),                // Å (from A + ring) then a clean starter
+            // Sinhala: a spacing vowel sign is a ccc-0 starter that composes *backward*,
+            // like a Hangul jamo but outside the jamo ranges — the case a hardcoded jamo
+            // check missed, leaving a non-NFC seam (regression for the general
+            // backward-composer fix, verified at scale by the UCD seam vectors).
+            ("\u{0dd9}", "\u{0dcf}"), // ෙ + ා → ො (U+0DDC) composes at the seam
+            ("\u{0dd9}", "\u{0dcf}\u{0334}\u{0dca}"), // → U+0DDD U+0334 (chained compose)
         ];
         for (a_raw, b_raw) in raw {
             let a: String = a_raw.nfc().collect();
