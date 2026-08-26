@@ -196,6 +196,18 @@ pub(crate) enum Cont {
         /// The index of the element now in the register.
         index: u32,
     },
+    /// A string interpolation's `{expr}` at `index` (L§6.7) is now evaluated in the
+    /// register: render it through the `Stringable` dispatcher and seam-append it to
+    /// `acc`, then fold in the following literal/`{…}` parts until the next `{expr}`
+    /// or the string's end.
+    StrInterp {
+        /// The `StrLit` literal node.
+        node: NodeId,
+        /// The seam-joined NFC rendering of every part before `index`.
+        acc: String,
+        /// The index (into the literal's parts) of the interpolation now in the register.
+        index: usize,
+    },
     /// A dict literal entry's **computed** key is now in the register: pair it with
     /// the entry's value expression to evaluate next (L§4.8). (A bare-word key needs
     /// no eval, so it skips straight to [`DictGotValue`](Cont::DictGotValue).)
@@ -347,6 +359,7 @@ impl Cont {
             }
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
+            | Cont::StrInterp { .. }
             | Cont::AssignPlaceObj { .. }
             | Cont::FieldRead { .. }
             | Cont::DefineRecord { .. }

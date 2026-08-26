@@ -1,0 +1,9 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: HIJACKED
+#! expect-out: 7
+fn to_string(x)
+  return "HIJACKED"
+end
+print(to_string(0))
+print("{3 + 4}")

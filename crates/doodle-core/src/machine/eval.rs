@@ -76,6 +76,71 @@ pub(super) fn list_got_elem(
     }
 }
 
+/// Folds a string interpolation's parts from `start` into `acc` — already the seam-joined
+/// NFC rendering of the earlier parts (L§6.7). Literal runs are seam-appended in place;
+/// the first `{expr}` reached is scheduled for evaluation (its value is rendered and
+/// folded in by [`str_interp`] on the way back), suspending this pass. When the parts run
+/// out the finished `String` is allocated into the register.
+///
+/// Joining at the seam (AD4) rather than concatenating then normalizing keeps the result
+/// equal to a single NFC pass over the whole — [`seam_concat`](crate::unicode::seam_concat)
+/// renormalizes only each boundary, and NFC is closed under that piecewise join — while
+/// touching only the boundaries, not the (already-NFC) interiors.
+fn str_interp_advance(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    node: NodeId,
+    mut acc: String,
+    start: usize,
+) -> Result<(), Raise> {
+    let Node::StrLit(parts) = resolved.ast.node(node) else {
+        unreachable!("str_interp over a non-StrLit node");
+    };
+    for (index, part) in parts.iter().enumerate().skip(start) {
+        match part {
+            StrPart::Text(run) => {
+                acc = crate::unicode::seam_concat(&acc, &crate::unicode::nfc(run));
+            }
+            StrPart::Interp(expr) => {
+                let expr = *expr;
+                let frame = machine.frames.last_mut().expect("eval with no frame");
+                frame.conts.push(Cont::StrInterp { node, acc, index });
+                frame.conts.push(Cont::Eval { node: expr });
+                return Ok(());
+            }
+        }
+    }
+    machine.reg = Some(Value::Str(heap.alloc_string(acc.into_boxed_str())));
+    Ok(())
+}
+
+/// A string interpolation's `{expr}` value is now in the register (L§6.7): render it
+/// through the placeholder `Stringable` dispatcher — invoked **directly**, so a user's
+/// local `to_string` cannot change interpolation (§15 hook 1, S-37) — seam-append it to
+/// `acc`, then fold in the remaining parts.
+pub(super) fn str_interp(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    node: NodeId,
+    acc: String,
+    index: usize,
+) -> Result<(), Raise> {
+    let Node::StrLit(parts) = resolved.ast.node(node) else {
+        unreachable!("str_interp over a non-StrLit node");
+    };
+    let StrPart::Interp(expr) = &parts[index] else {
+        unreachable!("str_interp resumed on a non-interpolation part");
+    };
+    let expr = *expr;
+    // A procedure call `{p()}` produces no value; using it here is a Void-in-expression
+    // raise attributed to the interpolated expression (L§6.11).
+    let value = take_value(machine, resolved.ast.span(expr))?;
+    let acc = crate::unicode::seam_concat(&acc, &super::stringify::render(heap, value));
+    str_interp_advance(resolved, heap, machine, node, acc, index + 1)
+}
+
 /// Evaluates one expression, either producing a value into the register (a leaf)
 /// or scheduling continuations that will (a compound operator). Returns `Err` if
 /// reading a name raised.
@@ -94,11 +159,15 @@ pub(super) fn eval(
         Node::BytesLit(bytes) => Value::Bytes(heap.alloc_bytes(bytes.as_slice().into())),
         // A **non-interpolated** string literal allocates its NFC string value. The
         // decoded text can be non-NFC (e.g. a `\u{301}` combining escape), and every
-        // heap string is NFC (L§4.4), so normalize before allocating. Interpolation
-        // (`{expr}`) needs the L§15 Stringable dispatcher — M4.
+        // heap string is NFC (L§4.4), so normalize before allocating.
+        //
+        // An interpolated literal (`"…{expr}…"`, L§6.7) folds its literal runs and its
+        // rendered `{expr}` values together; a `{expr}` is an ordinary expression that
+        // must be evaluated (and can raise or suspend), so the work is driven through
+        // continuations rather than assembled here.
         Node::StrLit(parts) => {
             if parts.iter().any(|p| matches!(p, StrPart::Interp(_))) {
-                unimplemented!("string interpolation needs the Stringable dispatcher (M4)");
+                return str_interp_advance(resolved, heap, machine, node, String::new(), 0);
             }
             let mut text = String::new();
             for part in parts {

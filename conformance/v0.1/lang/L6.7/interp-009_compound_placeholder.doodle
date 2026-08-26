@@ -1,0 +1,4 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: here: <list>
+print("here: {[1, 2, 3]}")

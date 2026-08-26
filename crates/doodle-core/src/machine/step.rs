@@ -158,8 +158,10 @@ fn dispatch(
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;
             let result = match op {
-                // `x is T`: the right operand is a type value (L§6.5).
-                BinaryOp::Is => types::is_op(lhs, rhs, heap, span)?,
+                // `x is T`: the right operand is a type value (L§6.5). The callable
+                // trio (`Procedure`/`Function`/`Callable`) needs the resolver and the
+                // intrinsic registry to read a callable's `to`/`fn` kind (S-37).
+                BinaryOp::Is => types::is_op(lhs, rhs, heap, resolved, &machine.intrinsics, span)?,
                 // String `+`/`*` branch off the numeric path (L§4.4, S-59); a pair with no
                 // string operand falls through to numeric arithmetic.
                 _ if is_arithmetic(op) => {
@@ -235,6 +237,9 @@ fn dispatch(
             values,
             index,
         }) => eval::list_got_elem(resolved, heap, machine, list, values, index),
+        Some(Cont::StrInterp { node, acc, index }) => {
+            eval::str_interp(resolved, heap, machine, node, acc, index)
+        }
         Some(Cont::DictGotKey {
             dict,
             entries,

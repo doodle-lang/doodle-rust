@@ -140,6 +140,7 @@ impl Instance {
             Cont::CallGotArg { call, .. } => ast.span(*call),
             Cont::BlockGotArg { call, .. } => ast.span(*call),
             Cont::ListGotElem { list, .. } => ast.span(*list),
+            Cont::StrInterp { node, .. } => ast.span(*node),
             Cont::DictGotKey { dict, .. } | Cont::DictGotValue { dict, .. } => ast.span(*dict),
             Cont::FieldRead { field } => ast.span(*field),
             Cont::BindDefault { default, .. } => ast.span(*default),

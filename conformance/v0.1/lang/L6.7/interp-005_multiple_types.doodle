@@ -1,0 +1,4 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: 3 then true then nil
+print("{1 + 2} then {true} then {nil}")

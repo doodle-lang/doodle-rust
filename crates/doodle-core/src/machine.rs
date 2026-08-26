@@ -40,6 +40,7 @@ mod protect;
 mod record;
 mod ring;
 mod step;
+mod stringify;
 mod strop;
 mod types;
 mod unwind;

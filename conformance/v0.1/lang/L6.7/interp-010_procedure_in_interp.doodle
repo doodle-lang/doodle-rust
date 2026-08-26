@@ -1,0 +1,6 @@
+#! clause: L6.7
+#! mode: static
+#! stage: full
+#! expect-static-error: an interpolation needs a value @ 6:12
+to greet() end
+print("hi {greet()}")

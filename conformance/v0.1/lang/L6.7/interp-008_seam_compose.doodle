@@ -1,0 +1,5 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: true
+let acute = "\u{301}"
+print("e{acute}" == "\u{e9}")

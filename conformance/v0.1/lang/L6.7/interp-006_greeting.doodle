@@ -1,0 +1,6 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: Hello, Ada! You have 3 messages.
+let name = "Ada"
+let count = 3
+print("Hello, {name}! You have {count} messages.")

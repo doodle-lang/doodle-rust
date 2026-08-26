@@ -13,8 +13,8 @@ use crate::span::Span;
 use num_traits::ToPrimitive;
 
 /// The demo intrinsic `print` (E§5.2, S-43): a `to` taking one value, rendering it
-/// (the provisional [`render`] stand-in for L§15 Stringable, superseded at M4/M9a),
-/// and appending it plus a newline to the instance's output sink.
+/// through the placeholder `Stringable` dispatcher (`stringify::render`, superseded at
+/// M5/M9a), and appending it plus a newline to the instance's output sink.
 pub fn print() -> Intrinsic {
     Intrinsic {
         name: "print".into(),
@@ -25,7 +25,7 @@ pub fn print() -> Intrinsic {
             is_block: false,
         }],
         body: ForeignBody::Sync(|ctx| {
-            let text = render(ctx.heap(), ctx.args()[0]);
+            let text = crate::machine::stringify::render(ctx.heap(), ctx.args()[0]);
             ctx.emit(text.as_bytes());
             ctx.emit(b"\n");
             Ok(None)
@@ -313,43 +313,4 @@ fn nonfinite(span: Span) -> Raise {
         "that number got too big to be a real number",
         span,
     )
-}
-
-/// A **provisional** value renderer for `print` over the demo subset — a stand-in for
-/// the L§15 Stringable dispatcher (real `to_string` protocol dispatch is M4/M9a). It
-/// must be **deterministic** (E§11): integers/bignums render exactly, floats use a
-/// fixed shortest-round-trip format, and no address/ordering leaks in. Compound
-/// values (list/bytes/records/…) get a provisional angle-bracket tag until the real
-/// dispatcher lands. Crate-visible so `resolve(Raise)` can render a host-raised value
-/// into its message (`machine.rs`).
-pub(crate) fn render(heap: &Heap, value: Value) -> String {
-    match value {
-        Value::Nil => "nil".to_string(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::BigInt(idx) => heap.bigint(idx).value.to_string(),
-        Value::Float(x) => render_float(x),
-        Value::Str(idx) => heap.string(idx).utf8.to_string(),
-        Value::Bytes(_) => "<bytes>".to_string(),
-        Value::List(_) => "<list>".to_string(),
-        Value::Dict(_) => "<dict>".to_string(),
-        Value::Record(_) => "<record>".to_string(),
-        Value::Callable(_) => "<callable>".to_string(),
-        Value::Module(_) => "<module>".to_string(),
-        Value::Type(_) => "<type>".to_string(),
-        Value::Foreign(_) => "<foreign>".to_string(),
-    }
-}
-
-/// Deterministic float rendering for the provisional `print` (E§11 fixed float
-/// formatting). Every machine-produced float is finite (S-56); an integer-valued
-/// float still shows a `.0` so it is not mistaken for an integer.
-fn render_float(x: f64) -> String {
-    if x == x.trunc() && x.is_finite() {
-        format!("{x:.1}")
-    } else {
-        // Rust's `{}` for f64 is the shortest round-tripping decimal — deterministic.
-        format!("{x}")
-    }
 }

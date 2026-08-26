@@ -268,7 +268,14 @@ fn the_is_operator_classifies_values() {
         ("true is Bool\n", true),
         ("nil is Nil\n", true),
         ("b\"hi\" is Bytes\n", true),
-        ("let f = fn(x) x end\nf is Procedure\n", true),
+        // The callable trio (S-37): an `fn` is a Function and a Callable, not a
+        // Procedure; a `to` is a Procedure and a Callable, not a Function.
+        ("let f = fn(x) x end\nf is Function\n", true),
+        ("let f = fn(x) x end\nf is Callable\n", true),
+        ("let f = fn(x) x end\nf is Procedure\n", false),
+        ("to p() end\np is Procedure\n", true),
+        ("to p() end\np is Callable\n", true),
+        ("to p() end\np is Function\n", false),
         // Integer beyond i64 is a promoted BigInt, still an `Int` (MD §3).
         ("9223372036854775807 + 1 is Int\n", true),
     ] {
@@ -1073,6 +1080,28 @@ fn each_keeps_heap_valued_elements_rooted_across_collection() {
         assert!(steps < 100_000, "each did not halt");
     }
     assert_eq!(inst.output(), b"a\nb\nc\n");
+}
+
+#[test]
+fn interpolation_renders_joins_and_ignores_a_local_to_string() {
+    // `{expr}` renders through the Stringable dispatcher and splices between the literal
+    // runs; a user `fn to_string` is a real, callable binding but cannot hijack
+    // interpolation, which binds the dispatcher directly (L§6.7, §15 hook 1, S-37).
+    let src = concat!(
+        "fn to_string(x)\n",
+        "  return \"HIJACKED\"\n",
+        "end\n",
+        "print(to_string(0))\n",
+        "print(\"n = {1 + 2}!\")\n",
+    );
+    let mut inst = load_source_with_print(src);
+    let mut steps = 0;
+    while !inst.is_halted() {
+        inst.step().expect("interpolation raised");
+        steps += 1;
+        assert!(steps < 100_000, "interpolation did not halt");
+    }
+    assert_eq!(inst.output(), b"HIJACKED\nn = 3!\n");
 }
 
 #[test]

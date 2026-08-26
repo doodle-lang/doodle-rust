@@ -1,0 +1,4 @@
+#! clause: L6.7
+#! mode: run
+#! expect-out: sum = 3
+print("sum = {1 + 2}")

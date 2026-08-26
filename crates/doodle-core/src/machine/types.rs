@@ -13,7 +13,9 @@
 
 use super::Value;
 use super::error::{ExceptionKind, Raise};
-use crate::heap::Heap;
+use super::intrinsic::Registry;
+use crate::heap::{CallableTarget, Heap};
+use crate::resolve::{BodyKind, ResolvedModule};
 use crate::span::Span;
 
 /// A type value (L§4.12): a **built-in** type or a user-declared **record** type.
@@ -64,9 +66,18 @@ pub(crate) enum BuiltinType {
     List,
     /// `Dict`.
     Dict,
-    /// `Procedure` — any callable (whether `Procedure` distinguishes procedures
-    /// from functions is provisional, L Appendix D; here it matches both).
+    /// `Procedure` — a `to` (yields no value). Concrete member of the callable
+    /// trio (L§4.12, S-37): the language's `to`/`fn` distinction is load-bearing
+    /// (L§8), so `is` distinguishes them; a `Function` is **not** a `Procedure`.
     Procedure,
+    /// `Function` — an `fn` (named or anonymous; yields a value). The other
+    /// concrete member of the callable trio.
+    Function,
+    /// `Callable` — the umbrella over `Procedure` and `Function` (any callable),
+    /// parallel to `Number` over `Int`/`Float`: `x is Callable` iff `x is Procedure`
+    /// or `x is Function`. A record **type** value is not `Callable` (it is
+    /// constructed with call syntax but is a Type, L§4.1).
+    Callable,
 }
 
 /// The built-in type-value prelude: each name and the type it denotes, seeded
@@ -82,14 +93,24 @@ pub(crate) const BUILTINS: &[(&str, BuiltinType)] = &[
     ("Nil", BuiltinType::Nil),
     ("List", BuiltinType::List),
     ("Dict", BuiltinType::Dict),
+    // The callable trio: concrete members first, then the umbrella (mirroring
+    // `Int`, `Float`, `Number`).
     ("Procedure", BuiltinType::Procedure),
+    ("Function", BuiltinType::Function),
+    ("Callable", BuiltinType::Callable),
 ];
 
 /// Whether `value`'s type is `ty` (L§6.5 membership, built-in cases). Numbers:
 /// `Int` matches an integer of either representation (the canonical-int invariant
 /// keeps small integers as `Int` and larger ones as `BigInt`, MD §3), `Float`
 /// matches a float, and `Number` matches either.
-pub(crate) fn value_is(value: Value, ty: BuiltinType) -> bool {
+///
+/// The callable trio (`Procedure`/`Function`/`Callable`) needs the value's `to`/`fn`
+/// kind, which isn't derivable from `value` alone (a source callable's kind lives in
+/// the resolver, an intrinsic's in the registry). The caller passes `callable_kind`
+/// = `Some(kind)` **iff** `value` is a callable — see [`callable_kind_of`] — so those
+/// arms read it rather than `value`.
+pub(crate) fn value_is(value: Value, ty: BuiltinType, callable_kind: Option<BodyKind>) -> bool {
     match ty {
         BuiltinType::Int => matches!(value, Value::Int(_) | Value::BigInt(_)),
         BuiltinType::Float => matches!(value, Value::Float(_)),
@@ -102,14 +123,46 @@ pub(crate) fn value_is(value: Value, ty: BuiltinType) -> bool {
         BuiltinType::Nil => matches!(value, Value::Nil),
         BuiltinType::List => matches!(value, Value::List(_)),
         BuiltinType::Dict => matches!(value, Value::Dict(_)),
-        BuiltinType::Procedure => matches!(value, Value::Callable(_)),
+        BuiltinType::Callable => callable_kind.is_some(),
+        BuiltinType::Procedure => callable_kind == Some(BodyKind::Proc),
+        BuiltinType::Function => callable_kind == Some(BodyKind::Func),
     }
+}
+
+/// The `to`/`fn` kind of a callable **value**, or `None` if `value` is not callable.
+/// A callable value is always a `to` ([`BodyKind::Proc`]) or an `fn`
+/// ([`BodyKind::Func`]) — a block is not a value and the module top level is not a
+/// callable value — so the result is never `Block`/`ModuleTopLevel`. A foreign
+/// (intrinsic) callable classifies by its declared descriptor (S-42-lite): a
+/// value-yielding intrinsic is a `Function`, a void one a `Procedure` (so `print` is
+/// a `Procedure`), consistent with the `to`/`fn` distinction everywhere else.
+fn callable_kind_of(
+    value: Value,
+    heap: &Heap,
+    resolved: &ResolvedModule,
+    intrinsics: &Registry,
+) -> Option<BodyKind> {
+    let Value::Callable(idx) = value else {
+        return None;
+    };
+    let kind = match heap.callable(idx).target {
+        CallableTarget::Source(id) => resolved.callables[id as usize].kind,
+        CallableTarget::Intrinsic(iid) => intrinsics.kind_of(iid),
+    };
+    Some(kind)
 }
 
 /// Applies `lhs is rhs` (L§6.5): the right operand must be a **type value**; the
 /// result is whether `lhs`'s type is that type. A non-type right operand raises
 /// (protocol values — the other legal right operand — arrive at M5).
-pub(crate) fn is_op(lhs: Value, rhs: Value, heap: &Heap, span: Span) -> Result<Value, Raise> {
+pub(crate) fn is_op(
+    lhs: Value,
+    rhs: Value,
+    heap: &Heap,
+    resolved: &ResolvedModule,
+    intrinsics: &Registry,
+    span: Span,
+) -> Result<Value, Raise> {
     let Value::Type(idx) = rhs else {
         return Err(Raise::new(
             ExceptionKind::TypeMismatch,
@@ -118,7 +171,9 @@ pub(crate) fn is_op(lhs: Value, rhs: Value, heap: &Heap, span: Span) -> Result<V
         ));
     };
     let matches = match &heap.type_value(idx).kind {
-        TypeKind::Builtin(b) => value_is(lhs, *b),
+        TypeKind::Builtin(b) => {
+            value_is(lhs, *b, callable_kind_of(lhs, heap, resolved, intrinsics))
+        }
         // Records are **nominal** (L§6.5): `x is Point` holds iff `x` is a record whose
         // type is this exact declared type — compared by the type value's identity, so
         // two same-shaped records of different declarations are different types.
@@ -136,28 +191,83 @@ mod tests {
 
     #[test]
     fn int_matches_both_integer_representations_but_not_float() {
-        assert!(value_is(Value::Int(3), BuiltinType::Int));
-        assert!(value_is(Value::BigInt(BigIntIdx(0)), BuiltinType::Int));
-        assert!(!value_is(Value::Float(3.0), BuiltinType::Int));
+        assert!(value_is(Value::Int(3), BuiltinType::Int, None));
+        assert!(value_is(
+            Value::BigInt(BigIntIdx(0)),
+            BuiltinType::Int,
+            None
+        ));
+        assert!(!value_is(Value::Float(3.0), BuiltinType::Int, None));
     }
 
     #[test]
     fn number_matches_any_numeric_but_not_others() {
-        assert!(value_is(Value::Int(1), BuiltinType::Number));
-        assert!(value_is(Value::BigInt(BigIntIdx(0)), BuiltinType::Number));
-        assert!(value_is(Value::Float(1.0), BuiltinType::Number));
-        assert!(!value_is(Value::Bool(true), BuiltinType::Number));
-        assert!(!value_is(Value::Nil, BuiltinType::Number));
+        assert!(value_is(Value::Int(1), BuiltinType::Number, None));
+        assert!(value_is(
+            Value::BigInt(BigIntIdx(0)),
+            BuiltinType::Number,
+            None
+        ));
+        assert!(value_is(Value::Float(1.0), BuiltinType::Number, None));
+        assert!(!value_is(Value::Bool(true), BuiltinType::Number, None));
+        assert!(!value_is(Value::Nil, BuiltinType::Number, None));
     }
 
     #[test]
     fn each_leaf_type_matches_only_its_own_kind() {
-        assert!(value_is(Value::Bool(false), BuiltinType::Bool));
-        assert!(value_is(Value::Nil, BuiltinType::Nil));
-        assert!(value_is(Value::Str(StrIdx(0)), BuiltinType::String));
-        assert!(value_is(Value::List(ListIdx(0)), BuiltinType::List));
-        assert!(value_is(Value::Callable(CalIdx(0)), BuiltinType::Procedure));
-        assert!(!value_is(Value::Callable(CalIdx(0)), BuiltinType::List));
-        assert!(!value_is(Value::Nil, BuiltinType::Bool));
+        assert!(value_is(Value::Bool(false), BuiltinType::Bool, None));
+        assert!(value_is(Value::Nil, BuiltinType::Nil, None));
+        assert!(value_is(Value::Str(StrIdx(0)), BuiltinType::String, None));
+        assert!(value_is(Value::List(ListIdx(0)), BuiltinType::List, None));
+        assert!(!value_is(Value::Nil, BuiltinType::Bool, None));
+    }
+
+    #[test]
+    fn the_callable_trio_splits_procedures_from_functions() {
+        let proc = Some(BodyKind::Proc);
+        let func = Some(BodyKind::Func);
+        // A `to` is a Procedure and a Callable, never a Function.
+        assert!(value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Procedure,
+            proc
+        ));
+        assert!(value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Callable,
+            proc
+        ));
+        assert!(!value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Function,
+            proc
+        ));
+        // An `fn` is a Function and a Callable, never a Procedure.
+        assert!(value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Function,
+            func
+        ));
+        assert!(value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Callable,
+            func
+        ));
+        assert!(!value_is(
+            Value::Callable(CalIdx(0)),
+            BuiltinType::Procedure,
+            func
+        ));
+        // A non-callable is none of the trio.
+        assert!(!value_is(
+            Value::List(ListIdx(0)),
+            BuiltinType::Callable,
+            None
+        ));
+        assert!(!value_is(
+            Value::List(ListIdx(0)),
+            BuiltinType::Function,
+            None
+        ));
     }
 }
