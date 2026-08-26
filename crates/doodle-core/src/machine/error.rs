@@ -70,6 +70,11 @@ pub enum ExceptionKind {
     /// count is a bug, not a request for `""`, so it raises rather than clamping — an
     /// operand-domain error parallel to `DivisionByZero`.
     NegativeCount,
+    /// `decode(bytes)` was given bytes that are not well-formed UTF-8 (L§4.4, S-58): a
+    /// **data** error, not a call-shape one. First of the malformed-data family. The
+    /// host-side `make_string` reports the same failure as an error return (S-30), not a
+    /// raise, since a host call has no drive to raise into.
+    InvalidUtf8,
     /// A function (`fn`) reached its completion without producing a value (L§8.4):
     /// it fell off the end. The resolver catches this statically where it can
     /// (`function-falls-off-end`, S-5); this is the runtime backstop for the cases
@@ -105,6 +110,7 @@ impl ExceptionKind {
             ExceptionKind::NoSuchField => "no-such-field",
             ExceptionKind::NoValueDestination => "no-value-destination",
             ExceptionKind::NegativeCount => "negative-count",
+            ExceptionKind::InvalidUtf8 => "invalid-utf8",
             ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
             ExceptionKind::HostRaised => "host-raised",
         }

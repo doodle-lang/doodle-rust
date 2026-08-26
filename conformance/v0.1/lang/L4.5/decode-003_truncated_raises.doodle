@@ -1,0 +1,5 @@
+#! clause: L4.5
+#! mode: run
+#! expect-raise: aren't valid UTF-8 @ 5:7
+let b = b"\xe2\x82"
+print(decode(b))

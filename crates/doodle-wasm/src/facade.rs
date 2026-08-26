@@ -18,8 +18,8 @@ use doodle_core::drive::{
 };
 use doodle_core::machine::{
     Handle, HandleError, Instance, Kind, Registry, ValueError, clear_canvas_intrinsic,
-    cos_intrinsic, draw_line_intrinsic, each_intrinsic, length_intrinsic, print_intrinsic,
-    set_turtle_intrinsic, sin_intrinsic,
+    cos_intrinsic, decode_intrinsic, draw_line_intrinsic, each_intrinsic, encode_intrinsic,
+    length_intrinsic, print_intrinsic, set_turtle_intrinsic, sin_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -88,7 +88,13 @@ impl Session {
         let mut registry = Registry::new();
         // Must match the native conformance runner's `demo_registry` in the same order —
         // an identical namespace is what makes native/wasm resolution identical (E§11).
-        for intrinsic in [print_intrinsic(), length_intrinsic(), each_intrinsic()] {
+        for intrinsic in [
+            print_intrinsic(),
+            length_intrinsic(),
+            each_intrinsic(),
+            encode_intrinsic(),
+            decode_intrinsic(),
+        ] {
             registry
                 .register(intrinsic)
                 .expect("a demo intrinsic registers cleanly");

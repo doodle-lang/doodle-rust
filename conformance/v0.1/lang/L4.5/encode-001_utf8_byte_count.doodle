@@ -1,0 +1,4 @@
+#! clause: L4.5
+#! mode: run
+#! expect-out: 5
+print(length(encode("caf\u{e9}")))

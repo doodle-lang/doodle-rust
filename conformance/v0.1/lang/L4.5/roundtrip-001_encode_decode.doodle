@@ -1,0 +1,4 @@
+#! clause: L4.5
+#! mode: run
+#! expect-out: true
+print(decode(encode("caf\u{e9}")) == "caf\u{e9}")

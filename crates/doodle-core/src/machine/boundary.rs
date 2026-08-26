@@ -76,8 +76,14 @@ pub enum ValueError {
     IntOutOfRange,
     /// `list_get` with an index past the end of the list (E§4.3).
     IndexOutOfBounds,
-    /// `make_string` was given bytes that are not well-formed UTF-8 (E§4.3).
-    InvalidUtf8,
+    /// `make_string` was given bytes that are not well-formed UTF-8 (E§4.3, S-30). Carries
+    /// the byte offset of the first invalid sequence, so the host boundary and Doodle
+    /// `decode` (which raises `invalid-utf8`, S-58) name the same position — one story
+    /// across the boundary.
+    InvalidUtf8 {
+        /// Byte offset of the first invalid sequence (`Utf8Error::valid_up_to`).
+        position: usize,
+    },
     /// `make_int_decimal` was given text that is not a base-10 integer literal — the
     /// arbitrary-precision counterpart of the fixed-width constructors rejecting a
     /// malformed magnitude.
@@ -183,7 +189,9 @@ impl Instance {
     /// `string_bytes` round-trips it: for already-NFC input the bytes are returned
     /// unchanged; otherwise the normalized form is stored.
     pub fn make_string(&mut self, bytes: &[u8]) -> Result<Handle, ValueError> {
-        let text = std::str::from_utf8(bytes).map_err(|_| ValueError::InvalidUtf8)?;
+        let text = std::str::from_utf8(bytes).map_err(|e| ValueError::InvalidUtf8 {
+            position: e.valid_up_to(),
+        })?;
         let nfc = crate::unicode::nfc(text);
         let idx = self.heap.alloc_string(nfc.into_owned().into_boxed_str());
         Ok(self.intern(Value::Str(idx)))

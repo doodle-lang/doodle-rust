@@ -1,0 +1,5 @@
+#! clause: L4.5
+#! mode: run
+#! expect-raise: problem at byte 1 @ 5:7
+let b = b"a\xff"
+print(decode(b))

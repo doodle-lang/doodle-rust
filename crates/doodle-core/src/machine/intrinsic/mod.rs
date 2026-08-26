@@ -211,6 +211,12 @@ impl IntrinsicCtx<'_> {
         Value::Str(self.heap.alloc_string(utf8))
     }
 
+    /// Allocates a result byte string and returns its value — for an intrinsic that builds
+    /// a `Bytes` result (e.g. `encode`). Handed straight back as the call's result.
+    pub(crate) fn alloc_bytes(&mut self, bytes: Box<[u8]>) -> Value {
+        Value::Bytes(self.heap.alloc_bytes(bytes))
+    }
+
     /// The call site's span, for a diagnostic a callback raises.
     pub(crate) fn span(&self) -> Span {
         self.call_span
@@ -437,7 +443,7 @@ mod binding;
 /// The provisional demo intrinsics (`print`, `each`, `read_line`) and the value
 /// renderer, built on the mechanism above. Split out for length.
 mod builtins;
-pub use builtins::{cos, each, length, print, read_line, sin};
+pub use builtins::{cos, decode, each, encode, length, print, read_line, sin};
 
 /// The M3 platform primitives (`draw_line`/`set_turtle`/`clear_canvas`) the turtle
 /// library draws through — suspending capabilities with no engine-side drawing logic

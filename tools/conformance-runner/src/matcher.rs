@@ -11,7 +11,10 @@
 use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{Directive, Outcome, run};
-use doodle_core::machine::{Instance, Registry, each_intrinsic, length_intrinsic, print_intrinsic};
+use doodle_core::machine::{
+    Instance, Registry, decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic,
+    print_intrinsic,
+};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::{LineIndex, Position, normalize};
@@ -73,7 +76,13 @@ fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
 /// more join as they land. All are provisional, superseded by the stdlib (M9a).
 fn demo_registry() -> Registry {
     let mut registry = Registry::new();
-    for intrinsic in [print_intrinsic(), length_intrinsic(), each_intrinsic()] {
+    for intrinsic in [
+        print_intrinsic(),
+        length_intrinsic(),
+        each_intrinsic(),
+        encode_intrinsic(),
+        decode_intrinsic(),
+    ] {
         registry
             .register(intrinsic)
             .expect("a demo intrinsic registers cleanly into a fresh registry");

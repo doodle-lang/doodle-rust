@@ -150,6 +150,75 @@ pub fn length() -> Intrinsic {
     }
 }
 
+/// The provisional demo intrinsic `encode` (L§4.4/§15 "the byte view"): a `fn` mapping a
+/// `String` to its NFC UTF-8 `Bytes`. **Cannot fail** — a `String` is always valid NFC
+/// UTF-8 by construction (§4.4). Superseded by the standard library (M9a); a non-string
+/// raises `TypeMismatch`.
+pub fn encode() -> Intrinsic {
+    Intrinsic {
+        name: "encode".into(),
+        kind: BodyKind::Func,
+        params: vec![value_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let Value::Str(s) = ctx.args()[0] else {
+                return Err(Raise::new(
+                    ExceptionKind::TypeMismatch,
+                    "`encode` needs a string",
+                    ctx.span(),
+                ));
+            };
+            let bytes: Box<[u8]> = ctx.heap().string(s).utf8.as_bytes().into();
+            Ok(Some(ctx.alloc_bytes(bytes)))
+        }),
+    }
+}
+
+/// The provisional demo intrinsic `decode` (L§4.4/§4.5/§15 "the byte view"): a `fn`
+/// mapping `Bytes` to a `String`, **validating UTF-8** (raising `invalid-utf8` on
+/// malformed input, naming the byte offset of the first bad sequence — S-58) and
+/// **normalizing to NFC**. The round-trip law holds: `decode(encode(s)) == s`. A lossy
+/// (replacement-character) decode is a separate later stdlib function, never this one.
+pub fn decode() -> Intrinsic {
+    Intrinsic {
+        name: "decode".into(),
+        kind: BodyKind::Func,
+        params: vec![value_param()],
+        body: ForeignBody::Sync(|ctx| {
+            let Value::Bytes(b) = ctx.args()[0] else {
+                return Err(Raise::new(
+                    ExceptionKind::TypeMismatch,
+                    "`decode` needs bytes",
+                    ctx.span(),
+                ));
+            };
+            let text = match std::str::from_utf8(&ctx.heap().byte_string(b).bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    return Err(Raise::new(
+                        ExceptionKind::InvalidUtf8,
+                        format!(
+                            "these bytes aren't valid UTF-8 text (problem at byte {})",
+                            e.valid_up_to()
+                        ),
+                        ctx.span(),
+                    ));
+                }
+            };
+            let nfc = crate::unicode::nfc(text).into_owned().into_boxed_str();
+            Ok(Some(ctx.alloc_string(nfc)))
+        }),
+    }
+}
+
+/// The single required `value` parameter shared by the container/conversion intrinsics.
+fn value_param() -> ForeignParam {
+    ForeignParam {
+        name: "value".into(),
+        default: None,
+        is_block: false,
+    }
+}
+
 /// The demo suspending capability `read_line` (E§5.3, §7.5): a `fn` taking no arguments
 /// that **suspends** — the host supplies the line via `resolve(Value)` (or fails it via
 /// `resolve(Raise)`). The canonical scripted capability for the M2b drive tests.

@@ -139,9 +139,11 @@ fn make_string_validates_utf8_and_normalizes_to_nfc() {
 #[test]
 fn make_string_rejects_invalid_utf8() {
     let mut inst = instance();
+    // The error carries the byte offset of the first invalid sequence (here 0), the same
+    // position Doodle `decode` names — one story across the boundary (S-30/S-58).
     assert_eq!(
-        inst.make_string(&[0xff, 0xfe]),
-        Err(ValueError::InvalidUtf8)
+        inst.make_string(&[0x61, 0xff, 0xfe]),
+        Err(ValueError::InvalidUtf8 { position: 1 })
     );
 }
 
