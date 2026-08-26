@@ -5,6 +5,19 @@ use super::*;
 
 const S: Span = Span::DUMMY;
 
+/// These tests exercise `binary`'s arithmetic; the R8 size guard it now consults needs a
+/// `&mut Machine`, so route every call through a throwaway one with default (generous)
+/// limits — shadowing the real [`super::binary`] so the call sites stay unchanged.
+fn binary(
+    op: BinaryOp,
+    lhs: Value,
+    rhs: Value,
+    heap: &mut Heap,
+    span: Span,
+) -> Result<Value, Raise> {
+    super::binary(op, lhs, rhs, heap, &mut Machine::for_test(), span)
+}
+
 fn big(n: &str) -> BigInt {
     n.parse().unwrap()
 }

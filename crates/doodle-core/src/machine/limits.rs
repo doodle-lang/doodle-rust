@@ -90,6 +90,20 @@ impl FusedCounter {
         }
         Ok(())
     }
+
+    /// Charges `cost` work units against the lifetime step budget (R8): a bignum-producing
+    /// `*`/`**` costs proportional to its result size, not the flat 1 a statement costs, so
+    /// the budget bounds real work and a single huge operation cannot slip under it. Returns
+    /// `false` if the budget cannot cover `cost` (the caller faults `StepBudget` *without*
+    /// doing the work); otherwise deducts it. The **slice fuel** is untouched — it paces
+    /// safe points for responsiveness, and an atomic bignum op cannot yield mid-computation.
+    pub(crate) fn charge(&mut self, cost: u64) -> bool {
+        if self.budget < cost {
+            return false;
+        }
+        self.budget -= cost;
+        true
+    }
 }
 
 /// A statement-level safe point (E§7.4): tick the fused counter, run a collection
@@ -147,5 +161,28 @@ impl Machine {
             return Err(EngineFault::LimitExceeded(LimitKind::StackDepth));
         }
         Ok(())
+    }
+
+    /// R8 magnitude guard for a bignum-producing operation (`*`/`**`, MD §9): given the
+    /// result's estimated size in bytes, park a `LimitExceeded` fault **before** the
+    /// operation runs if it would exceed the **heap** limit, or the remaining **step
+    /// budget** once charged the size (bignum work is not free — a huge result cannot slip
+    /// under a flat per-statement cost). Returns `false` if a fault was parked — the caller
+    /// aborts with a placeholder value, and `step` surfaces the parked fault before the next
+    /// transition, so the placeholder is never observed. `true` means proceed.
+    ///
+    /// The estimate is a deterministic upper bound (E§11): the fault fires at the same
+    /// operation for the same program and limits, and no oversized allocation is ever begun.
+    pub(crate) fn admit_bignum(&mut self, result_bytes: u128) -> bool {
+        if result_bytes > u128::from(self.limits.heap_bytes) {
+            self.set_pending_fault(EngineFault::LimitExceeded(LimitKind::Heap));
+            return false;
+        }
+        // Past the heap check `result_bytes <= heap_bytes <= u64::MAX`, so the cast is exact.
+        if !self.fuel.charge(result_bytes as u64) {
+            self.set_pending_fault(EngineFault::LimitExceeded(LimitKind::StepBudget));
+            return false;
+        }
+        true
     }
 }

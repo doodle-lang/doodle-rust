@@ -131,10 +131,11 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            // ~1.1e12 safe points, ~1.7e10 payload bytes (16 GiB), 100k non-tail
-            // frames — see the type's "provisional" note.
+            // ~1.1e12 safe points, 1 GiB payload bytes, 100k non-tail frames — a
+            // generous embedder backstop (a browser demo or other untrusted host sets
+            // tighter values); see the type's "provisional" note.
             step_budget: 1 << 40,
-            heap_bytes: 1 << 34,
+            heap_bytes: 1 << 30,
             stack_depth: 100_000,
         }
     }

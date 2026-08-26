@@ -6,6 +6,40 @@
 use super::*;
 use crate::span::ModuleId;
 
+impl Machine {
+    /// A bare machine for unit-testing pieces that take `&mut Machine` without a full
+    /// [`Instance`] — the arith R8 size guard (`admit_bignum`) needs one to charge the
+    /// budget and park a fault. Default (generous) limits, an empty frame stack, and a
+    /// placeholder `error_type`: it never materializes an `Error`. (Lives here, in the
+    /// length-exempt test module, rather than in `machine.rs`.)
+    pub(crate) fn for_test() -> Self {
+        let limits = Limits::default();
+        Machine {
+            frames: Vec::new(),
+            reg: None,
+            frame_serial: 0,
+            unwind: None,
+            ring: ring::RingBuffer::new(),
+            fuel: FusedCounter::new(&limits),
+            gc_threshold: limits::GC_MIN_BYTES,
+            handles: HandleTable::new(),
+            intrinsics: intrinsic::Registry::new(),
+            output: Vec::new(),
+            pending: None,
+            directive: Directive::RunToCompletion,
+            pending_fault: None,
+            foreign_roots: Vec::new(),
+            dyn_stack: Vec::new(),
+            handling: Vec::new(),
+            error_type: TypeIdx(0),
+            reentry_depth: 0,
+            gc_every_safe_point: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            limits,
+        }
+    }
+}
+
 /// Builds an instance from Doodle source through the real front end, asserting
 /// the program loads clean (no lex/parse/resolve diagnostics).
 fn load_source(src: &str) -> Instance {
@@ -808,8 +842,8 @@ fn a_garbage_loop_reclaims_under_a_heap_limit_below_the_gc_floor() {
 // --- M4.7: string repetition resource bound (L§4.4, S-59) ---
 
 /// A string `*` whose result would exceed the heap limit faults rather than attempting an
-/// allocation that could overflow `usize` or exhaust memory — the single-allocation bound
-/// (the R8 interior magnitude cap is later). Both a bignum count (unrepresentable) and a
+/// allocation that could overflow `usize` or exhaust memory — the R8 pre-size cap, uniform
+/// now across string `*`, bignum `*`, and `**`. Both a bignum count (unrepresentable) and a
 /// representable count over a tight configured limit fault as `LimitExceeded(Heap)`.
 #[test]
 fn a_string_repeat_over_the_heap_limit_faults() {
@@ -831,6 +865,64 @@ fn a_string_repeat_over_the_heap_limit_faults() {
     assert!(matches!(
         drive_to_fault(&mut inst),
         EngineFault::LimitExceeded(LimitKind::Heap)
+    ));
+}
+
+/// R8: `**` whose result would exceed the heap limit faults `LimitExceeded(Heap)` from the
+/// pre-size estimate — a *representable* exponent producing a huge magnitude, distinct from
+/// the `exponent-too-large` guard on a u32-overflowing exponent. `2 ** 10_000_000` is a
+/// ~1.25 MB integer, so it faults before the bignum is ever built.
+#[test]
+fn a_power_over_the_heap_limit_faults_before_computing() {
+    let mut inst = load_source_with_limits(
+        "let x = 2 ** 10000000\n",
+        Limits {
+            heap_bytes: 4096,
+            ..Limits::default()
+        },
+    );
+    assert!(matches!(
+        drive_to_fault(&mut inst),
+        EngineFault::LimitExceeded(LimitKind::Heap)
+    ));
+}
+
+/// R8: a bignum `*` whose product would exceed the heap limit faults `LimitExceeded(Heap)`
+/// from the pre-size estimate (`a.bits() + b.bits()`), without attempting the multiply. The
+/// operand `10 ** 1_000_000` (~415 KB, ~500 KB estimated) fits the 600 KB limit; its square
+/// (~830 KB estimated) does not.
+#[test]
+fn a_multiply_over_the_heap_limit_faults_before_computing() {
+    let mut inst = load_source_with_limits(
+        "let a = 10 ** 1000000\nlet x = a * a\n",
+        Limits {
+            heap_bytes: 600_000,
+            ..Limits::default()
+        },
+    );
+    assert!(matches!(
+        drive_to_fault(&mut inst),
+        EngineFault::LimitExceeded(LimitKind::Heap)
+    ));
+}
+
+/// R8 pre-charge: a bignum result costs step budget proportional to its byte size, so a huge
+/// magnitude faults `StepBudget` under a bounded budget even when the heap would allow it.
+/// `2 ** 10_000_000` charges ~2.5 M units — far past the 1 M budget — while a one-line
+/// program's own safe points spend only a handful, so the fault is unambiguously the charge.
+#[test]
+fn a_bignum_power_charges_the_step_budget_by_its_size() {
+    let mut inst = load_source_with_limits(
+        "let x = 2 ** 10000000\n",
+        Limits {
+            step_budget: 1_000_000,
+            heap_bytes: 1 << 34,
+            stack_depth: 100_000,
+        },
+    );
+    assert!(matches!(
+        drive_to_fault(&mut inst),
+        EngineFault::LimitExceeded(LimitKind::StepBudget)
     ));
 }
 

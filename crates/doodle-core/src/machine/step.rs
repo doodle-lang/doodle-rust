@@ -167,7 +167,7 @@ fn dispatch(
                 _ if is_arithmetic(op) => {
                     match strop::try_binary(op, lhs, rhs, heap, machine, span)? {
                         Some(v) => v,
-                        None => arith::binary(op, lhs, rhs, heap, span)?,
+                        None => arith::binary(op, lhs, rhs, heap, machine, span)?,
                     }
                 }
                 // A comparison or equality operator (`== != < > <= >=`).

@@ -14,7 +14,8 @@
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{
-    Directive, EngineFault, LimitKind, Outcome, PauseReason, Resolution, resolve_slice, run_slice,
+    Directive, EngineFault, LimitKind, Limits, Outcome, PauseReason, Resolution, resolve_slice,
+    run_slice,
 };
 use doodle_core::machine::{
     Handle, HandleError, Instance, Kind, Registry, ValueError, clear_canvas_intrinsic,
@@ -30,6 +31,18 @@ use doodle_core::span::{ModuleId, Span};
 /// system is M5). Lives in `doodle-rust`; `doodle-web` reaches it only through the wasm
 /// facade's `turtle` constructor.
 const TURTLE_LIBRARY: &str = include_str!("../../../doodle/turtle.doodle");
+
+/// Resource limits for the public browser demo (E§10.2). The **64 MiB** heap is vast
+/// headroom for kid turtle programs (KB–MB), yet a pathological magnitude — `9 ** 9 ** 9`
+/// is a ~154 MB integer, or a huge `*` — faults `LimitExceeded(Heap)` promptly instead of
+/// freezing the tab (R8). The step budget stays large: a long animation is paced by the
+/// stop button and slice fuel, never cut off, so the R8 step-budget charge is a backstop
+/// here, not the demo's guard.
+const DEMO_LIMITS: Limits = Limits {
+    step_budget: 1 << 40,
+    heap_bytes: 64 << 20,
+    stack_depth: 100_000,
+};
 
 /// A loaded engine session: a `doodle-core` [`Instance`] plus the exact source it was
 /// loaded from (so positions map back to source, and the prelude offset is known).
@@ -151,7 +164,11 @@ impl Session {
             return Err(err);
         }
         Ok(Session {
-            instance: Instance::load_with_intrinsics(resolved.module, registry),
+            instance: Instance::load_with_intrinsics_and_limits(
+                resolved.module,
+                DEMO_LIMITS,
+                registry,
+            ),
             source,
             prelude_bytes,
         })

@@ -14,8 +14,8 @@
 
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::heap::Heap;
-use crate::machine::Value;
 use crate::machine::error::{ExceptionKind, Raise};
+use crate::machine::{Machine, Value};
 use crate::span::Span;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -35,15 +35,16 @@ pub(crate) fn binary(
     lhs: Value,
     rhs: Value,
     heap: &mut Heap,
+    machine: &mut Machine,
     span: Span,
 ) -> Result<Value, Raise> {
     let a = as_num(lhs, heap).ok_or_else(|| type_error(op, span))?;
     let b = as_num(rhs, heap).ok_or_else(|| type_error(op, span))?;
     match op {
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => add_sub_mul(op, a, b, heap, span),
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => add_sub_mul(op, a, b, heap, machine, span),
         BinaryOp::Div => divide(a, b, span),
         BinaryOp::FloorDiv | BinaryOp::Rem => floor_div_rem(op, a, b, heap, span),
-        BinaryOp::Pow => power(a, b, heap, span),
+        BinaryOp::Pow => power(a, b, heap, machine, span),
         _ => unreachable!("non-arithmetic binary op reached arith::binary: {op:?}"),
     }
 }
@@ -87,13 +88,29 @@ pub(crate) fn as_num(v: Value, heap: &Heap) -> Option<Num> {
     }
 }
 
-fn add_sub_mul(op: BinaryOp, a: Num, b: Num, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
+fn add_sub_mul(
+    op: BinaryOp,
+    a: Num,
+    b: Num,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    span: Span,
+) -> Result<Value, Raise> {
     match (a, b) {
         (Num::Int(x), Num::Int(y)) => {
             let r = match op {
                 BinaryOp::Add => x + y,
                 BinaryOp::Sub => x - y,
-                BinaryOp::Mul => x * y,
+                // R8: bound the product's size before multiplying — a bignum `*` is
+                // otherwise one unbounded, uninterruptible allocation (MD §9). The result
+                // is at most `x.bits() + y.bits()` bits.
+                BinaryOp::Mul => {
+                    let est_bytes = (u128::from(x.bits()) + u128::from(y.bits())) / 8 + 1;
+                    if !machine.admit_bignum(est_bytes) {
+                        return Ok(Value::Nil); // placeholder; the parked fault surfaces first
+                    }
+                    x * y
+                }
                 _ => unreachable!(),
             };
             Ok(int_value(r, heap))
@@ -177,10 +194,22 @@ fn floor_div_rem(
 /// math library differs in the last bit(s) across targets, which would break replay and
 /// the cross-surface conformance gate (E§11, same reason as `sin`/`cos` — see
 /// `intrinsic/builtins.rs`).
-fn power(a: Num, b: Num, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
+fn power(
+    a: Num,
+    b: Num,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    span: Span,
+) -> Result<Value, Raise> {
     match (a, b) {
         (Num::Int(base), Num::Int(exp)) if !exp.is_negative() => {
             let e = exp.to_u32().ok_or_else(|| exponent_too_large(span))?;
+            // R8: bound the power's size before computing — `Pow::pow` is one unbounded,
+            // uninterruptible allocation (MD §9). The result is at most `e * base.bits()`
+            // bits (and trivial when |base| <= 1).
+            if !machine.admit_bignum(pow_result_bytes(&base, e)) {
+                return Ok(Value::Nil); // placeholder; the parked fault surfaces first
+            }
             Ok(int_value(Pow::pow(base, e), heap))
         }
         (a, b) => {
@@ -188,6 +217,19 @@ fn power(a: Num, b: Num, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
             let y = num_to_f64(b, span)?;
             finite(libm::pow(x, y), span)
         }
+    }
+}
+
+/// An upper bound on the byte-length of `base ** e`'s magnitude, for the R8 size guard.
+/// `|base| <= 1` gives `0`/`±1` (a byte); otherwise the magnitude is at most `e *
+/// base.bits()` bits. Widened to `u128` so a large exponent times a large base cannot
+/// overflow the estimate itself.
+fn pow_result_bytes(base: &BigInt, e: u32) -> u128 {
+    let bits = base.bits();
+    if bits <= 1 {
+        1
+    } else {
+        u128::from(e) * u128::from(bits) / 8 + 1
     }
 }
 

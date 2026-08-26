@@ -78,15 +78,17 @@ fn deep_non_tail_recursion_hits_the_stack_depth_limit() {
 /// **Reachable** unbounded allocation trips the heap limit: `x = x * x` doubles a
 /// bignum that stays bound to `x`, so the collector cannot reclaim it and the live
 /// set outgrows the limit — a fault at a deterministic step (M2a.9 exit criterion 3,
-/// now that GC is on: only *retained* growth faults). The step budget is a safety
-/// net; the heap fault fires first (~20 doublings to cross 100 KB).
+/// now that GC is on: only *retained* growth faults). The step budget is a safety net
+/// set well clear of R8's per-`*` size charge (each doubling now charges its result's
+/// bytes against the budget), so the heap fault is the one that fires first (~20
+/// doublings to cross 100 KB).
 #[test]
 fn unbounded_reachable_allocation_hits_the_heap_limit() {
     assert_limit(
         "let x = 3\nlet i = 0\nwhile i < 1000 do\nx = x * x\ni = i + 1\nend\nx\n",
         Limits {
             heap_bytes: 100_000,
-            step_budget: 100_000,
+            step_budget: 10_000_000,
             ..Limits::default()
         },
         LimitKind::Heap,
