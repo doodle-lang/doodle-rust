@@ -82,6 +82,7 @@ pub(crate) struct ModuleLoad {
     states: Vec<LoadState>,
     by_path: Vec<(Box<str>, ModuleId)>,
     by_canonical: Vec<(Box<str>, ModuleId)>,
+    not_modules: Vec<Box<str>>,
 }
 
 impl ModuleLoad {
@@ -95,6 +96,7 @@ impl ModuleLoad {
             states: vec![LoadState::Loading],
             by_path: Vec::new(),
             by_canonical: Vec::new(),
+            not_modules: Vec::new(),
         }
     }
 
@@ -156,6 +158,19 @@ impl ModuleLoad {
             .map(|(p, _)| p.clone())
     }
 
+    /// Records that a requested dotted `path` is **not a module** (the host resolved it
+    /// `NotFound`), so a later attempt at the same path takes the S-7 member fallback
+    /// (`import a.b` → member `b` of module `a`) instead of re-suspending.
+    pub(crate) fn mark_not_module(&mut self, path: &[Box<str>]) {
+        self.not_modules.push(join_path(path));
+    }
+
+    /// Whether `path` is known not to be a module (a recorded `NotFound`, S-7).
+    pub(crate) fn is_not_module(&self, path: &[Box<str>]) -> bool {
+        let key = join_path(path);
+        self.not_modules.iter().any(|p| **p == *key)
+    }
+
     /// The exception value each `failed` module retains (S-8) — GC roots, so a retained
     /// value survives until a re-import re-raises it.
     pub(crate) fn failed_values(&self) -> impl Iterator<Item = Value> + '_ {
@@ -192,47 +207,97 @@ pub(crate) fn step_import_targets(
     let path = target.path.clone();
     let span = resolved.ast.span(import);
     let importer = machine.frames.last().expect("an importer frame").module;
-    match machine.load.by_path(&path) {
-        Some(id) => match machine.load.state(id) {
-            // Already loaded (L§11.3 singleton): bind this target's name(s) into the
-            // importer's namespace (AD5), then advance to the next target.
-            LoadState::Loaded => {
-                bind_target(cur, modules, heap, machine, target, id);
-                push_import_targets(machine, import, next + 1);
-                Ok(())
-            }
-            // Still loading — importing it again closes a cycle (L§11.3).
-            LoadState::Loading => Err(circular_import(machine, id, span)),
-            // A previous load failed (S-8): re-raise the **retained** exception value
-            // unchanged (no retry, no fresh slug) — not through a materialized `Raise`, so
-            // the very value the original load produced is raised. The trace re-anchors at
-            // this `import` site.
-            LoadState::Failed(value) => {
-                let trace = super::observe::capture_trace(resolved, heap, machine, Some(span));
-                machine.arm_raise_value(value, trace);
-                Ok(())
-            }
-        },
-        // Not in the table: suspend for the host to supply its source (E§6). Re-push this
-        // cont at the same `next` so the target is retried once its module has loaded.
-        None => {
-            push_import_targets(machine, import, next);
-            machine.pending = Some(Suspension::Import(PendingImport {
-                path,
-                importer,
+    // S-7: try the **whole path as a module** first; a path already known not to be a
+    // module falls back to `member` (the last segment) of the **prefix** module.
+    if let Some(id) = machine.load.by_path(&path) {
+        return resolve_loaded(
+            resolved, modules, heap, machine, cur, import, next, target, id, None, span,
+        );
+    }
+    if path.len() > 1 && machine.load.is_not_module(&path) {
+        let prefix: Vec<Box<str>> = path[..path.len() - 1].to_vec();
+        let member: Box<str> = path.last().expect("a multi-segment path").clone();
+        if let Some(module) = machine.load.by_path(&prefix) {
+            return resolve_loaded(
+                resolved,
+                modules,
+                heap,
+                machine,
+                cur,
+                import,
+                next,
+                target,
+                module,
+                Some(member),
                 span,
-            }));
+            );
+        }
+        // Load the prefix module, then retry this target in fallback mode.
+        return suspend_for(machine, import, next, prefix, importer, span);
+    }
+    // Unknown path: suspend to try the whole path as a module (E§6).
+    suspend_for(machine, import, next, path, importer, span)
+}
+
+/// Re-pushes the `ImportTargets` cont at `next` (to retry this target once the module has
+/// loaded) and parks an import suspension for `path` (E§6).
+fn suspend_for(
+    machine: &mut Machine,
+    import: NodeId,
+    next: u32,
+    path: Vec<Box<str>>,
+    importer: ModuleId,
+    span: Span,
+) -> Result<(), Raise> {
+    push_import_targets(machine, import, next);
+    machine.pending = Some(Suspension::Import(PendingImport {
+        path,
+        importer,
+        span,
+    }));
+    Ok(())
+}
+
+/// Acts on a target whose module (`id`) is in the table: on `Loaded`, bind it (a
+/// `member` of it via cell aliasing, else its module value) and advance; on `Loading`
+/// raise a circular import; on `Failed` re-raise its retained exception (S-8).
+#[allow(clippy::too_many_arguments)]
+fn resolve_loaded(
+    resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
+    heap: &mut Heap,
+    machine: &mut Machine,
+    cur: ModuleId,
+    import: NodeId,
+    next: u32,
+    target: &ImportTarget,
+    id: ModuleId,
+    member: Option<Box<str>>,
+    span: Span,
+) -> Result<(), Raise> {
+    match machine.load.state(id) {
+        LoadState::Loaded => {
+            match member {
+                Some(member) => bind_member(cur, modules, target, id, &member, span)?,
+                None => bind_module_value(cur, modules, heap, machine, target, id),
+            }
+            push_import_targets(machine, import, next + 1);
+            Ok(())
+        }
+        LoadState::Loading => Err(circular_import(machine, id, span)),
+        LoadState::Failed(value) => {
+            let trace = super::observe::capture_trace(resolved, heap, machine, Some(span));
+            machine.arm_raise_value(value, trace);
             Ok(())
         }
     }
 }
 
-/// Binds one loaded import target into the importer's (`cur`'s) namespace (AD5). At M5.2a
-/// the loaded target is a **whole-path module** (`import m` / `import m as y`), bound to
-/// its `Value::Module` under the `as` alias or the path's last segment; the new cell joins
-/// the permanent GC roots. Member imports (S-7's member fallback, cell aliasing) and
-/// wildcard imports are M5.2b/M5.2c — a wildcard target binds nothing yet.
-fn bind_target(
+/// Binds a whole-path module import (`import m` / `import m as y`) into the importer's
+/// (`cur`'s) namespace (AD5): its `Value::Module` under the `as` alias or the path's last
+/// segment; the new cell joins the permanent GC roots. A wildcard target binds nothing yet
+/// (M5.2c).
+fn bind_module_value(
     cur: ModuleId,
     modules: &mut [LoadedModule],
     heap: &mut Heap,
@@ -252,6 +317,42 @@ fn bind_target(
     // A runtime-bound namespace cell must join the permanent GC roots (AD5): unlike the
     // load-seeded cells, it is added after `seed_namespace`, so root it explicitly.
     machine.module_root_cells.push(cell);
+}
+
+/// Binds a member import (`import m.x` / `import m.x as z`, S-7) into the importer's
+/// (`cur`'s) namespace by **aliasing the exporter's cell** (AD5): the importer's name maps
+/// to `m`'s existing binding cell for `member`, so reads see `m`'s live value (assignment
+/// is already a static error, S-39). No new cell — the exporter's cell is already a GC
+/// root. Raises if `member` is not one of `m`'s own module-level definitions.
+fn bind_member(
+    cur: ModuleId,
+    modules: &mut [LoadedModule],
+    target: &ImportTarget,
+    id: ModuleId,
+    member: &str,
+    span: Span,
+) -> Result<(), Raise> {
+    // No root to add — the aliased cell is the exporter's, already a GC root. Collect it
+    // before mutating the importer's namespace (disjoint from its own read).
+    let cell = {
+        let exporter = &modules[id.0 as usize];
+        let is_member = exporter
+            .resolved
+            .globals
+            .iter()
+            .any(|g| g.name.as_ref() == member);
+        if !is_member {
+            return Err(Raise::new(
+                ExceptionKind::NoSuchField,
+                format!("the module has no member `{member}` to import"),
+                span,
+            ));
+        }
+        super::control::find_cell(&exporter.namespace, member).expect("a member has a cell")
+    };
+    let name: Box<str> = target.alias.clone().unwrap_or_else(|| member.into());
+    modules[cur.0 as usize].namespace.push((name, cell));
+    Ok(())
 }
 
 /// Pushes an [`Cont::ImportTargets`] onto the importer's (top) frame.

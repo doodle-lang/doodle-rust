@@ -313,6 +313,87 @@ fn a_prelude_name_is_not_a_module_member() {
     assert_eq!(inst.describe_raised(value).0, "no-such-field");
 }
 
+// ---- M5.2b: S-7 dotted-path resolution + member imports + cell aliasing ----
+
+#[test]
+fn a_member_import_binds_the_member_into_scope() {
+    // `import lib.answer` (S-7): "lib.answer" is not a module, so it falls back to member
+    // `answer` of module `lib`, bound directly into scope.
+    let mut inst = instance("import lib.answer\nprint(answer)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const answer = 42\n")]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"42\n");
+}
+
+#[test]
+fn a_member_import_as_renames_the_member() {
+    let mut inst = instance("import lib.answer as a\nprint(a)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const answer = 7\n")]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"7\n");
+}
+
+#[test]
+fn a_member_imported_function_is_callable() {
+    let lib = "fn greet()\n  return \"hi from member\"\nend\n";
+    let mut inst = instance("import lib.greet\nprint(greet())\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"hi from member\n");
+}
+
+#[test]
+fn a_member_import_is_a_live_alias_of_the_exporters_cell() {
+    // `import lib.count` aliases lib's `count` cell (AD5); calling the imported `bump`
+    // mutates it inside lib, and the aliased `count` read sees the update.
+    let lib = "let count = 0\nto bump()\n  count = count + 1\nend\n";
+    let mut inst = instance("import lib.count\nimport lib.bump\nbump()\nbump()\nprint(count)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"2\n");
+}
+
+#[test]
+fn a_dotted_path_that_is_a_module_binds_the_module_not_a_member() {
+    // S-7 tries the whole path as a module first: "geometry.shapes" IS a module here, so
+    // `import geometry.shapes` binds the module (under its last segment), not a member.
+    let mut inst = instance("import geometry.shapes\nprint(shapes.name)\n");
+    let outcome = bundle_run(
+        &mut inst,
+        &[("geometry.shapes", "const name = \"the module\"\n")],
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"the module\n");
+}
+
+#[test]
+fn importing_a_missing_member_raises() {
+    let mut inst = instance("import lib.nope\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const x = 1\n")]);
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    let (kind, message) = inst.describe_raised(value);
+    assert_eq!(kind, "no-such-field");
+    assert!(message.contains("nope"), "message: {message}");
+}
+
+#[test]
+fn a_member_import_whose_prefix_module_is_missing_raises_module_not_found() {
+    // "nope.member" is not a module, and neither is its prefix "nope" — a genuine miss.
+    let mut inst = instance("import nope.member\n");
+    let outcome = bundle_run(&mut inst, &[]);
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    let (kind, message) = inst.describe_raised(value);
+    assert_eq!(kind, "module-not-found");
+    assert!(
+        message.contains("nope"),
+        "message names the prefix: {message}"
+    );
+}
+
 #[test]
 fn a_fetched_module_with_static_errors_raises_module_load_error() {
     // A host-supplied source that does not compile is the module author's program error

@@ -147,10 +147,17 @@ impl Instance {
         self.machine.arm_raise_value(value, trace);
     }
 
-    /// Resolves a parked import with `NotFound` (E§6): raises `module-not-found` at the
-    /// `import` site in the importer.
-    pub(crate) fn raise_import_not_found(&mut self) {
+    /// Resolves a parked import with `NotFound` (E§6, S-7): a **multi-segment** path that
+    /// is not a module is a **member of its prefix** — record it as not-a-module and
+    /// resume, so the retrying `ImportTargets` cont takes the member fallback (`import a.b`
+    /// → member `b` of module `a`). A **single-segment** path has no prefix, so the module
+    /// is genuinely missing: raise `module-not-found` at the `import` site.
+    pub(crate) fn resolve_import_not_found(&mut self) {
         let pending = self.take_import();
+        if pending.path.len() > 1 {
+            self.machine.load.mark_not_module(&pending.path);
+            return;
+        }
         let message = format!(
             "the module `{}` was not found",
             super::modload::join_path(&pending.path)
