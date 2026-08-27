@@ -19,6 +19,7 @@ mod decls;
 mod dispatch;
 mod errors;
 mod exits;
+mod protocols;
 mod refs;
 mod tailcheck;
 mod tailmark;
@@ -157,6 +158,7 @@ impl<'a> Resolver<'a> {
         r.resolve_module(root);
         r.check_pending_assigns(); // now that `globals` is complete
         r.check_with_targets(); // `with` binds a `parameter` (§5.5), globals complete
+        r.check_protocols(root); // protocol/implement conformance (L§10, S-31/S-61)
         r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
         r.check_void_sites(root); // Void consumed as a value (S-6), globals complete
         r.mark_tail_calls(); // tail positions (L§8.7/§11); reads only ast + callables

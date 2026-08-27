@@ -102,6 +102,25 @@ pub enum DiagnosticCode {
     /// A present branch/body of a value-position `if`/`try` whose tail produces no
     /// value (L§6.8/§6.9) — e.g. it ends in a `let`/`while`/assignment.
     NonProducingBranch,
+    /// A protocol member's **first (dispatch) parameter** has a default (L§10.1, S-31):
+    /// dispatch needs a supplied argument to dispatch on, so the `self`-position parameter
+    /// may not be optional.
+    DispatchParameterDefault,
+    /// An `implement` method's signature does not match the protocol member's — a different
+    /// count of ordinary parameters, or a mismatched block parameter (L§10.2, S-31). Also a
+    /// child protocol re-declaring an ancestor's member with a non-conforming signature
+    /// (L§10.1, S-61). Parameter *names* need not match; arity and the block parameter must.
+    ProtocolSignatureMismatch,
+    /// An `implement` method writes a **parameter default** (L§10.2, S-31): defaults live
+    /// once, on the protocol member, so an implementation may not restate them.
+    ImplementationParameterDefault,
+    /// An `implement P for T` block omits one or more **required** members of `P` or its
+    /// `extends` chain (L§10.2, S-61): the message names each missing member and the
+    /// protocol that requires it.
+    IncompleteImplementation,
+    /// An `implement` method whose name is not a member of the protocol (L§10.2): a typo or
+    /// a member that belongs to a different protocol.
+    NotAProtocolMember,
 }
 
 impl DiagnosticCode {
@@ -135,6 +154,11 @@ impl DiagnosticCode {
             DiagnosticCode::ProcedureInExpression => "procedure-in-expression",
             DiagnosticCode::IfExpressionMissingElse => "if-expression-missing-else",
             DiagnosticCode::NonProducingBranch => "non-producing-branch",
+            DiagnosticCode::DispatchParameterDefault => "dispatch-parameter-default",
+            DiagnosticCode::ProtocolSignatureMismatch => "protocol-signature-mismatch",
+            DiagnosticCode::ImplementationParameterDefault => "implementation-parameter-default",
+            DiagnosticCode::IncompleteImplementation => "incomplete-implementation",
+            DiagnosticCode::NotAProtocolMember => "not-a-protocol-member",
         }
     }
 }

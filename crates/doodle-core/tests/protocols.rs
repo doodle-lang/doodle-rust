@@ -1,8 +1,10 @@
-//! Protocol dispatch tests (M5.5a): `protocol`/`implement`, single dispatch on the first
-//! argument's runtime type (L§10.3, S-31), protocol defaults, the qualified form
-//! `P.member`, `x is P`, and the `protocol-not-implemented` / `ambiguous-member` errors.
-//! Single-module programs driven through the public API, observing `print` output and the
-//! raised `Error.kind`. The `extends` chain and static conformance checks are M5.5b.
+//! Protocol tests (M5.5): `protocol`/`implement`, single dispatch on the first argument's
+//! runtime type (L§10.3, S-31), protocol defaults, the qualified form `P.member`, `x is P`,
+//! the `protocol-not-implemented` / `ambiguous-member` runtime errors, the `extends` chain
+//! (S-61 — nearest-default-wins, transitive `is`), and the **static** conformance checks
+//! (S-31/S-61 — dispatch-parameter default, signature mismatch, restated default,
+//! not-a-member, incomplete implementation). Runtime cases run through the public API,
+//! observing `print` output and the raised `Error.kind`; static cases read `resolve_diags`.
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{Directive, Outcome, run};
@@ -46,6 +48,27 @@ fn run_output(main: &str) -> String {
         "expected clean completion, got {outcome:?}"
     );
     String::from_utf8(inst.output().to_vec()).expect("utf-8 output")
+}
+
+/// Resolves `main` and returns its **static** diagnostics as `(slug, message)` pairs — for
+/// the load-time conformance checks (L§10, S-31/S-61), which reject before the program runs.
+fn resolve_diags(main: &str) -> Vec<(String, String)> {
+    let nfc = normalize(main);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "unexpected parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = resolve_module(parsed.ast, parsed.root, ModuleId(0));
+    resolved
+        .diagnostics
+        .iter()
+        .map(|d| (d.code.slug().to_string(), d.message.clone()))
+        .collect()
 }
 
 /// Runs `main` expecting a raise, returning the `Error.kind` slug and its message.
@@ -246,9 +269,9 @@ end
 }
 
 #[test]
-fn a_required_member_left_out_of_the_implementation_raises() {
-    // M5.5a: an `implement` block that omits a required member (no default) resolves to
-    // not-implemented at the call — the static missing-member check is M5.5b.
+fn an_implementation_missing_a_required_member_is_a_static_error() {
+    // An `implement` block that omits a required member (no default) is rejected *before*
+    // the program runs (M5.5c static conformance), naming the missing member.
     let src = "\
 protocol Pair
     fn first(self)
@@ -262,10 +285,14 @@ implement Pair for P
         return p.a
     end
 end
-print(second(P(a: 1, b: 2)))
 ";
-    let (kind, _message) = run_raise(src);
-    assert_eq!(kind, "protocol-not-implemented");
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, msg)| slug == "incomplete-implementation" && msg.contains("second")),
+        "expected incomplete-implementation naming `second`: {diags:?}"
+    );
 }
 
 // --- M5.5b: the `extends` chain (S-61) ---
@@ -366,11 +393,11 @@ print(5 is Grand)
     assert_eq!(run_output(src), "true\ntrue\nfalse\n");
 }
 
-/// An inherited required member the implementation omits (no default anywhere in the chain)
-/// raises `protocol-not-implemented` at the call — the runtime face of "extends parent
-/// requirements enforced".
+/// An implementation must cover the whole `extends` chain's required members — omitting an
+/// inherited requirement is a static error naming the member and the protocol requiring it
+/// (S-61; "extends parent requirements enforced").
 #[test]
-fn an_unimplemented_inherited_requirement_raises_at_the_call() {
+fn an_implementation_missing_an_inherited_requirement_is_a_static_error() {
     let src = "\
 protocol Base
     fn need(self)
@@ -386,10 +413,16 @@ implement Derived for T
         return 1
     end
 end
-print(need(T(x: 1)))
 ";
-    let (kind, _message) = run_raise(src);
-    assert_eq!(kind, "protocol-not-implemented");
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, msg)| slug == "incomplete-implementation"
+                && msg.contains("need")
+                && msg.contains("Base")),
+        "expected incomplete-implementation naming `need` required by `Base`: {diags:?}"
+    );
 }
 
 /// `extends` referencing a name that is not an already-defined protocol raises at load — a
@@ -406,4 +439,166 @@ end
     let (kind, _message) = run_raise(src);
     // `Parent` is declared nowhere — a free name with no binding.
     assert_eq!(kind, "name-not-defined");
+}
+
+/// A forward `extends` reference (the parent declared *below* the child) raises
+/// `used-before-defined` at load — the proof that an `extends` cycle is unwritable (S-61).
+#[test]
+fn a_forward_extends_reference_is_used_before_defined() {
+    let src = "\
+protocol Child extends Parent
+    fn c(self)
+    end
+end
+protocol Parent
+    fn p(self)
+    end
+end
+";
+    let (kind, _message) = run_raise(src);
+    assert_eq!(kind, "used-before-defined");
+}
+
+// --- M5.5c: static conformance checks (S-31/S-61) ---
+
+/// A protocol member's first (dispatch) parameter may not have a default (S-31).
+#[test]
+fn a_dispatch_parameter_default_is_a_static_error() {
+    let src = "\
+protocol P
+    fn m(self = 5)
+    end
+end
+";
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, _)| slug == "dispatch-parameter-default"),
+        "{diags:?}"
+    );
+}
+
+/// An implementation whose arity doesn't match the member is a static error (S-31).
+#[test]
+fn an_implementation_with_the_wrong_arity_is_a_static_error() {
+    let src = "\
+protocol Speaker
+    fn sound(self, volume)
+    end
+end
+record Dog with name end
+implement Speaker for Dog
+    fn sound(d)
+        return \"woof\"
+    end
+end
+";
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, _)| slug == "protocol-signature-mismatch"),
+        "{diags:?}"
+    );
+}
+
+/// An implementation that adds a block parameter the member doesn't declare is a static
+/// error (S-31 — the block parameter is part of the shape).
+#[test]
+fn an_implementation_with_a_stray_block_parameter_is_a_static_error() {
+    let src = "\
+protocol Speaker
+    fn sound(self)
+    end
+end
+record Dog with name end
+implement Speaker for Dog
+    fn sound(d, do body)
+        return \"woof\"
+    end
+end
+";
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, _)| slug == "protocol-signature-mismatch"),
+        "{diags:?}"
+    );
+}
+
+/// An implementation may not restate a member's parameter default (S-31).
+#[test]
+fn an_implementation_writing_a_default_is_a_static_error() {
+    let src = "\
+protocol Speaker
+    fn sound(self, volume)
+    end
+end
+record Dog with name end
+implement Speaker for Dog
+    fn sound(d, volume = 3)
+        return \"woof\"
+    end
+end
+";
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, _)| slug == "implementation-parameter-default"),
+        "{diags:?}"
+    );
+}
+
+/// A method whose name is not a member of the protocol is a static error (a typo, L§10.2).
+#[test]
+fn a_method_that_is_not_a_member_is_a_static_error() {
+    let src = "\
+protocol Speaker
+    fn sound(self)
+    end
+end
+record Dog with name end
+implement Speaker for Dog
+    fn sound(d)
+        return \"woof\"
+    end
+    fn bark(d)
+        return \"!\"
+    end
+end
+";
+    let diags = resolve_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(slug, msg)| slug == "not-a-protocol-member" && msg.contains("bark")),
+        "{diags:?}"
+    );
+}
+
+/// A conformant single-module program with an `extends` chain produces no static
+/// diagnostics — the checks don't flag correct code.
+#[test]
+fn a_conformant_program_has_no_static_diagnostics() {
+    let src = "\
+protocol Grand
+    fn g(self)
+        return \"g\"
+    end
+end
+protocol Child extends Grand
+    fn c(self, n)
+    end
+end
+record T with x end
+implement Child for T
+    fn c(t, n)
+        return n
+    end
+end
+";
+    assert_eq!(resolve_diags(src), Vec::new());
 }
