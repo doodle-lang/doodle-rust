@@ -1142,6 +1142,90 @@ fn gc_stress_determinism_gate_over_limit_faults() {
     }
 }
 
+/// The determinism gate over the **M4 feature set** (exit criterion #6, "the double-run
+/// trace diff covers everything"): records (value-copy vs ref-share, place-chain mutation),
+/// dicts (the fixed-key-SipHash **hashing** that most risks leaking nondeterminism — string,
+/// many-int, record, and cross-kind numeric keys), strings (AD4 seam concat, repetition,
+/// interpolation, grapheme indexing), exceptions (raise → unwind → rescue, the `Error`
+/// record), and `with`/`parameter` (the dynamic-binding save stack). Each program folds its
+/// heap result back to an exactly-compared scalar/bool (a by-kind terminal would hide a
+/// content divergence), and must be bit-identical whether or not GC runs at every safe point.
+#[test]
+fn gc_stress_determinism_gate_over_m4_features() {
+    let corpus = [
+        // Records: field read, value-record copy-on-bind, ref-record sharing, place chain.
+        "record P with x, y end\nlet p = P(x: 3, y: 4)\np.x + p.y\n",
+        "record P with n end\nlet a = P(n: 1)\nlet b = a\nb.n = 9\na.n\n",
+        "ref record R with n end\nlet a = R(n: 1)\nlet b = a\nb.n = 9\na.n\n",
+        "record P with n end\nrecord Q with p end\nlet q = Q(p: P(n: 5))\nq.p.n = 8\nq.p.n\n",
+        // Dicts / hashing (criterion #6): string keys, 50 int keys built in a loop, a record
+        // key, and cross-kind numeric-key coherence (1 and 1.0 hash alike) — folded via lookup.
+        "let d = {a: 1, b: 2, c: 3, d: 4}\nd[\"a\"] + d[\"b\"] + d[\"c\"] + d[\"d\"]\n",
+        "let d = {}\nlet i = 0\nwhile i < 50 do\nd[i] = i * i\ni = i + 1\nend\nd[7] + d[49]\n",
+        "record K with a, b end\nlet d = {}\nd[K(a: 1, b: 2)] = 7\nd[K(a: 1, b: 2)]\n",
+        "let d = {}\nd[1] = 5\nd[1.0]\n",
+        // Strings: AD4 seam composition, repetition, interpolation, grapheme index — via `==`.
+        // Bound to a local (a module-leading string literal would parse as a docstring, L§8.6).
+        "let r = \"cafe\" + \"\\u{301}\" == \"caf\\u{e9}\"\nr\n",
+        "let r = \"ab\" * 3 == \"ababab\"\nr\n",
+        "let n = 21\nlet r = \"{n * 2}\" == \"42\"\nr\n",
+        "let r = \"caf\\u{e9}\"[3] == \"\\u{e9}\"\nr\n",
+        // Exceptions: a caught raise (unwind heap-value root), and the `Error` record's kind.
+        "let r = 0\ntry\nr = 1 / 0\nrescue e\nr = 99\nend\nr\n",
+        "let ok = false\ntry\n1 + true\nrescue e\nok = e.kind == \"type-mismatch\"\nend\nok\n",
+        // with/parameter: dynamic bind + restore (the dyn_stack GC root) across the block.
+        "parameter p = 1\nlet during = 0\nwith p = 5 do\nduring = p\nend\np * 10 + during\n",
+    ];
+    for src in corpus {
+        let normal = drive_terminal(&mut load_source(src), false);
+        let stressed = drive_terminal(&mut load_source(src), true);
+        assert_eq!(
+            normal, stressed,
+            "GC-stress changed the terminal outcome of {src:?}"
+        );
+    }
+}
+
+/// The determinism gate extends to the **R8 magnitude faults** (D-M4-4): the pre-op size
+/// estimate is a pure function of operands and limits, so a `**` too big for the heap or the
+/// step budget faults at the **same** terminal outcome under GC pressure. One case trips the
+/// heap estimate (tight heap), one the step-budget pre-charge (ample heap, bounded budget).
+#[test]
+fn gc_stress_determinism_gate_over_r8_magnitude_faults() {
+    let cases = [
+        (
+            "let x = 2 ** 10000000\n",
+            Limits {
+                heap_bytes: 4096,
+                step_budget: 1 << 40,
+                stack_depth: 200,
+            },
+            LimitKind::Heap,
+        ),
+        (
+            "let x = 2 ** 10000000\n",
+            Limits {
+                heap_bytes: 1 << 34,
+                step_budget: 1_000_000,
+                stack_depth: 200,
+            },
+            LimitKind::StepBudget,
+        ),
+    ];
+    for (src, limits, kind) in cases {
+        let normal = drive_terminal(&mut load_source_with_limits(src, limits), false);
+        let stressed = drive_terminal(&mut load_source_with_limits(src, limits), true);
+        assert_eq!(
+            normal, stressed,
+            "GC-stress changed the R8 magnitude fault of {src:?}"
+        );
+        assert!(
+            matches!(normal, Terminal::Faulted(EngineFault::LimitExceeded(k)) if k == kind),
+            "expected LimitExceeded({kind:?}) for {src:?}, got {normal:?}"
+        );
+    }
+}
+
 /// Loads `src` with the `print` and `each` intrinsics registered, so a test can observe
 /// a side-effecting call (via captured output) and drive a native block-consumer.
 fn load_source_with_print(src: &str) -> Instance {
