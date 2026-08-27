@@ -281,8 +281,7 @@ fn dispatch(
             Ok(())
         }
         Some(Cont::DefineProtocol { decl }) => {
-            protocol::define_protocol(resolved, modules, heap, machine, cur, decl);
-            Ok(())
+            protocol::define_protocol(resolved, modules, heap, machine, cur, decl)
         }
         Some(Cont::DefineImplement { decl }) => {
             protocol::define_implement(resolved, modules, heap, machine, cur, decl)

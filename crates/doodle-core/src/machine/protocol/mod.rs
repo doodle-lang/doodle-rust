@@ -74,12 +74,16 @@ struct MemberDecl {
     default: Option<CalIdx>,
 }
 
-/// A protocol definition (L§10): its name, the module it was declared in, and its members.
-/// `extends` (the single parent, forming a chain) lands in M5.5b.
+/// A protocol definition (L§10): its name, the module it was declared in, its single
+/// `extends` parent (forming a chain to a root, S-61), and its own members. A member
+/// inherited from an ancestor is *not* copied here — the chain is walked on demand.
 struct ProtocolDef {
     name: Box<str>,
-    #[allow(dead_code)] // consulted for cross-module diagnostics in M5.5b
+    #[allow(dead_code)] // consulted for cross-module diagnostics
     module: ModuleId,
+    /// The parent protocol's id (`protocol Child extends Parent`), or `None` at a root.
+    /// One parent per protocol, so the graph is a set of linear chains (S-61).
+    extends: Option<u32>,
     members: Vec<MemberDecl>,
 }
 
@@ -152,13 +156,39 @@ impl Registry {
         &self.protocols[id as usize].name
     }
 
-    /// The member id list a protocol declares (M5.5a: its own members).
-    #[allow(dead_code)] // used by the chain check in M5.5b
-    fn declares(&self, protocol: u32, member: u32) -> bool {
-        self.protocols[protocol as usize]
-            .members
-            .iter()
-            .any(|m| m.member == member)
+    /// The `extends` chain from `protocol` up to its root (`[protocol, parent, …]`, S-61).
+    /// A parent is always registered before its child (parent-first load ordering, so a
+    /// parent's id is lower), which also guarantees the walk terminates; the length bound
+    /// is a defensive backstop.
+    fn chain(&self, protocol: u32) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut cur = Some(protocol);
+        while let Some(p) = cur {
+            if ids.contains(&p) || ids.len() > self.protocols.len() {
+                break;
+            }
+            ids.push(p);
+            cur = self.protocols[p as usize].extends;
+        }
+        ids
+    }
+
+    /// Whether `protocol` declares `member` — its own members **or** any ancestor's
+    /// (requirements are transitive along the `extends` chain, S-61).
+    fn transitively_declares(&self, protocol: u32, member: u32) -> bool {
+        self.chain(protocol).into_iter().any(|p| {
+            self.protocols[p as usize]
+                .members
+                .iter()
+                .any(|m| m.member == member)
+        })
+    }
+
+    /// Whether protocol `from`'s chain reaches `target` (`from == target`, or `from`
+    /// transitively `extends` `target`) — the transitivity behind `x is Parent` holding
+    /// for a type that implements a `Child` (S-61).
+    fn extends_reaches(&self, from: u32, target: u32) -> bool {
+        self.chain(from).contains(&target)
     }
 
     /// The member-name id `P.member` selects, if protocol `id` declares a member named
@@ -203,19 +233,27 @@ impl Registry {
             })
     }
 
-    /// The member's default-body callable in `protocol`, if it declared one.
-    fn default_method(&self, protocol: u32, member: u32) -> Option<CalIdx> {
-        self.protocols[protocol as usize]
-            .members
-            .iter()
-            .find(|m| m.member == member)
-            .and_then(|m| m.default)
+    /// The **nearest** default-body callable for `member` walking `protocol`'s chain
+    /// (self, then parent, then grandparent …): the nearest declaring protocol's default
+    /// wins (S-61). `None` if no protocol in the chain declares `member` with a default.
+    fn nearest_default(&self, protocol: u32, member: u32) -> Option<CalIdx> {
+        self.chain(protocol).into_iter().find_map(|p| {
+            self.protocols[p as usize]
+                .members
+                .iter()
+                .find(|m| m.member == member)
+                .and_then(|m| m.default)
+        })
     }
 
-    /// Whether the runtime type `ty` implements protocol `id` (`x is P`, L§6.5 / §10.4;
-    /// M5.5a: a registered `implement P for T` block). The `extends` chain joins in M5.5b.
+    /// Whether the runtime type `ty` implements protocol `id` (`x is P`, L§6.5 / §10.4).
+    /// Transitive along `extends` (S-61): implementing a `Child` implies implementing every
+    /// protocol in its chain, so `ty` implements `id` iff some registered `implement Q for
+    /// ty` has `Q`'s chain reach `id`.
     pub(crate) fn type_implements(&self, ty: DispatchType, id: u32) -> bool {
-        self.is_implemented(id, ty)
+        self.impls
+            .iter()
+            .any(|b| b.ty == ty && self.extends_reaches(b.protocol, id))
     }
 
     /// Resolves a member call (L§10.3): the candidate protocols are those declaring
@@ -230,17 +268,35 @@ impl Registry {
         protocol_filter: Option<u32>,
         heap: &Heap,
     ) -> Dispatch {
+        // A candidate is a protocol that (transitively) declares `member` and is (directly)
+        // implemented for `ty`. Candidacy is by direct `implement` block, not transitive
+        // implementation — so a member reached through one chain contributes its one
+        // implemented protocol once, and chain-related protocols never make each other
+        // ambiguous (S-61); two *unrelated* implemented protocols still do (L§10.3).
         let mut candidates: Vec<u32> = Vec::new();
-        for (p, def) in self.protocols.iter().enumerate() {
-            let p = p as u32;
+        for p in 0..self.protocols.len() as u32 {
             if protocol_filter.is_some_and(|f| f != p) {
                 continue;
             }
-            if def.members.iter().any(|m| m.member == member) && self.is_implemented(p, ty) {
+            if self.transitively_declares(p, member) && self.is_implemented(p, ty) {
                 candidates.push(p);
             }
         }
-        match candidates.as_slice() {
+        // A directly-implemented **ancestor** is subsumed by a directly-implemented
+        // **descendant** (the more-derived protocol's chain already covers the member, so
+        // dispatching through it is unambiguous, S-61): keep only the maximal candidates.
+        // What remains and still numbers two or more are genuinely *unrelated* protocols
+        // (L§10.3 ambiguity).
+        let maximal: Vec<u32> = candidates
+            .iter()
+            .copied()
+            .filter(|&p| {
+                !candidates
+                    .iter()
+                    .any(|&q| q != p && self.extends_reaches(q, p))
+            })
+            .collect();
+        match maximal.as_slice() {
             [] => Dispatch::NotImplemented {
                 type_name: dispatch_type_name(ty, heap),
                 protocol: self.declaring_protocol(member, protocol_filter).into(),
@@ -248,7 +304,7 @@ impl Registry {
             },
             [p] => match self
                 .impl_method(*p, ty, member)
-                .or_else(|| self.default_method(*p, member))
+                .or_else(|| self.nearest_default(*p, member))
             {
                 Some(cal) => Dispatch::Call(cal),
                 None => Dispatch::NotImplemented {
@@ -291,9 +347,7 @@ impl Registry {
     }
 
     /// The `to`/`fn` kind a bare protocol dispatcher value reports for `x is Procedure` /
-    /// `Function` — the member's declared kind (from its first declarer). Wired into the
-    /// `is` classification in M5.5b (it needs the registry threaded into `types`).
-    #[allow(dead_code)]
+    /// `Function` — the member's declared kind (from its first declarer).
     pub(crate) fn member_kind(&self, member: u32) -> Option<BodyKind> {
         self.member_signature(member, None).map(|m| m.kind)
     }
@@ -338,11 +392,19 @@ impl Registry {
     }
 
     /// Records a protocol definition (L§10.1), returning its id. `members` carries each
-    /// member's signature and its default-body callable (already interned by the caller).
-    fn add_protocol(&mut self, name: Box<str>, module: ModuleId, members: Vec<MemberDecl>) -> u32 {
+    /// member's signature and its default-body callable (already interned by the caller);
+    /// `extends` is the parent's id, resolved parent-first by the caller (S-61).
+    fn add_protocol(
+        &mut self,
+        name: Box<str>,
+        module: ModuleId,
+        extends: Option<u32>,
+        members: Vec<MemberDecl>,
+    ) -> u32 {
         self.protocols.push(ProtocolDef {
             name,
             module,
+            extends,
             members,
         });
         (self.protocols.len() - 1) as u32

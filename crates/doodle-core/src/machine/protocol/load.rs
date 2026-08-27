@@ -48,12 +48,30 @@ pub(crate) fn define_protocol(
     machine: &mut Machine,
     cur: usize,
     decl: NodeId,
-) {
-    let Node::Protocol { name, members, .. } = resolved.ast.node(decl) else {
+) -> Result<(), Raise> {
+    let Node::Protocol {
+        name,
+        extends,
+        members,
+        ..
+    } = resolved.ast.node(decl)
+    else {
         unreachable!("define_protocol over a non-Protocol node");
     };
-    let (name, members) = (name.clone(), members.clone());
+    let (name, extends, members) = (name.clone(), extends.clone(), members.clone());
     let module = resolved.canonical_id;
+    // Resolve the `extends` parent (S-61): it must already be a protocol value. A parent
+    // is declared before its child (a forward or self reference reads an uninitialized
+    // cell → used-before-defined), so the chain is acyclic and parent-first by construction.
+    let parent = match &extends {
+        Some(pname) => Some(protocol_id_of(
+            heap,
+            &modules[cur].namespace,
+            pname,
+            resolved.ast.span(decl),
+        )?),
+        None => None,
+    };
     let mut member_decls = Vec::with_capacity(members.len());
     let mut dispatcher_names: Vec<(u32, Box<str>)> = Vec::new();
     for m in &members {
@@ -78,7 +96,7 @@ pub(crate) fn define_protocol(
     }
     let id = machine
         .protocols
-        .add_protocol(name.clone(), module, member_decls);
+        .add_protocol(name.clone(), module, parent, member_decls);
     // Bind `P` to its protocol value (the resolver declared `P` as a module global, so its
     // cell exists — created uninitialized at load, filled here when the declaration runs).
     let ty = heap.alloc_type(TypeObj {
@@ -110,6 +128,26 @@ pub(crate) fn define_protocol(
         let dcell = heap.alloc_cell(CellKind::Dispatcher(member), Some(Value::Callable(dcal)));
         modules[cur].namespace.push((mname, dcell));
         machine.module_root_cells.push(dcell);
+    }
+    Ok(())
+}
+
+/// Resolves a protocol name to its registry id at load (for `extends`, L§10.1): reads its
+/// namespace cell and requires a protocol value (an undefined / not-yet-defined name raises
+/// name-/used-before-defined; a non-protocol raises).
+fn protocol_id_of(
+    heap: &Heap,
+    namespace: &[(Box<str>, crate::machine::value::CellIdx)],
+    name: &str,
+    span: Span,
+) -> Result<u32, Raise> {
+    let cell = control::find_cell(namespace, name);
+    match control::read_cell(heap, cell, name, span)? {
+        Value::Type(idx) => match &heap.type_value(idx).kind {
+            TypeKind::Protocol(pt) => Ok(pt.id),
+            _ => Err(not_a_protocol(name, span)),
+        },
+        _ => Err(not_a_protocol(name, span)),
     }
 }
 

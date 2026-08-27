@@ -267,3 +267,143 @@ print(second(P(a: 1, b: 2)))
     let (kind, _message) = run_raise(src);
     assert_eq!(kind, "protocol-not-implemented");
 }
+
+// --- M5.5b: the `extends` chain (S-61) ---
+
+/// A three-deep chain `Child extends Parent extends Grand`: one `implement Child for T`
+/// block covers the chain; inherited members fall to their nearest default, the required
+/// one to the implementation.
+#[test]
+fn an_extends_chain_resolves_members_along_the_whole_chain() {
+    let src = "\
+protocol Grand
+    fn g(self)
+        return \"grand-g\"
+    end
+end
+protocol Parent extends Grand
+    fn p(self)
+        return \"parent-p\"
+    end
+end
+protocol Child extends Parent
+    fn c(self)
+    end
+end
+record T with x end
+implement Child for T
+    fn c(t)
+        return \"child-c\"
+    end
+end
+print(g(T(x: 1)))
+print(p(T(x: 1)))
+print(c(T(x: 1)))
+";
+    assert_eq!(run_output(src), "grand-g\nparent-p\nchild-c\n");
+}
+
+/// The nearest declaring protocol's default wins over an ancestor's (S-61); an explicit
+/// implementation beats every default.
+#[test]
+fn the_nearest_default_wins_and_an_implementation_beats_all() {
+    let base = "\
+protocol Grand
+    fn describe(self)
+        return \"grand\"
+    end
+end
+protocol Child extends Grand
+    fn describe(self)
+        return \"child\"
+    end
+end
+record T with x end
+";
+    // Child re-declares `describe` with its own default — nearest wins over Grand's.
+    let inherited = format!("{base}implement Child for T\nend\nprint(describe(T(x: 1)))\n");
+    assert_eq!(run_output(&inherited), "child\n");
+    // An explicit implementation of `describe` beats even the nearest default.
+    let overridden = format!(
+        "{base}\
+implement Child for T
+    fn describe(t)
+        return \"impl\"
+    end
+end
+print(describe(T(x: 1)))
+"
+    );
+    assert_eq!(run_output(&overridden), "impl\n");
+}
+
+/// `x is Parent` holds for a type that implements a `Child` (requirements are transitive
+/// along `extends`, S-61).
+#[test]
+fn is_is_transitive_along_the_extends_chain() {
+    let src = "\
+protocol Grand
+    fn g(self)
+    end
+end
+protocol Parent extends Grand
+    fn p(self)
+    end
+end
+record T with x end
+implement Parent for T
+    fn g(t)
+        return 1
+    end
+    fn p(t)
+        return 2
+    end
+end
+print(T(x: 1) is Parent)
+print(T(x: 1) is Grand)
+print(5 is Grand)
+";
+    assert_eq!(run_output(src), "true\ntrue\nfalse\n");
+}
+
+/// An inherited required member the implementation omits (no default anywhere in the chain)
+/// raises `protocol-not-implemented` at the call — the runtime face of "extends parent
+/// requirements enforced".
+#[test]
+fn an_unimplemented_inherited_requirement_raises_at_the_call() {
+    let src = "\
+protocol Base
+    fn need(self)
+    end
+end
+protocol Derived extends Base
+    fn extra(self)
+    end
+end
+record T with x end
+implement Derived for T
+    fn extra(t)
+        return 1
+    end
+end
+print(need(T(x: 1)))
+";
+    let (kind, _message) = run_raise(src);
+    assert_eq!(kind, "protocol-not-implemented");
+}
+
+/// `extends` referencing a name that is not an already-defined protocol raises at load — a
+/// forward or self reference reads an uninitialized cell, so a chain is acyclic and
+/// parent-first by construction (an `extends` cycle is unconstructable).
+#[test]
+fn extends_of_an_undefined_protocol_raises() {
+    let src = "\
+protocol Child extends Parent
+    fn c(self)
+    end
+end
+";
+    let (kind, _message) = run_raise(src);
+    // `Parent` is declared nowhere — a free name with no binding.
+    assert_eq!(kind, "name-not-defined");
+}

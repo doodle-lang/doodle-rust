@@ -155,6 +155,7 @@ fn callable_kind_of(
     value: Value,
     heap: &Heap,
     resolved: &ResolvedModule,
+    protocols: &super::protocol::Registry,
     intrinsics: &Registry,
 ) -> Option<BodyKind> {
     let Value::Callable(idx) = value else {
@@ -163,12 +164,13 @@ fn callable_kind_of(
     let kind = match heap.callable(idx).target {
         CallableTarget::Source(id) => resolved.callables[id as usize].kind,
         CallableTarget::Intrinsic(iid) => intrinsics.kind_of(iid),
-        // A bare protocol **dispatcher** value is a `Callable`; its `to`/`fn` split
-        // depends on the member's declaration (and is ambiguous for a name declared
-        // by protocols of differing kinds), which needs the protocol registry this
-        // helper does not carry. `x is Callable` is already correct (kind is `Some`);
-        // the Procedure/Function refinement is tracked for M5.5b (claude-todo).
-        CallableTarget::Dispatcher { .. } => BodyKind::Func,
+        // A bare protocol **dispatcher** value is a `Callable`; its `to`/`fn` split is the
+        // member's declared kind (from its first declarer). A name declared by protocols of
+        // differing kinds is inherently ambiguous — the first-declarer's kind is the
+        // deterministic answer; `x is Callable` holds regardless (kind is `Some`).
+        CallableTarget::Dispatcher { member, .. } => {
+            protocols.member_kind(member).unwrap_or(BodyKind::Func)
+        }
     };
     Some(kind)
 }
@@ -195,9 +197,11 @@ pub(crate) fn is_op(
         ));
     };
     let matches = match &heap.type_value(idx).kind {
-        TypeKind::Builtin(b) => {
-            value_is(lhs, *b, callable_kind_of(lhs, heap, resolved, intrinsics))
-        }
+        TypeKind::Builtin(b) => value_is(
+            lhs,
+            *b,
+            callable_kind_of(lhs, heap, resolved, protocols, intrinsics),
+        ),
         // Records are **nominal** (L§6.5): `x is Point` holds iff `x` is a record whose
         // type is this exact declared type — compared by the type value's identity, so
         // two same-shaped records of different declarations are different types.
