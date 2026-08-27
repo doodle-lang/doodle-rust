@@ -12,10 +12,11 @@
 use super::cont::Cont;
 use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise, Trace};
-use super::frame::{Frame, FrameKind};
+use super::frame::FrameKind;
+use super::modload::LoadState;
 use super::{
-    Halt, Machine, Value, arith, block, call, compare, dict, dynamic, eval, limits, protect,
-    record, strop, types, unwind,
+    Halt, Machine, Value, arith, block, call, compare, dict, dynamic, eval, limits, modload,
+    protect, record, stmt, strop, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -69,7 +70,7 @@ pub(crate) fn step(
         }
         return match settle {
             Some(depth) => {
-                limits::safe_point(heap, machine, namespace)?;
+                limits::safe_point(heap, machine)?;
                 Ok(Some(depth))
             }
             None => Ok(None),
@@ -114,7 +115,7 @@ pub(crate) fn step(
     // one transition (a `Seq`/`ReturnBarrier` step pushes no frame), so at most one fires.
     let mut safe_point_depth = None;
     if stmt_safe_point {
-        limits::safe_point(heap, machine, namespace)?;
+        limits::safe_point(heap, machine)?;
         // Cancellation (E§10.1): the host stop button, polled at this safe point. Arming
         // the cancel unwind takes over the next transition, so do not also offer this as
         // a `Step*` pause — the drive re-steps straight into the teardown.
@@ -128,7 +129,7 @@ pub(crate) fn step(
     // place non-tail stack depth grows.
     let depth = machine.frames.len();
     if depth > depth_before {
-        limits::safe_point(heap, machine, namespace)?;
+        limits::safe_point(heap, machine)?;
         machine.check_stack_depth(depth)?;
         if machine.poll_cancel() {
             return Ok(None);
@@ -289,6 +290,11 @@ fn dispatch(
         }
         Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
+        // Process one target of an `import` (E§6): advance past a loaded module, park an
+        // import suspension for an unloaded one, or raise a circular/failed import.
+        Some(Cont::ImportTargets { import, next }) => {
+            modload::step_import_targets(resolved, heap, machine, import, next)
+        }
         // The frame's work is drained: return from it.
         None => {
             return_from_top_frame(machine);
@@ -319,88 +325,7 @@ fn seq_step(resolved: &ResolvedModule, machine: &mut Machine, block: NodeId, nex
         block,
         next: next + 1,
     });
-    dispatch_stmt(resolved, frame, stmt);
-}
-
-/// Schedules the work for one statement. A statement's value is discarded at the
-/// boundary (only `fn` bodies yield, L§6.11): an expression statement evaluates
-/// its expression, whose value the next `Seq` step overwrites.
-fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
-    match resolved.ast.node(stmt) {
-        Node::ExprStmt(expr) => frame.conts.push(Cont::Eval { node: *expr }),
-        // Evaluate the initializer, then bind it (LIFO: the `Eval` runs first). A
-        // `parameter`'s default seeds its module cell through the same path (§5.5).
-        Node::Let { value, .. } | Node::Const { value, .. } => {
-            frame.conts.push(Cont::BindLet { decl: stmt });
-            frame.conts.push(Cont::Eval { node: *value });
-        }
-        Node::Parameter { default, .. } => {
-            frame.conts.push(Cont::BindLet { decl: stmt });
-            frame.conts.push(Cont::Eval { node: *default });
-        }
-        // A `with`: evaluate the bound value, then open the dynamic binding for the body
-        // (WithBind, dynamic.rs), which runs the body under a restoring cleanup cont.
-        Node::With { value, .. } => {
-            frame.conts.push(Cont::WithBind { with: stmt });
-            frame.conts.push(Cont::Eval { node: *value });
-        }
-        // A name target evaluates only the RHS, then binds. A `Field`/`Index` place
-        // target evaluates its object first (left-to-right, L§14): navigate the object
-        // as a place (no copy), then finish the store (control.rs / record.rs / dict.rs).
-        Node::Assign { target, value } => match resolved.ast.node(*target) {
-            Node::Ident(_) => {
-                frame.conts.push(Cont::AssignTo { assign: stmt });
-                frame.conts.push(Cont::Eval { node: *value });
-            }
-            _ => {
-                let (Node::Field { object, .. } | Node::Index { object, .. }) =
-                    resolved.ast.node(*target)
-                else {
-                    unreachable!("an assignment target is Ident, Field, or Index (L§5.3)");
-                };
-                frame.conts.push(Cont::AssignPlaceObj { assign: stmt });
-                frame.conts.push(Cont::Eval { node: *object });
-            }
-        },
-        Node::If { .. } => control::schedule_if(frame, resolved, stmt),
-        Node::While { cond, .. } => {
-            frame.conts.push(Cont::WhileCheck { node: stmt });
-            frame.conts.push(Cont::Eval { node: *cond });
-        }
-        Node::Loop { body } => {
-            frame.conts.push(Cont::LoopReloop { node: stmt });
-            frame.conts.push(Cont::Seq {
-                block: *body,
-                next: 0,
-            });
-        }
-        // A named `to`/`fn` declaration: intern and bind its callable value when
-        // the statement runs (call.rs). Anonymous `fn` never reaches here — it is
-        // an expression, wrapped in an `ExprStmt`.
-        Node::Callable { .. } => frame.conts.push(Cont::DefineCallable { decl: stmt }),
-        // A `record …` declaration binds its type value when the statement runs (L§9);
-        // the body is docstring-only, so nothing is evaluated first (record.rs).
-        Node::Record { .. } => frame.conts.push(Cont::DefineRecord { decl: stmt }),
-        // A non-local exit (§7.10): evaluate its operand (if any), then arm the
-        // unwind toward the resolver-annotated target (unwind.rs).
-        Node::Return(op) | Node::Break(op) | Node::Continue(op) => {
-            frame.conts.push(Cont::ExitApply { exit: stmt });
-            if let Some(operand) = op {
-                frame.conts.push(Cont::Eval { node: *operand });
-            }
-        }
-        // A `try`: run the protected body under a `TryHandler` (protect.rs).
-        Node::Try { .. } => protect::schedule_try(frame, resolved, stmt),
-        // A `raise` (L§12.1): evaluate its operand (if any), then throw. A bare `raise`
-        // re-raises the exception being handled (RaiseApply, protect.rs).
-        Node::Raise(op) => {
-            frame.conts.push(Cont::RaiseApply { raise: stmt });
-            if let Some(operand) = op {
-                frame.conts.push(Cont::Eval { node: *operand });
-            }
-        }
-        other => unimplemented!("statement not yet in the machine (M4+): {other:?}"),
-    }
+    stmt::dispatch_stmt(resolved, frame, stmt);
 }
 
 /// The top frame's work is drained with no `ReturnBarrier` beneath it: only the
@@ -410,7 +335,16 @@ fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: NodeId) {
 fn return_from_top_frame(machine: &mut Machine) {
     let frame = machine.frames.pop().expect("return with no frame");
     match frame.kind {
-        FrameKind::ModuleTopLevel => machine.reg = None,
+        FrameKind::ModuleTopLevel => {
+            machine.reg = None;
+            // A sub-module's top level completing (an importer frame remains beneath, E§6):
+            // the module is now fully loaded (L§11.3 singleton), so a later import of it
+            // binds against the loaded instance instead of reloading. The main module
+            // draining instead empties the stack (program completion) — nothing to record.
+            if !machine.frames.is_empty() {
+                machine.load.set_state(frame.module, LoadState::Loaded);
+            }
+        }
         FrameKind::Callable { .. } | FrameKind::Block { .. } => {
             unreachable!(
                 "a callable/block frame returns via its ReturnBarrier, not an empty cont stack"

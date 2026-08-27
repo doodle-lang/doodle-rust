@@ -322,6 +322,19 @@ pub(crate) enum Cont {
     /// rescue body finishes — normally, or (like [`WithRestore`](Cont::WithRestore)) as a
     /// raise unwinds past it. So a bare re-raise resolves against the correct exception.
     PopHandler,
+    /// Processing an `import` statement's targets, one at a time (L§11, E§6): handle the
+    /// target at `next`. A target for an already-loaded module advances to `next + 1`; one
+    /// whose module is still loading raises a circular import; one absent from the table
+    /// **parks an import suspension** and re-pushes this cont at the same `next`, so after
+    /// the host supplies the source and the module's top level drives to completion, the
+    /// same target is retried (now loaded) and processing continues. Name binding per
+    /// import form is M5.2; at M5.1 a loaded target just advances.
+    ImportTargets {
+        /// The `import` statement node (its `Node::Import` targets).
+        import: NodeId,
+        /// The index of the next target to process.
+        next: u32,
+    },
 }
 
 impl Cont {
@@ -384,7 +397,8 @@ impl Cont {
             | Cont::WithRestore { .. }
             | Cont::TryHandler { .. }
             | Cont::RaiseApply { .. }
-            | Cont::PopHandler => {}
+            | Cont::PopHandler
+            | Cont::ImportTargets { .. } => {}
         }
     }
 }

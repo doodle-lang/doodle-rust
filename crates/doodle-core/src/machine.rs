@@ -30,16 +30,20 @@ mod frame;
 mod gc;
 mod handle;
 mod hash;
+mod import;
 mod intrinsic;
 mod lifecycle;
 mod limits;
 mod load;
 mod local;
+mod modload;
 mod observe;
+mod ops;
 mod protect;
 mod record;
 mod ring;
 mod step;
+mod stmt;
 mod stringify;
 mod strop;
 mod types;
@@ -72,6 +76,7 @@ use cont::Cont;
 use frame::Frame;
 use handle::HandleTable;
 use limits::FusedCounter;
+use modload::{ModuleLoad, Suspension};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -159,10 +164,26 @@ pub(crate) struct Machine {
     /// output intrinsics append here, and the host reads it via [`Instance::output`].
     /// Bytes, not heap values — not a GC root.
     output: Vec<u8>,
-    /// The parked capability request while the instance is `Suspended` (E§7.5, MD §14);
-    /// `None` in normal execution. Set by a capability call's `apply` (`intrinsic.rs`)
-    /// and consumed by `resolve` (`drive.rs`). Its `args` are GC roots while parked.
-    pending: Option<intrinsic::PendingRequest>,
+    /// The parked suspension while the instance is `Suspended` (E§7.5, §6, MD §14);
+    /// `None` in normal execution. A suspending capability call's `apply`
+    /// (`intrinsic/mod.rs`) parks a [`Suspension::Capability`], an `import` of an
+    /// unloaded module (`step`) parks a [`Suspension::Import`]; `resolve` /
+    /// `resolve_import` (`drive.rs`) consume it. A parked capability's `args` are GC
+    /// roots while parked.
+    pending: Option<Suspension>,
+    /// Module-load bookkeeping (E§6, L§11.3): per-module load state + the path/canonical
+    /// singleton caches. Lives here (not on the `Instance`) so the frame-lifecycle sites
+    /// that flip a module `loading → loaded/failed` reach it through `&mut machine`. Holds
+    /// no heap references, so it is not a GC root.
+    load: ModuleLoad,
+    /// The binding cells of **every loaded module's** namespace (machine-design §6/§15,
+    /// AD5): each module's globals live for the instance's life (a module is a singleton,
+    /// never unloaded in v0.1), so their cells are **permanent GC roots**. Every module
+    /// appends its namespace cells here at load — the main module at construction, each
+    /// imported module when it loads — so a collection during *any* module's step roots
+    /// *all* modules' globals, not just the executing one's (a sub-module load must not
+    /// sweep the importer's globals).
+    module_root_cells: Vec<CellIdx>,
     /// The directive the current drive runs under, remembered across a suspend so
     /// `resolve` resumes under the same directive (E§7.3).
     directive: Directive,
@@ -213,83 +234,6 @@ pub(crate) struct Machine {
     /// handler) and **polled at each safe point** ([`poll_cancel`](Self::poll_cancel));
     /// once set, the drive arms the cancel unwind (§12) and faults `Cancelled`.
     cancel: Arc<AtomicBool>,
-}
-
-impl Machine {
-    /// The next frame serial (post-increment): a fresh, monotonic frame identity.
-    pub(crate) fn next_frame_serial(&mut self) -> u64 {
-        let serial = self.frame_serial;
-        self.frame_serial += 1;
-        serial
-    }
-
-    /// Takes any fault parked during the transition (`step` surfaces it, MD §14).
-    pub(crate) fn take_pending_fault(&mut self) -> Option<EngineFault> {
-        self.pending_fault.take()
-    }
-
-    /// Parks a fault for `step` to surface, for a transition that cannot return an
-    /// `EngineFault` through its Raise-typed result (a string `*` over the heap limit).
-    pub(crate) fn set_pending_fault(&mut self, fault: EngineFault) {
-        self.pending_fault = Some(fault);
-    }
-
-    /// Roots the arguments of an entering synchronous foreign call (MD §15), returning
-    /// the prior stack length to [`pop_foreign_roots`](Self::pop_foreign_roots) on return.
-    pub(crate) fn push_foreign_roots(&mut self, values: &[Value]) -> usize {
-        let base = self.foreign_roots.len();
-        self.foreign_roots.extend_from_slice(values);
-        base
-    }
-
-    /// Un-roots a returning foreign call's arguments (truncating to `base`).
-    pub(crate) fn pop_foreign_roots(&mut self, base: usize) {
-        self.foreign_roots.truncate(base);
-    }
-
-    /// Whether entering another reentrant drive would exceed the native-stack nesting
-    /// bound (MD §14) — a program recursing through a native block-consumer must fault,
-    /// not overflow the Rust stack.
-    pub(crate) fn reentry_would_overflow(&self) -> bool {
-        self.reentry_depth >= MAX_REENTRY_DEPTH
-    }
-
-    /// Enters a reentrant drive (increments the nesting depth); pair with [`exit_reentry`].
-    pub(crate) fn enter_reentry(&mut self) {
-        self.reentry_depth += 1;
-    }
-
-    /// Leaves a reentrant drive (decrements the nesting depth).
-    pub(crate) fn exit_reentry(&mut self) {
-        self.reentry_depth -= 1;
-    }
-
-    /// Records a tail-elided frame in the ring (machine-design §11).
-    pub(crate) fn record_elided(&mut self, callable: CalIdx, consuming_serial: u64) {
-        self.ring.record(ring::ElidedFrame {
-            callable,
-            consuming_serial,
-        });
-    }
-
-    /// Polls the host cancel flag at a safe point (E§10.1). If cancellation was
-    /// requested and no transfer is already in flight, **arms the cancel unwind** (§12)
-    /// and returns `true`; the caller (`step`) then yields so the drive runs the
-    /// teardown. The common no-cancel case is a single relaxed atomic load — the whole
-    /// hot-path cost.
-    ///
-    /// A cancel first observed at the safe point that **drains the last frame** (the
-    /// module's completing transition) is *not* armed: the program has fully executed and
-    /// there is nothing left to unwind, so it completes rather than arming a dead unwind
-    /// on a terminal instance (a cancel racing exactly with completion loses to it).
-    pub(crate) fn poll_cancel(&mut self) -> bool {
-        if self.unwind.is_none() && !self.frames.is_empty() && self.cancel.load(Ordering::Relaxed) {
-            self.unwind = Some(unwind::Unwind::Cancel);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 /// A cancellation handle for an instance (engine spec E§10.1): the host's **stop
@@ -487,14 +431,10 @@ impl Instance {
     /// survives and garbage is reclaimed.
     #[cfg(test)]
     pub(crate) fn force_collect(&mut self) {
-        // At M5.0 there is one module, so the current module's namespace is every
-        // namespace; rooting all loaded modules during any module's step is M5.1.
-        let m = self.current_module();
-        gc::collect(
-            &mut self.heap,
-            &self.machine,
-            &self.modules[m.0 as usize].namespace,
-        );
+        // Every loaded module's namespace cells are permanent roots on the machine
+        // (`module_root_cells`), so a collection roots all modules' globals regardless of
+        // which module is executing (AD5).
+        gc::collect(&mut self.heap, &self.machine);
     }
 
     /// Makes every safe point collect (machine-design §15) — including those inside a
@@ -509,6 +449,18 @@ impl Instance {
     #[cfg(test)]
     pub(crate) fn live_object_count(&self) -> u32 {
         self.heap.live_objects()
+    }
+
+    /// The described `kind` of the exception each `failed` module retains (S-8) — for
+    /// asserting a failed load retained the right value (the re-raise itself is latent
+    /// until a reload path exists, M9b).
+    #[cfg(test)]
+    pub(crate) fn failed_module_error_kinds(&self) -> Vec<String> {
+        self.machine
+            .load
+            .failed_values()
+            .map(|v| exception::describe(&self.heap, self.machine.error_type, v).0)
+            .collect()
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:

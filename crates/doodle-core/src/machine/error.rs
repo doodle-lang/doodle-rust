@@ -79,6 +79,24 @@ pub enum ExceptionKind {
     /// is rendered into the message; carrying it as the exception value `rescue` binds
     /// arrives with exceptions-as-values (M4, E§9).
     HostRaised,
+    /// An `import` whose path the host resolved `NotFound` (E§6, S-60): the module the
+    /// program asked for does not exist. Raised in the importing program at the `import`
+    /// statement. The path and importer ride the message for now (per-kind structured
+    /// `details: {path, importer}` awaits the message-rubric work, as for every kind).
+    ModuleNotFound,
+    /// An `import` of a module whose load is already in progress — a **circular import**
+    /// (L§11.3, E§6). Raised at the re-entrant `import`, its message naming the cycle
+    /// (`a imports b imports a`). Structured `details: {cycle: [paths]}` await the
+    /// message-rubric work.
+    CircularImport,
+    /// A fetched module whose **source has static errors** (a syntax/resolve error in the
+    /// host-supplied source) — the runtime face of E's `LoadError` (E§3.2). Raised at the
+    /// `import` in the importer, since a broken imported module is the *module author's*
+    /// program error, not a host-contract matter. This is the exception the module's
+    /// `failed` state retains, so a re-import re-raises it unchanged (S-8). Structured
+    /// `details: {path, canonical_id, diagnostics}` — the full list, so an IDE renders an
+    /// imported module's errors as it renders the main program's — await the rubric work.
+    ModuleLoadError,
 }
 
 impl ExceptionKind {
@@ -105,6 +123,9 @@ impl ExceptionKind {
             ExceptionKind::InvalidUtf8 => "invalid-utf8",
             ExceptionKind::FunctionFellOffEnd => "function-fell-off-end",
             ExceptionKind::HostRaised => "host-raised",
+            ExceptionKind::ModuleNotFound => "module-not-found",
+            ExceptionKind::CircularImport => "circular-import",
+            ExceptionKind::ModuleLoadError => "module-load-error",
         }
     }
 }

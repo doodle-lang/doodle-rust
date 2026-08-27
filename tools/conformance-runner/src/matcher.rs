@@ -186,6 +186,11 @@ fn match_run_outcome(
         Outcome::Suspended(_) => Err(vec![
             "program suspended (no capabilities at M2a)".to_string(),
         ]),
+        // Import conformance vectors — the runner acting as a bundling host — land with the
+        // M5 module chapter (M5.10); an unresolved import here is a test setup error.
+        Outcome::SuspendedImport(_) => Err(vec![
+            "program suspended on an import (module conformance vectors are M5.10)".to_string(),
+        ]),
         Outcome::Paused(_) => Err(vec!["program paused (no observation at M2a)".to_string()]),
     }
 }

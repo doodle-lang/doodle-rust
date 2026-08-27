@@ -7,6 +7,8 @@
 
 use super::super::Machine;
 use super::super::cont::Cont;
+use super::super::frame::FrameKind;
+use super::super::modload::LoadState;
 use crate::ast::NodeId;
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -75,7 +77,24 @@ pub(super) fn raise_unwind(resolved: &ResolvedModule, heap: &mut Heap, machine: 
             .pop()
         else {
             // The frame's conts are exhausted with no handler: abandon it, keep unwinding.
-            machine.frames.pop();
+            let frame = machine
+                .frames
+                .pop()
+                .expect("a frame to abandon for a raise");
+            // A raise unwinding out of a still-loading module's top level — an importer
+            // frame remains beneath (E§6, S-8): its load failed, so mark it `failed`
+            // **retaining the raised value** (a re-import re-raises it unchanged), and the
+            // raise keeps propagating into the importer (the `import` fails). `raise_unwind`
+            // runs only for a `Raise` unwind, so the in-flight value is available.
+            if matches!(frame.kind, FrameKind::ModuleTopLevel)
+                && !machine.frames.is_empty()
+                && let Some(super::Unwind::Raise { value, .. }) = &machine.unwind
+            {
+                let value = *value;
+                machine
+                    .load
+                    .set_state(frame.module, LoadState::Failed(value));
+            }
             return;
         };
         match cont {

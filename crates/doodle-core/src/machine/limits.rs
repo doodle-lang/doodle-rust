@@ -8,7 +8,6 @@
 //! trigger). [`Machine::safe_point`] is called at each; [`Machine::check_stack_depth`]
 //! additionally guards the one place the frame stack grows (call/block entry).
 
-use super::control::Namespace;
 use super::{Machine, gc};
 use crate::drive::{EngineFault, LimitKind, Limits};
 use crate::heap::Heap;
@@ -115,11 +114,7 @@ impl FusedCounter {
 /// *after a collect that failed to bring it under* (MD §15) — a program that drops
 /// garbage under a tight limit reclaims and continues even when that limit sits
 /// below the GC threshold's floor, rather than faulting on garbage (E§10.2, §7.7).
-pub(crate) fn safe_point(
-    heap: &mut Heap,
-    machine: &mut Machine,
-    namespace: &Namespace,
-) -> Result<(), EngineFault> {
+pub(crate) fn safe_point(heap: &mut Heap, machine: &mut Machine) -> Result<(), EngineFault> {
     // Spend one safe point against the fused step-budget + slice-fuel counter (AD6): a
     // `StepBudget` fault if the lifetime budget is out, else flag a `SliceEnd` if the
     // slice fuel just ran out. The slice fuel **does not gate execution** here — the
@@ -138,7 +133,7 @@ pub(crate) fn safe_point(
     if machine.gc_every_safe_point
         || heap.bytes_allocated() > machine.gc_threshold.min(machine.limits.heap_bytes)
     {
-        gc::collect(heap, machine, namespace);
+        gc::collect(heap, machine);
         machine.gc_threshold = heap
             .bytes_allocated()
             .saturating_mul(GC_GROWTH)

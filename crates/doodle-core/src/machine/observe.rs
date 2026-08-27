@@ -164,6 +164,10 @@ impl Instance {
             Cont::WithBind { with } => ast.span(*with),
             Cont::TryHandler { try_node } => ast.span(*try_node),
             Cont::RaiseApply { raise } => ast.span(*raise),
+            // While parked on an import (E§6), the importer's position is the `import`
+            // statement itself (S-17): a host observing a suspended-on-import instance sees
+            // it there.
+            Cont::ImportTargets { import, .. } => ast.span(*import),
             // A cleanup marker restores a binding / clears a handler; no construct of its own.
             Cont::WithRestore { .. } | Cont::PopHandler => return None,
             // Operator plumbing carries the operator's span directly.

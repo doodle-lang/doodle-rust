@@ -426,11 +426,11 @@ pub(crate) fn apply(
         // `Suspended`. No state is torn down — the caller's continuation waits, and
         // `resolve` supplies the result (or a raise). The register is left untouched.
         ForeignBody::Capability => {
-            machine.pending = Some(PendingRequest {
+            machine.pending = Some(super::modload::Suspension::Capability(PendingRequest {
                 capability: id,
                 args,
                 span,
-            });
+            }));
             Ok(())
         }
     }

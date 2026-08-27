@@ -5,15 +5,34 @@
 //! drive loop that calls these lives in [`crate::drive`].
 
 use super::handle::HandleError;
+use super::modload::Suspension;
 use super::{Handle, Instance, Value};
 use crate::drive::{CapabilityId, CapabilityRequest, Directive};
 use crate::resolve::BodyKind;
 
 impl Instance {
-    /// Whether the instance has parked a capability request — it is mid-suspension
-    /// (E§7.5). The drive loop checks this after each step to return `Suspended`.
+    /// Whether the instance has parked a suspension — a capability request or an import
+    /// (E§7.5/§6). The drive loop checks this after each step to return `Suspended`/
+    /// `SuspendedImport`.
     pub(crate) fn is_suspended(&self) -> bool {
         self.machine.pending.is_some()
+    }
+
+    /// Whether the parked suspension is an `import` (E§6) rather than a capability — the
+    /// drive loop's signal to return `SuspendedImport` and route the host to
+    /// `resolve_import`.
+    pub(crate) fn is_import_suspended(&self) -> bool {
+        matches!(self.machine.pending, Some(Suspension::Import(_)))
+    }
+
+    /// Takes the parked **capability** request, asserting the suspension is a capability
+    /// (a capability `resolve` only follows a capability suspend; an import suspend is
+    /// consumed by `resolve_import`).
+    fn take_capability(&mut self) -> super::intrinsic::PendingRequest {
+        match self.machine.pending.take() {
+            Some(Suspension::Capability(pending)) => pending,
+            _ => unreachable!("a capability resolution requires a parked capability suspension"),
+        }
     }
 
     /// Records the directive the current drive runs under, for a later `resolve` to
@@ -43,9 +62,9 @@ impl Instance {
     /// identity and its bound arguments as fresh **host-owned** handles (S-17 — the
     /// host releases them). Leaves the pending request in place (consumed by `resolve`).
     pub(crate) fn capability_request(&mut self) -> CapabilityRequest {
-        let (capability, values) = {
-            let pending = self.machine.pending.as_ref().expect("a parked request");
-            (pending.capability, pending.args.clone())
+        let (capability, values) = match self.machine.pending.as_ref() {
+            Some(Suspension::Capability(pending)) => (pending.capability, pending.args.clone()),
+            _ => unreachable!("capability_request requires a parked capability suspension"),
         };
         let args = values
             .into_iter()
@@ -64,7 +83,7 @@ impl Instance {
         // Take the pending request first, so a stale resolution handle (a host-contract
         // violation) still clears the suspension — the drive then faults it terminally
         // rather than leaving a resumable half-state (`resolve`, E§3.3).
-        let pending = self.machine.pending.take().expect("a parked request");
+        let pending = self.take_capability();
         let value = self.machine.handles.resolve(handle)?;
         // A `to` capability yields Void regardless of the resolution value (E§7.5).
         self.machine.reg = if self.machine.intrinsics.kind_of(pending.capability) == BodyKind::Proc
@@ -84,7 +103,7 @@ impl Instance {
     pub(crate) fn resume_with_raise(&mut self, handle: Handle) -> Result<(), HandleError> {
         // Take the pending request first (see `resume_with_value`): a stale handle must
         // still clear the suspension so the drive can fault it terminally.
-        let pending = self.machine.pending.take().expect("a parked request");
+        let pending = self.take_capability();
         let value = self.machine.handles.resolve(handle)?;
         let trace = super::observe::capture_trace(
             self.current_resolved(),

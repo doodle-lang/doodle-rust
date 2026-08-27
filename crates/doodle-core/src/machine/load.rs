@@ -6,8 +6,8 @@
 
 use super::{
     Arc, AtomicBool, CellIdx, Config, ConfigError, Cont, Directive, Frame, FusedCounter,
-    HandleTable, Heap, Instance, InstanceState, Limits, Machine, ResolvedModule, UNICODE_VERSION,
-    UnicodeVersion, Value, intrinsic, limits, local, ring, types,
+    HandleTable, Heap, Instance, InstanceState, Limits, Machine, ModuleLoad, ResolvedModule,
+    TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local, ring, types,
 };
 
 impl Instance {
@@ -83,50 +83,17 @@ impl Instance {
         );
         let mut heap = Heap::new();
         let canonical_id = module.canonical_id;
-        // Namespace order (S-43): module globals first (their `let`/`const`/`to`/`fn`
-        // fill their cells in execution order — the temporal dead zone, M2a.4a), then
-        // the built-in type-value prelude, then the host intrinsics — each later group
-        // appended after, so an earlier binding of the same name wins the linear
-        // `find_cell` scan (control.rs): a user global shadows a type value or an
-        // intrinsic, matching the M5 prelude star-import this seeding will become.
-        let mut namespace: Vec<(Box<str>, CellIdx)> = module
-            .globals
-            .iter()
-            .map(|g| (g.name.clone(), heap.alloc_cell(None)))
-            .collect();
-        for &(name, builtin) in types::BUILTINS {
-            let kind = crate::machine::TypeKind::Builtin(builtin);
-            let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
-            namespace.push((name.into(), heap.alloc_cell(Some(ty))));
-        }
         // The built-in `Error` record type (L§12.1, S-58): the value record
         // `Error(kind, message, details)` the engine raises and Doodle code can
-        // construct/inspect. Seeded as a type-value global like the built-ins above; its
-        // type index is remembered on the machine so an engine raise can materialize one.
-        let error_type = heap.alloc_type(crate::heap::TypeObj {
-            kind: crate::machine::TypeKind::Record(crate::machine::RecordType {
-                name: "Error".into(),
-                fields: Box::new(["kind".into(), "message".into(), "details".into()]),
-                is_ref: false,
-            }),
-        });
-        namespace.push((
-            "Error".into(),
-            heap.alloc_cell(Some(Value::Type(error_type))),
-        ));
-        for (i, intrinsic) in intrinsics.iter().enumerate() {
-            // Each intrinsic interns to one foreign `CalObj` (its registration index is
-            // the `CallableTarget::Intrinsic` id) held by a read-only global cell.
-            let cal = heap.alloc_callable(crate::heap::CalObj {
-                module: canonical_id,
-                target: crate::heap::CallableTarget::Intrinsic(i as u32),
-                captures: Vec::new(),
-            });
-            namespace.push((
-                intrinsic.name.clone(),
-                heap.alloc_cell(Some(Value::Callable(cal))),
-            ));
-        }
+        // construct/inspect. One `Error` type is shared by every module in the instance,
+        // so it is created once here and remembered on the machine (an engine raise
+        // materializes one without a namespace scan) and passed to each module's seeding.
+        let error_type = alloc_error_type(&mut heap);
+        let namespace = seed_namespace(&module, &mut heap, error_type, &intrinsics);
+        // The main module's namespace cells are the instance's first permanent GC roots
+        // (each loaded module appends its own, `machine/import.rs`); captured before
+        // `namespace` moves into the module table.
+        let module_root_cells: Vec<CellIdx> = namespace.iter().map(|(_, cell)| *cell).collect();
         // The module top level's construct-body locals may be cell-boxed (a `fn`
         // captured one, §7), so build its slots like any frame — no params, no
         // captures. `raw` is all-`None`; `let`s fill the slots as they execute.
@@ -166,6 +133,8 @@ impl Instance {
                 intrinsics,
                 output: Vec::new(),
                 pending: None,
+                load: ModuleLoad::new(),
+                module_root_cells,
                 directive: Directive::RunToCompletion,
                 pending_fault: None,
                 foreign_roots: Vec::new(),
@@ -180,4 +149,63 @@ impl Instance {
             state: InstanceState::Ready,
         }
     }
+}
+
+/// Allocates the built-in `Error` record type (L§12.1, S-58) into `heap`, returning its
+/// index. One per instance, shared by every module.
+fn alloc_error_type(heap: &mut Heap) -> TypeIdx {
+    heap.alloc_type(crate::heap::TypeObj {
+        kind: crate::machine::TypeKind::Record(crate::machine::RecordType {
+            name: "Error".into(),
+            fields: Box::new(["kind".into(), "message".into(), "details".into()]),
+            is_ref: false,
+        }),
+    })
+}
+
+/// Seeds a module's namespace in S-43 order: the module's own globals (uninitialized
+/// cells — their `let`/`const`/`to`/`fn` fill them in execution order, the temporal dead
+/// zone), then the built-in type-value prelude, then the `Error` type value, then the host
+/// intrinsics. Each later group is appended after, so an earlier binding of the same name
+/// wins the linear `find_cell` scan (control.rs): a user global shadows a type value or an
+/// intrinsic — the relationship the M5 prelude star-import preserves. Every module in the
+/// instance (the main module or one loaded by `import`, E§6) is seeded the same way, so an
+/// imported module's own top level sees the same prelude; `error_type` is the shared
+/// built-in `Error`. The built-in type *values* are per-module heap objects for now —
+/// cross-module type-value identity (an `Int` from one module `==` another's) is an M5.5
+/// dispatch concern, not yet observable (an imported module runs only for effect at M5.1).
+pub(super) fn seed_namespace(
+    module: &ResolvedModule,
+    heap: &mut Heap,
+    error_type: TypeIdx,
+    intrinsics: &intrinsic::Registry,
+) -> Vec<(Box<str>, CellIdx)> {
+    let mut namespace: Vec<(Box<str>, CellIdx)> = module
+        .globals
+        .iter()
+        .map(|g| (g.name.clone(), heap.alloc_cell(None)))
+        .collect();
+    for &(name, builtin) in types::BUILTINS {
+        let kind = crate::machine::TypeKind::Builtin(builtin);
+        let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
+        namespace.push((name.into(), heap.alloc_cell(Some(ty))));
+    }
+    namespace.push((
+        "Error".into(),
+        heap.alloc_cell(Some(Value::Type(error_type))),
+    ));
+    for (i, intrinsic) in intrinsics.iter().enumerate() {
+        // Each intrinsic interns to one foreign `CalObj` (its registration index is the
+        // `CallableTarget::Intrinsic` id) held by a read-only global cell.
+        let cal = heap.alloc_callable(crate::heap::CalObj {
+            module: module.canonical_id,
+            target: crate::heap::CallableTarget::Intrinsic(i as u32),
+            captures: Vec::new(),
+        });
+        namespace.push((
+            intrinsic.name.clone(),
+            heap.alloc_cell(Some(Value::Callable(cal))),
+        ));
+    }
+    namespace
 }

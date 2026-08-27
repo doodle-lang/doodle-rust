@@ -26,6 +26,8 @@ impl Machine {
             intrinsics: intrinsic::Registry::new(),
             output: Vec::new(),
             pending: None,
+            load: modload::ModuleLoad::new(),
+            module_root_cells: Vec::new(),
             directive: Directive::RunToCompletion,
             pending_fault: None,
             foreign_roots: Vec::new(),
@@ -1268,6 +1270,56 @@ fn each_keeps_heap_valued_elements_rooted_across_collection() {
         assert!(steps < 100_000, "each did not halt");
     }
     assert_eq!(inst.output(), b"a\nb\nc\n");
+}
+
+#[test]
+fn a_failed_load_retains_its_exception_for_re_raise() {
+    // S-8: a module whose load raises enters `failed` **retaining that exception value**,
+    // so a reload/re-import (M9b) re-raises it unchanged. The re-raise is latent in a
+    // single run (a load failure is uncatchable and terminates), but the retention must be
+    // set: here `boom` divides by zero, and its `failed` state keeps the division-by-zero
+    // `Error`.
+    use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+    let mut inst = load_source_with_print("import boom\n");
+    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    while let Outcome::SuspendedImport(_) = &outcome {
+        outcome = resolve_import(
+            &mut inst,
+            ImportResolution::Source {
+                text: "let x = 1 / 0\n".to_string(),
+                canonical_id: "boom".to_string(),
+            },
+        );
+    }
+    assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
+    assert_eq!(inst.failed_module_error_kinds(), vec!["division-by-zero"]);
+}
+
+#[test]
+fn a_sub_module_load_keeps_the_importers_globals_rooted_under_gc() {
+    // A collection firing while an imported module's top level runs must root **every**
+    // loaded module's globals, not just the executing sub-module's (AD5, E§6). With
+    // collection forced at every safe point, the main module's `g` must survive the load
+    // of module `a` — otherwise its list would be swept while `a` is the executing module
+    // and `print(g[1])` would read freed memory. Driven through the real import
+    // suspend/resume path (a bare `step` loop cannot resolve an import).
+    use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+    let mut inst = load_source_with_print("let g = [10, 20, 30]\nimport a\nprint(g[1])\n");
+    inst.collect_at_every_safe_point();
+    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    while let Outcome::SuspendedImport(_) = &outcome {
+        outcome = resolve_import(
+            &mut inst,
+            ImportResolution::Source {
+                // `a`'s top level allocates its own heap value, so a collection genuinely
+                // fires while `a` — not the main module — is the executing module.
+                text: "let junk = [1, 2, 3, 4, 5]\n".to_string(),
+                canonical_id: "a".to_string(),
+            },
+        );
+    }
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"20\n");
 }
 
 #[test]

@@ -318,6 +318,11 @@ fn to_drive_outcome(instance: &Instance, outcome: Outcome) -> DriveOutcome {
             capability: request.capability.0,
             args: request.args,
         },
+        // The browser host does not load modules dynamically yet (the demo bundles all
+        // source): a program that imports an unloaded module has no resolver here. Surfacing
+        // it as a fault keeps the JS API unchanged; the first-class `SuspendedImport` outcome
+        // + a JS `resolve_import` binding + demo fetch are M5-web work (E§6).
+        Outcome::SuspendedImport(_) => DriveOutcome::Faulted("import-unsupported"),
         Outcome::Paused(reason) => DriveOutcome::Paused(pause_tag(reason)),
         Outcome::Raised(value, trace) => {
             let (kind, message) = instance.describe_raised(value);

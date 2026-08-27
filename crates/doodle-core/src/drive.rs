@@ -34,6 +34,12 @@ pub enum Outcome {
     Completed(Option<Value>),
     /// A capability must be fulfilled by the host before execution continues.
     Suspended(CapabilityRequest),
+    /// An `import` reached a module the engine has not loaded and that is not a registered
+    /// native module (E§6, S-60): the host must supply its source (or report it missing)
+    /// before execution continues. Resolve with [`resolve_import`]. Modeled as a
+    /// suspension so a host that fetches source asynchronously (a browser) and one that
+    /// bundles it (resolves immediately) obey the same contract.
+    SuspendedImport(ImportRequest),
     /// Execution stopped at a safe point for observation.
     Paused(PauseReason),
     /// An uncaught exception reached the boundary (E§9): the raised **value** (an
@@ -201,6 +207,43 @@ pub enum Resolution {
     Raise(Handle),
 }
 
+/// An import request carried by [`Outcome::SuspendedImport`] (engine spec E§6): the
+/// module the program asked for, as its dotted-path segments (the request identity), plus
+/// the importing module's id for host diagnostics. The host maps the path to source and
+/// continues with [`resolve_import`].
+#[derive(Clone, Debug)]
+pub struct ImportRequest {
+    /// The requested dotted module path, one entry per segment (e.g. `["shapes", "circle"]`).
+    pub path: Vec<String>,
+    /// The importing module's canonical id ([`ModuleId`](crate::span::ModuleId) value) —
+    /// for the host's own diagnostics; the engine needs only the path to be resolved.
+    pub importer: u32,
+}
+
+/// How a host resolves a [`SuspendedImport`](Outcome::SuspendedImport) (engine spec E§6):
+/// the module's source, a "not found", or an exception to raise at the `import` site. A
+/// bundling host answers with `Source` immediately in its drive loop; a host that fetches
+/// over the network answers when the source arrives (or fails). Import resolutions are
+/// recorded and replayed like capability resolutions (E§11).
+#[derive(Clone, Debug)]
+pub enum ImportResolution {
+    /// The module's source `text` and the host's `canonical_id` for it (E§6): the engine
+    /// parses the text, drives its top level, and caches it under the canonical id
+    /// (singleton loading, L§11.3 — two paths the host maps to one canonical id load once).
+    Source {
+        /// The module's source text (the engine NFC-normalizes it, L§4.4).
+        text: String,
+        /// The host's canonical identity for the module — the singleton cache key.
+        canonical_id: String,
+    },
+    /// The module does not exist: the engine raises `module-not-found` in the importer
+    /// (E§6, S-60).
+    NotFound,
+    /// The host could not supply the source (e.g. a failed fetch): the engine raises the
+    /// given value at the `import` site (E§6).
+    Raise(Handle),
+}
+
 /// Starts (from `Ready`) or continues (after a `Paused`) driving `instance` under
 /// `directive`, returning an [`Outcome`] (E§7.3).
 ///
@@ -299,6 +342,64 @@ pub fn resolve_slice(
     }
 }
 
+/// Continues a `SuspendedImport` `instance` with the host's module `resolution` (E§6): on
+/// `Source` the engine parses the module, pushes its top-level frame, and resumes driving
+/// (the importer stays parked beneath until the module finishes loading); `NotFound` raises
+/// `module-not-found` and `Raise` raises the host's value, both at the `import` site.
+/// Calling it on an instance not suspended on an import is a host-contract violation
+/// (debug-asserted; `Faulted(Internal)` in release).
+pub fn resolve_import(instance: &mut Instance, resolution: ImportResolution) -> Outcome {
+    resolve_import_slice(instance, resolution, None)
+}
+
+/// Like [`resolve_import`], but **bounded**: the resumed drive runs at most `fuel` statement
+/// safe points before `Paused(SliceEnd)` (S-40). `None` is unbounded.
+pub fn resolve_import_slice(
+    instance: &mut Instance,
+    resolution: ImportResolution,
+    fuel: Option<u64>,
+) -> Outcome {
+    debug_assert!(
+        matches!(instance.state(), InstanceState::Suspended) && instance.is_import_suspended(),
+        "resolve_import() requires an instance suspended on an import (got {:?}); use \
+         resolve() for a capability (E§6/§7.5)",
+        instance.state()
+    );
+    if !(matches!(instance.state(), InstanceState::Suspended) && instance.is_import_suspended()) {
+        return Outcome::Faulted(EngineFault::Internal);
+    }
+    // A cancellation requested while suspended wins over the resolution (E§10.1, S-23),
+    // exactly as for a capability: discard the parked import and tear down to
+    // `Faulted(Cancelled)`.
+    if instance.cancel_requested() {
+        instance.discard_pending_and_cancel();
+        return drive(instance, instance.resume_directive(), fuel);
+    }
+    match resolution {
+        // The module's source: parse + push its top-level frame (or alias a canonical
+        // duplicate / arm a compile-failure raise), then resume — the module's top level
+        // drives to completion (observable, may itself suspend/raise) before the importer
+        // continues.
+        ImportResolution::Source { text, canonical_id } => {
+            instance.load_import_source(&text, &canonical_id);
+            drive(instance, instance.resume_directive(), fuel)
+        }
+        // The module does not exist: raise `module-not-found` at the `import` site, then
+        // re-drive so a `try` around the import can catch it or it drains to `Raised`.
+        ImportResolution::NotFound => {
+            instance.raise_import_not_found();
+            drive(instance, instance.resume_directive(), fuel)
+        }
+        // The host could not supply the source: raise its value at the `import` site.
+        ImportResolution::Raise(handle) => match instance.raise_import_value(handle) {
+            Ok(()) => drive(instance, instance.resume_directive(), fuel),
+            // A stale resolution handle is a host-contract violation: the suspension was
+            // cleared, so leave the instance terminally `Faulted` (E§3.3).
+            Err(_) => fault(instance),
+        },
+    }
+}
+
 /// The core drive loop: steps `instance` to a stopping [`Outcome`] under `directive`,
 /// pausing a `Step*` at the next matching safe point and suspending at a capability
 /// call. Shared by [`run`] and the resume side of [`resolve`].
@@ -337,7 +438,14 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
                 // wins — the instance is `Suspended`, resumed via `resolve`).
                 if instance.is_suspended() {
                     instance.set_state(InstanceState::Suspended);
-                    return Outcome::Suspended(instance.capability_request());
+                    // An `import` of an unloaded module (E§6) suspends the same way but is
+                    // resolved through `resolve_import`, so it surfaces as its own outcome
+                    // that routes the host there.
+                    return if instance.is_import_suspended() {
+                        Outcome::SuspendedImport(instance.import_request())
+                    } else {
+                        Outcome::Suspended(instance.capability_request())
+                    };
                 }
                 if let Some(depth) = safe_point
                     && should_pause(directive, anchor_depth, depth)
