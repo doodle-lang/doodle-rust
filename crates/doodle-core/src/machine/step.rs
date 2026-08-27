@@ -15,7 +15,7 @@ use super::frame::FrameKind;
 use super::modload::LoadState;
 use super::{
     Halt, LoadedModule, Machine, Value, arith, block, call, compare, control, dict, dynamic, eval,
-    limits, modload, protect, record, stmt, strop, types, unwind,
+    limits, modload, protect, protocol, record, stmt, strop, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -166,7 +166,16 @@ fn dispatch(
                 // `x is T`: the right operand is a type value (L§6.5). The callable
                 // trio (`Procedure`/`Function`/`Callable`) needs the resolver and the
                 // intrinsic registry to read a callable's `to`/`fn` kind (S-37).
-                BinaryOp::Is => types::is_op(lhs, rhs, heap, resolved, &machine.intrinsics, span)?,
+                BinaryOp::Is => types::is_op(
+                    lhs,
+                    rhs,
+                    heap,
+                    resolved,
+                    modules,
+                    &machine.protocols,
+                    &machine.intrinsics,
+                    span,
+                )?,
                 // String `+`/`*` branch off the numeric path (L§4.4, S-59); a pair with no
                 // string operand falls through to numeric arithmetic.
                 _ if is_arithmetic(op) => {
@@ -270,6 +279,13 @@ fn dispatch(
         Some(Cont::DefineRecord { decl }) => {
             record::define(resolved, heap, machine, &modules[cur].namespace, decl);
             Ok(())
+        }
+        Some(Cont::DefineProtocol { decl }) => {
+            protocol::define_protocol(resolved, modules, heap, machine, cur, decl);
+            Ok(())
+        }
+        Some(Cont::DefineImplement { decl }) => {
+            protocol::define_implement(resolved, modules, heap, machine, cur, decl)
         }
         Some(Cont::FieldRead { field }) => {
             record::field_read(resolved, modules, heap, machine, field)

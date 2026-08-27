@@ -85,15 +85,36 @@ pub struct BigIntObj {
     pub value: BigInt,
 }
 
+/// The kind of a module binding cell (machine-design §6, plan AD5). Assignability
+/// is a **static** check (S-6 rule 2a), so the machine does not re-check it on
+/// write; the tag records what a name *is* for the mechanisms that need it — a
+/// dynamic parameter for `with` (L§5.5), a protocol member for dispatch (L§10.3).
+/// A closure upvalue and a construct-body cell-boxed local (§7) are ordinary
+/// mutable storage and carry [`CellKind::Let`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CellKind {
+    /// A mutable module binding (`let`), a closure upvalue, or a boxed local.
+    Let,
+    /// A non-reassignable binding (`const`, a `to`/`fn`/`record`/`protocol`, an
+    /// imported name, or a prelude value).
+    Const,
+    /// A dynamic parameter (`parameter`, L§5.5): `value` is the *current* dynamic
+    /// value (the default at declaration; `with` swaps and restores it).
+    Parameter,
+    /// A protocol member (L§10): `value` holds the member's dispatcher callable.
+    /// The `u32` is the member-name id (an index into the machine's protocol
+    /// registry's interned member names) the dispatcher dispatches on.
+    Dispatcher(u32),
+}
+
 /// A binding **cell** (machine-design §6/§7): a mutable box holding one value —
 /// a module-level binding, and later a closure upvalue. `value` is `None` while
 /// the binding is **uninitialized** (declared but its `let`/`const` has not yet
-/// executed): reading it then is a use-before-defined error. The cell `kind`
-/// (mutable/const/parameter/dispatcher, MD §6) joins when it is first needed
-/// (dynamic parameters at M4, dispatch at M5); at M2a assignability is already a
-/// static check (S-6 rule 2a), so the machine does not re-check it here.
+/// executed): reading it then is a use-before-defined error.
 #[derive(Clone, Debug)]
 pub struct CellObj {
+    /// What the binding is (machine-design §6); see [`CellKind`].
+    pub kind: CellKind,
     /// The bound value, or `None` if not yet initialized.
     pub value: Option<Value>,
 }
@@ -111,6 +132,20 @@ pub enum CallableTarget {
     /// intrinsic registry (S-43). It has no source body, frame, or captures — a
     /// synchronous call runs the host callback inline (it never becomes a frame).
     Intrinsic(u32),
+    /// A protocol **dispatcher** (L§10.3): calling it binds arguments against the
+    /// member's declared signature, then dispatches on the runtime type of the
+    /// value bound to the first parameter (S-31). `member` is the member-name id
+    /// (into the protocol registry); `protocol` is `Some(id)` for the qualified
+    /// form `P.member` (dispatch restricted to protocol `id`) or `None` for a bare
+    /// member name (dispatch over every protocol declaring it, with the L§10.3
+    /// cross-protocol ambiguity check).
+    Dispatcher {
+        /// The member-name id (into the protocol registry's interned names).
+        member: u32,
+        /// `Some(protocol id)` for the qualified form `P.member`; `None` for a bare
+        /// member name.
+        protocol: Option<u32>,
+    },
 }
 
 /// A callable object (machine-design §4/§8): a `to`/`fn`/lambda value, or a host
@@ -140,6 +175,11 @@ impl CalObj {
             CallableTarget::Source(id) => id,
             CallableTarget::Intrinsic(_) => {
                 unreachable!("an intrinsic foreign function never becomes a callable frame")
+            }
+            CallableTarget::Dispatcher { .. } => {
+                unreachable!(
+                    "a protocol dispatcher is resolved to an implementation, never a frame"
+                )
             }
         }
     }

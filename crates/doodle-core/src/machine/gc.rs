@@ -67,6 +67,12 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine) {
         for value in machine.load.failed_values() {
             tracer.value(value);
         }
+        // The protocol registry's callables (L§10): a member default body and an impl
+        // method are referenced only from the registry (never a namespace cell), so they
+        // are roots for the instance's life.
+        for cal in machine.protocols.rooted_callables() {
+            tracer.callable(cal);
+        }
         // A parked capability request's bound arguments (§14): reachable while the
         // instance is `Suspended`, so a collection at that safe point keeps them alive. An
         // import suspension (E§6) holds only a dotted path (no heap values), so it roots

@@ -32,8 +32,8 @@ mod objects;
 mod slab;
 
 pub use objects::{
-    BigIntObj, BytesObj, CalObj, CallableTarget, CellObj, DictObj, Finalizer, ForeignObj, ListObj,
-    RecObj, StrObj, TypeObj,
+    BigIntObj, BytesObj, CalObj, CallableTarget, CellKind, CellObj, DictObj, Finalizer, ForeignObj,
+    ListObj, RecObj, StrObj, TypeObj,
 };
 pub use slab::Slab;
 
@@ -328,10 +328,10 @@ impl Heap {
         self.bigints.get(idx.0)
     }
 
-    /// Allocates a binding cell with the given initial `value` (`None` =
-    /// uninitialized). Its payload is one value width (MD §6/§7).
-    pub fn alloc_cell(&mut self, value: Option<Value>) -> CellIdx {
-        let obj = CellObj { value };
+    /// Allocates a binding cell of the given `kind` with the given initial `value`
+    /// (`None` = uninitialized). Its payload is one value width (MD §6/§7).
+    pub fn alloc_cell(&mut self, kind: CellKind, value: Option<Value>) -> CellIdx {
+        let obj = CellObj { kind, value };
         self.charge_object(cell_payload(&obj));
         let serial = self.next_serial();
         CellIdx(self.cells.alloc(obj, serial))

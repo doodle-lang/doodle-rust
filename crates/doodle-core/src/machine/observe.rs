@@ -159,7 +159,9 @@ impl Instance {
             Cont::FieldRead { field } => ast.span(*field),
             Cont::BindDefault { default, .. } => ast.span(*default),
             Cont::DefineCallable { decl } => ast.span(*decl),
-            Cont::DefineRecord { decl } => ast.span(*decl),
+            Cont::DefineRecord { decl }
+            | Cont::DefineProtocol { decl }
+            | Cont::DefineImplement { decl } => ast.span(*decl),
             Cont::ExitApply { exit } => ast.span(*exit),
             Cont::WithBind { with } => ast.span(*with),
             Cont::TryHandler { try_node } => ast.span(*try_node),

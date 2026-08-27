@@ -69,6 +69,11 @@ pub(super) fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: 
         // A `record …` declaration binds its type value when the statement runs (L§9);
         // the body is docstring-only, so nothing is evaluated first (record.rs).
         Node::Record { .. } => frame.conts.push(Cont::DefineRecord { decl: stmt }),
+        // A `protocol`/`implement` declaration registers itself when the statement runs
+        // (L§10, protocol.rs): the protocol binds its value and member dispatcher cells;
+        // the implement records its `(protocol, type, member) → callable` associations.
+        Node::Protocol { .. } => frame.conts.push(Cont::DefineProtocol { decl: stmt }),
+        Node::Implement { .. } => frame.conts.push(Cont::DefineImplement { decl: stmt }),
         // A non-local exit (§7.10): evaluate its operand (if any), then arm the
         // unwind toward the resolver-annotated target (unwind.rs).
         Node::Return(op) | Node::Break(op) | Node::Continue(op) => {

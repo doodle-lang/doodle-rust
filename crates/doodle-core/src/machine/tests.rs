@@ -27,6 +27,7 @@ impl Machine {
             output: Vec::new(),
             pending: None,
             load: modload::ModuleLoad::new(),
+            protocols: super::protocol::Registry::default(),
             module_root_cells: Vec::new(),
             directive: Directive::RunToCompletion,
             pending_fault: None,
@@ -1415,7 +1416,7 @@ fn step_out_stops_the_instant_a_fn_returns_before_a_sibling_runs() {
 /// `old`, record `(cell, old)` on the dyn stack, overwrite the cell with `new`, and push
 /// the matching `WithRestore` cont. Returns the cell so a test can assert restoration.
 fn simulate_with(inst: &mut Instance, old: Value, new: Value) -> CellIdx {
-    let cell = inst.heap.alloc_cell(Some(old));
+    let cell = inst.heap.alloc_cell(crate::heap::CellKind::Let, Some(old));
     let mark = inst.machine.dyn_stack.len() as u32;
     inst.machine.dyn_stack.push((cell, old));
     inst.heap.cell_mut(cell).value = Some(new);
@@ -1435,8 +1436,12 @@ fn cell_int(inst: &Instance, cell: CellIdx) -> Option<i64> {
 #[test]
 fn restore_reverts_bindings_down_to_the_mark() {
     let mut inst = load_source("let x = 1\n");
-    let c1 = inst.heap.alloc_cell(Some(Value::Int(1)));
-    let c2 = inst.heap.alloc_cell(Some(Value::Int(2)));
+    let c1 = inst
+        .heap
+        .alloc_cell(crate::heap::CellKind::Let, Some(Value::Int(1)));
+    let c2 = inst
+        .heap
+        .alloc_cell(crate::heap::CellKind::Let, Some(Value::Int(2)));
     let mark = inst.machine.dyn_stack.len() as u32;
     inst.machine.dyn_stack.push((c1, Value::Int(1)));
     inst.machine.dyn_stack.push((c2, Value::Int(2)));

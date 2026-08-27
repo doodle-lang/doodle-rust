@@ -17,6 +17,7 @@ mod arith;
 mod block;
 mod boundary;
 mod call;
+mod cancel;
 mod compare;
 mod cont;
 mod control;
@@ -40,6 +41,7 @@ mod modload;
 mod observe;
 mod ops;
 mod protect;
+mod protocol;
 mod record;
 mod ring;
 mod step;
@@ -51,6 +53,7 @@ mod unwind;
 mod value;
 
 pub use boundary::{Kind, ValueError};
+pub use cancel::CancelToken;
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace, TraceFrame};
 pub use handle::{Handle, HandleError};
@@ -62,7 +65,7 @@ pub use intrinsic::{
     sin as sin_intrinsic,
 };
 pub use observe::{FrameObservation, Position};
-pub(crate) use types::{RecordType, TypeKind};
+pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };
@@ -176,6 +179,11 @@ pub(crate) struct Machine {
     /// that flip a module `loading → loaded/failed` reach it through `&mut machine`. Holds
     /// no heap references, so it is not a GC root.
     load: ModuleLoad,
+    /// The protocol registry (L§10, plan AD5): interned member names, protocol definitions,
+    /// and `implement` blocks, populated as `protocol`/`implement` declarations load. Its
+    /// member-default and impl-method callables are GC roots (`machine/gc.rs`) — no
+    /// namespace cell references them.
+    protocols: protocol::Registry,
     /// The binding cells of **every loaded module's** namespace (machine-design §6/§15,
     /// AD5): each module's globals live for the instance's life (a module is a singleton,
     /// never unloaded in v0.1), so their cells are **permanent GC roots**. Every module
@@ -234,29 +242,6 @@ pub(crate) struct Machine {
     /// handler) and **polled at each safe point** ([`poll_cancel`](Self::poll_cancel));
     /// once set, the drive arms the cancel unwind (§12) and faults `Cancelled`.
     cancel: Arc<AtomicBool>,
-}
-
-/// A cancellation handle for an instance (engine spec E§10.1): the host's **stop
-/// button**. Cloneable and thread-safe, so the host can request cancellation from
-/// another thread (or a signal handler) while a drive is running — or before one. The
-/// engine polls it at the instance's next safe point, unwinds the stack (running block/
-/// `with` cleanup, as for an exception), and returns
-/// [`Faulted(Cancelled)`](crate::drive::EngineFault::Cancelled); cancellation is **not**
-/// catchable by Doodle code.
-#[derive(Clone)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    /// Requests cancellation. Idempotent; takes effect at the instance's next safe point
-    /// (or the first safe point of the next drive, if requested while not running).
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether cancellation has been requested through this (or any cloned) token.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
 }
 
 /// A loaded module (L§11.3, E§6, AD5): its resolved AST and its module-scope
@@ -341,7 +326,7 @@ impl Instance {
     /// on another thread — and request cancellation while a drive is running. All tokens
     /// for one instance share its cancel flag.
     pub fn cancel_token(&self) -> CancelToken {
-        CancelToken(Arc::clone(&self.machine.cancel))
+        CancelToken::new(Arc::clone(&self.machine.cancel))
     }
 
     /// Whether host cancellation has been requested (E§10.1) — a plain read of the cancel

@@ -61,7 +61,9 @@ pub(crate) fn construct(
     // Copy the field names out so the type borrow releases before the alloc.
     let (name, field_names) = match &heap.type_value(type_idx).kind {
         TypeKind::Record(rt) => (rt.name.clone(), rt.fields.to_vec()),
-        TypeKind::Builtin(_) => unreachable!("construct on a built-in type"),
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => {
+            unreachable!("construct on a non-record type")
+        }
     };
     let fields = match_fields(resolved, call, &name, &field_names, &arg_values, span)?;
     // A field is a place: storing a value record into it copies (L§4.14), exactly as
@@ -90,7 +92,9 @@ pub(crate) fn copy_on_bind(value: Value, heap: &mut Heap) -> Value {
     let type_idx = heap.record(r).type_idx;
     let is_ref = match &heap.type_value(type_idx).kind {
         TypeKind::Record(rt) => rt.is_ref,
-        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => {
+            unreachable!("a record's type is a record type")
+        }
     };
     if is_ref {
         return value; // a `ref` record is shared, not copied.
@@ -203,6 +207,31 @@ pub(crate) fn field_read(
         machine.reg = Some(super::control::read_cell(heap, cell, name, span)?);
         return Ok(());
     }
+    // A qualified protocol member `P.member` (L§10.3): field access on a **protocol value**
+    // yields a dispatcher restricted to that protocol. `member` must be one of `P`'s members.
+    if let Value::Type(idx) = object
+        && let TypeKind::Protocol(pt) = &heap.type_value(idx).kind
+    {
+        let pid = pt.id;
+        let Some(member) = machine.protocols.qualified_member(pid, name) else {
+            return Err(Raise::new(
+                ExceptionKind::NoSuchField,
+                format!("protocol `{}` has no member `{name}`", pt.name),
+                span,
+            ));
+        };
+        let module = resolved.canonical_id;
+        let dcal = heap.alloc_callable(crate::heap::CalObj {
+            module,
+            target: crate::heap::CallableTarget::Dispatcher {
+                member,
+                protocol: Some(pid),
+            },
+            captures: Vec::new(),
+        });
+        machine.reg = Some(Value::Callable(dcal));
+        return Ok(());
+    }
     let Value::Record(r) = object else {
         return Err(Raise::new(
             ExceptionKind::TypeMismatch,
@@ -213,7 +242,9 @@ pub(crate) fn field_read(
     let type_idx = heap.record(r).type_idx;
     let pos = match &heap.type_value(type_idx).kind {
         TypeKind::Record(rt) => rt.fields.iter().position(|f| f.as_ref() == name.as_ref()),
-        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => {
+            unreachable!("a record's type is a record type")
+        }
     };
     match pos {
         Some(p) => {
@@ -259,7 +290,9 @@ pub(crate) fn field_set(
     let type_idx = heap.record(r).type_idx;
     let pos = match &heap.type_value(type_idx).kind {
         TypeKind::Record(rt) => rt.fields.iter().position(|f| f.as_ref() == name.as_ref()),
-        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => {
+            unreachable!("a record's type is a record type")
+        }
     };
     match pos {
         Some(p) => {

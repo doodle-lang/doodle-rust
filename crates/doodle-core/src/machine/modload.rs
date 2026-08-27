@@ -319,7 +319,7 @@ fn bind_module_value(
         .alias
         .clone()
         .unwrap_or_else(|| target.path.last().expect("a non-empty import path").clone());
-    let cell: CellIdx = heap.alloc_cell(Some(Value::Module(id)));
+    let cell: CellIdx = heap.alloc_cell(crate::heap::CellKind::Const, Some(Value::Module(id)));
     modules[cur.0 as usize].namespace.push((name, cell));
     // A runtime-bound namespace cell must join the permanent GC roots (AD5): unlike the
     // load-seeded cells, it is added after `seed_namespace`, so root it explicitly.

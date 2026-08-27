@@ -206,11 +206,13 @@ impl super::Resolver<'_> {
                 self.declare_binding(node, &name, GlobalKind::Protocol);
                 // Default-implementation bodies are callable frames; signatures
                 // (body: None) have nothing to resolve. Member names dispatch (M5),
-                // so they are not module globals.
+                // so they are not module globals. Each default body's `CallableInfo`
+                // is keyed by the **body node** (its own decl) so the machine can find
+                // it (`make_callable`) to intern the member's default (protocol.rs).
                 for m in members {
                     if let Some(body) = m.body {
                         self.resolve_callable(
-                            node,
+                            body,
                             super::kind_to_body(m.kind),
                             &m.params,
                             body,

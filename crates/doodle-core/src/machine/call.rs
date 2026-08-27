@@ -155,6 +155,14 @@ fn apply(
     if let CallableTarget::Intrinsic(id) = heap.callable(cal).target {
         return intrinsic::apply(resolved, modules, heap, machine, call, id, arg_values);
     }
+    // A protocol **dispatcher** (L§10.3): bind the arguments against the member's
+    // signature, dispatch on the first argument's runtime type, and enter the resolved
+    // implementation (protocol.rs) — or raise not-implemented / ambiguous.
+    if let CallableTarget::Dispatcher { member, protocol } = heap.callable(cal).target {
+        return super::protocol::dispatch_call(
+            resolved, modules, heap, machine, call, member, protocol, arg_values,
+        );
+    }
     // A source callable runs in the module it was **defined** in (its `CalObj`'s module),
     // so its parameters, defaults, slot layout, and body come from **that** module's
     // resolved AST — not the caller's — which is what makes a cross-module call correct
@@ -369,7 +377,7 @@ pub(crate) fn define_callable(
     if let Some(Resolution::LocalSlot(slot)) = resolved.resolutions[decl.0 as usize] {
         let top = machine.frames.len() - 1;
         if matches!(machine.frames[top].locals[slot as usize], Local::Boxed(_)) {
-            let cell = heap.alloc_cell(None);
+            let cell = heap.alloc_cell(crate::heap::CellKind::Let, None);
             machine.frames[top].locals[slot as usize] = Local::Boxed(cell);
             let value = make_callable(resolved, heap, machine, decl);
             heap.cell_mut(cell).value = Some(value);

@@ -274,6 +274,18 @@ pub(crate) enum Cont {
         /// The `Record` declaration node.
         decl: NodeId,
     },
+    /// Register a `protocol` declaration (L§10.1) when the statement runs: bind the
+    /// protocol value and its member dispatcher cells (protocol.rs).
+    DefineProtocol {
+        /// The `Protocol` declaration node.
+        decl: NodeId,
+    },
+    /// Register an `implement P for T` block (L§10.2) when the statement runs: record its
+    /// `(protocol, type, member) → callable` associations (protocol.rs).
+    DefineImplement {
+        /// The `Implement` declaration node.
+        decl: NodeId,
+    },
     /// The root of a callable body's continuation stack (machine-design §8/§10):
     /// when it is reached the body is done, so the frame returns, delivering its
     /// result (a `fn`'s value; Void for a `to`). Also where a block delivers its
@@ -376,6 +388,8 @@ impl Cont {
             | Cont::AssignPlaceObj { .. }
             | Cont::FieldRead { .. }
             | Cont::DefineRecord { .. }
+            | Cont::DefineProtocol { .. }
+            | Cont::DefineImplement { .. }
             | Cont::IndexGotObject { .. }
             | Cont::Eval { .. }
             | Cont::BinRhs { .. }

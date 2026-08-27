@@ -73,7 +73,9 @@ fn check_record_hashable(r: RecIdx, heap: &Heap) -> Result<(), String> {
     let type_idx = heap.record(r).type_idx;
     let (is_ref, type_name, field_names) = match &heap.type_value(type_idx).kind {
         TypeKind::Record(rt) => (rt.is_ref, rt.name.clone(), rt.fields.clone()),
-        TypeKind::Builtin(_) => unreachable!("a record's type is a record type"),
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => {
+            unreachable!("a record's type is a record type")
+        }
     };
     if is_ref {
         return Err(format!(
@@ -102,7 +104,7 @@ fn is_value_record(v: Value, heap: &Heap) -> bool {
     };
     match &heap.type_value(heap.record(r).type_idx).kind {
         TypeKind::Record(rt) => !rt.is_ref,
-        TypeKind::Builtin(_) => false,
+        TypeKind::Builtin(_) | TypeKind::Protocol(_) => false,
     }
 }
 

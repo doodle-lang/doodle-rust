@@ -18,14 +18,29 @@ use crate::heap::{CallableTarget, Heap};
 use crate::resolve::{BodyKind, ResolvedModule};
 use crate::span::Span;
 
-/// A type value (L§4.12): a **built-in** type or a user-declared **record** type.
-/// Stored in a [`TypeObj`](crate::heap::TypeObj); a `Value::Type` names it.
+/// A type value (L§4.12): a **built-in** type, a user-declared **record** type, or a
+/// **protocol** value (L§10). Stored in a [`TypeObj`](crate::heap::TypeObj); a
+/// `Value::Type` names it.
 #[derive(Clone, Debug)]
 pub(crate) enum TypeKind {
     /// A built-in type (`Int`, `List`, …).
     Builtin(BuiltinType),
     /// A record type declared with `record …` (L§9).
     Record(RecordType),
+    /// A protocol declared with `protocol …` (L§10): the value bound to the protocol
+    /// name, used with `is` (`x is P`, L§6.5) and the qualified form `P.member` (L§10.3).
+    Protocol(ProtocolType),
+}
+
+/// A protocol value's schema (L§10): its declared name (for `is`, `P.member`, and
+/// messages) and its id into the machine's protocol [`Registry`](super::protocol::Registry),
+/// through which dispatch, defaults, and the `extends` chain are resolved.
+#[derive(Clone, Debug)]
+pub(crate) struct ProtocolType {
+    /// The declared protocol name.
+    pub name: Box<str>,
+    /// The protocol's id in the registry.
+    pub id: u32,
 }
 
 /// A record type's schema (L§9): its name, field names in declaration order, and
@@ -148,6 +163,12 @@ fn callable_kind_of(
     let kind = match heap.callable(idx).target {
         CallableTarget::Source(id) => resolved.callables[id as usize].kind,
         CallableTarget::Intrinsic(iid) => intrinsics.kind_of(iid),
+        // A bare protocol **dispatcher** value is a `Callable`; its `to`/`fn` split
+        // depends on the member's declaration (and is ambiguous for a name declared
+        // by protocols of differing kinds), which needs the protocol registry this
+        // helper does not carry. `x is Callable` is already correct (kind is `Some`);
+        // the Procedure/Function refinement is tracked for M5.5b (claude-todo).
+        CallableTarget::Dispatcher { .. } => BodyKind::Func,
     };
     Some(kind)
 }
@@ -155,11 +176,14 @@ fn callable_kind_of(
 /// Applies `lhs is rhs` (L§6.5): the right operand must be a **type value**; the
 /// result is whether `lhs`'s type is that type. A non-type right operand raises
 /// (protocol values — the other legal right operand — arrive at M5).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn is_op(
     lhs: Value,
     rhs: Value,
     heap: &Heap,
     resolved: &ResolvedModule,
+    modules: &[super::LoadedModule],
+    protocols: &super::protocol::Registry,
     intrinsics: &Registry,
     span: Span,
 ) -> Result<Value, Raise> {
@@ -179,6 +203,13 @@ pub(crate) fn is_op(
         // two same-shaped records of different declarations are different types.
         TypeKind::Record(_) => {
             matches!(lhs, Value::Record(r) if heap.record(r).type_idx == idx)
+        }
+        // `x is P` for a protocol (L§6.5, §10.4): whether `x`'s runtime type implements `P`
+        // (consults the registry — a registered `implement P for T`, plus the `extends`
+        // chain in M5.5b).
+        TypeKind::Protocol(pt) => {
+            let dt = super::protocol::dispatch_type_of(lhs, heap, modules, intrinsics);
+            protocols.type_implements(dt, pt.id)
         }
     };
     Ok(Value::Bool(matches))

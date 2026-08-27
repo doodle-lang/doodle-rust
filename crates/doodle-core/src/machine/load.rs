@@ -9,6 +9,7 @@ use super::{
     HandleTable, Heap, Instance, InstanceState, Limits, Machine, ModuleLoad, ResolvedModule,
     TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local, ring, types,
 };
+use crate::heap::CellKind;
 
 impl Instance {
     /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
@@ -135,6 +136,7 @@ impl Instance {
                 output: Vec::new(),
                 pending: None,
                 load: ModuleLoad::new(),
+                protocols: super::protocol::Registry::default(),
                 module_root_cells,
                 directive: Directive::RunToCompletion,
                 pending_fault: None,
@@ -184,16 +186,16 @@ pub(super) fn seed_namespace(
     let mut namespace: Vec<(Box<str>, CellIdx)> = module
         .globals
         .iter()
-        .map(|g| (g.name.clone(), heap.alloc_cell(None)))
+        .map(|g| (g.name.clone(), heap.alloc_cell(cell_kind_of(g.kind), None)))
         .collect();
     for &(name, builtin) in types::BUILTINS {
         let kind = crate::machine::TypeKind::Builtin(builtin);
         let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
-        namespace.push((name.into(), heap.alloc_cell(Some(ty))));
+        namespace.push((name.into(), heap.alloc_cell(CellKind::Const, Some(ty))));
     }
     namespace.push((
         "Error".into(),
-        heap.alloc_cell(Some(Value::Type(error_type))),
+        heap.alloc_cell(CellKind::Const, Some(Value::Type(error_type))),
     ));
     for (i, intrinsic) in intrinsics.iter().enumerate() {
         // Each intrinsic interns to one foreign `CalObj` (its registration index is the
@@ -205,8 +207,28 @@ pub(super) fn seed_namespace(
         });
         namespace.push((
             intrinsic.name.clone(),
-            heap.alloc_cell(Some(Value::Callable(cal))),
+            heap.alloc_cell(CellKind::Const, Some(Value::Callable(cal))),
         ));
     }
     namespace
+}
+
+/// The [`CellKind`] a module global's declaration category maps to (machine-design
+/// §6): a `let` is the only mutable, `=`-assignable binding; a `parameter` is a
+/// dynamic parameter; every other declaration (`const`, `to`/`fn`, `record`,
+/// `protocol`, `module`) is a non-reassignable `const` binding. (A protocol's
+/// member *dispatcher* cells are not globals — they are added at protocol load,
+/// `machine/protocol.rs`.)
+fn cell_kind_of(kind: crate::resolve::GlobalKind) -> CellKind {
+    use crate::resolve::GlobalKind;
+    match kind {
+        GlobalKind::Let => CellKind::Let,
+        GlobalKind::Parameter => CellKind::Parameter,
+        GlobalKind::Const
+        | GlobalKind::Proc
+        | GlobalKind::Fn
+        | GlobalKind::Record
+        | GlobalKind::Protocol
+        | GlobalKind::Module => CellKind::Const,
+    }
 }

@@ -11,7 +11,7 @@
 
 use super::Value;
 use super::frame::Local;
-use crate::heap::Heap;
+use crate::heap::{CellKind, Heap};
 use crate::machine::CellIdx;
 use crate::resolve::ResolvedModule;
 
@@ -38,7 +38,7 @@ pub(crate) fn write(heap: &mut Heap, local: &mut Local, value: Value) {
 pub(crate) fn rebind(heap: &mut Heap, local: &mut Local, value: Value) {
     match local {
         Local::Direct(_) => *local = Local::Direct(Some(value)),
-        Local::Boxed(_) => *local = Local::Boxed(heap.alloc_cell(Some(value))),
+        Local::Boxed(_) => *local = Local::Boxed(heap.alloc_cell(CellKind::Let, Some(value))),
     }
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn build(
             // A capture slot — spliced below; a placeholder keeps the index aligned.
             locals.push(Local::Direct(None));
         } else if info.cell_boxed[i] {
-            locals.push(Local::Boxed(heap.alloc_cell(value)));
+            locals.push(Local::Boxed(heap.alloc_cell(CellKind::Let, value)));
         } else {
             locals.push(Local::Direct(value));
         }

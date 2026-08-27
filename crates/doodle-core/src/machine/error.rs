@@ -102,6 +102,18 @@ pub enum ExceptionKind {
     /// explicit or selective import (or a local declaration) of the name overrides the
     /// wildcards and avoids this. **Provisional slug (M5.2c, pending user ratification).**
     AmbiguousImport,
+    /// A protocol member was called on a value whose type implements no protocol that
+    /// supplies the member (L§10.3): `Range doesn't implement Iterable`. Raised at the
+    /// call, its message naming the type, a supplying protocol, and the member, and
+    /// pointing at the fix `implement P for T`. Structured `details: {type, protocol,
+    /// member}` await the message-rubric work. (User-ratified spelling, 2026-08-27.)
+    ProtocolNotImplemented,
+    /// A bare protocol member call was ambiguous (L§10.3): two *unrelated* protocols both
+    /// implemented by the argument's type supply the same member name. Raised at the *use*
+    /// site, its message naming the member and both protocols and pointing at the qualified
+    /// form `P.member(args)`. Structured `details: {member, protocols: [a, b], type}` await
+    /// the rubric work. (User-ratified spelling, 2026-08-27.)
+    AmbiguousMember,
 }
 
 impl ExceptionKind {
@@ -132,6 +144,8 @@ impl ExceptionKind {
             ExceptionKind::CircularImport => "circular-import",
             ExceptionKind::ModuleLoadError => "module-load-error",
             ExceptionKind::AmbiguousImport => "ambiguous-import",
+            ExceptionKind::ProtocolNotImplemented => "protocol-not-implemented",
+            ExceptionKind::AmbiguousMember => "ambiguous-member",
         }
     }
 }
