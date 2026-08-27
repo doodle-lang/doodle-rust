@@ -102,6 +102,7 @@ impl Instance {
         self.modules.push(LoadedModule {
             resolved: Arc::new(module),
             namespace,
+            wildcards: Vec::new(),
         });
         self.machine.frames.push(frame);
     }
@@ -135,6 +136,7 @@ impl Instance {
         self.modules.push(LoadedModule {
             resolved: Arc::new(module),
             namespace,
+            wildcards: Vec::new(),
         });
         // No sub-module frame was pushed, so the importer is still the top frame: capture
         // the trace against it, at the `import` site.

@@ -19,12 +19,12 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind};
 use super::step::take_value;
-use super::{Machine, Value, compare, local};
+use super::{LoadedModule, Machine, Value, compare, local};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::CellIdx;
 use crate::resolve::{Resolution, ResolvedModule};
-use crate::span::Span;
+use crate::span::{ModuleId, Span};
 
 /// The per-instance module namespace (`name → cell`) at M2a — a small ordered
 /// list scanned linearly (deterministic; no hashing on a Doodle-observable path).
@@ -34,9 +34,9 @@ pub(crate) type Namespace = [(Box<str>, CellIdx)];
 /// module cell — raising if it is undefined or used before it was defined.
 pub(crate) fn read_ref(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &Heap,
     machine: &Machine,
-    namespace: &Namespace,
     node: NodeId,
 ) -> Result<Value, Raise> {
     let span = resolved.ast.span(node);
@@ -45,7 +45,13 @@ pub(crate) fn read_ref(
         Resolution::LocalSlot(slot) => read_slot(machine, heap, slot, name, span),
         Resolution::ModuleName(idx) => {
             let name = &resolved.name_refs[idx as usize].name;
-            read_cell(heap, find_cell(namespace, name), name, span)
+            let cur = resolved.canonical_id.0 as usize;
+            // An explicit binding (own decl, prelude, or a non-wildcard import) wins; a
+            // free name not in the namespace resolves through the wildcard imports (AD5).
+            match find_cell(&modules[cur].namespace, name) {
+                Some(cell) => read_cell(heap, Some(cell), name, span),
+                None => wildcard_lookup(modules, cur, machine, heap, name, span),
+            }
         }
         // A block body reading an enclosing local through the defining static link
         // (§7): chase `defining` `hops` times, then read that frame's slot.
@@ -389,6 +395,52 @@ pub(super) fn param_cell(
         cell.expect("read_cell returned Ok, so the cell exists"),
         old,
     ))
+}
+
+/// Resolves a free `name` not found in module `cur`'s namespace through its wildcard
+/// imports (`import m.*`, AD5, S-13): scans each wildcard source's own exports, in import
+/// order. No match is undefined; exactly one binds a **live alias** of the exporter's cell;
+/// two or more is **ambiguous** — raised at the use site naming both sources (an explicit
+/// import disambiguates).
+fn wildcard_lookup(
+    modules: &[LoadedModule],
+    cur: usize,
+    machine: &Machine,
+    heap: &Heap,
+    name: &str,
+    span: Span,
+) -> Result<Value, Raise> {
+    let mut hits: Vec<(ModuleId, CellIdx)> = Vec::new();
+    for &w in &modules[cur].wildcards {
+        let exporter = &modules[w.0 as usize];
+        // A wildcard exposes only the exporter's own module-level definitions (L§11.2).
+        if exporter
+            .resolved
+            .globals
+            .iter()
+            .any(|g| g.name.as_ref() == name)
+            && let Some(cell) = find_cell(&exporter.namespace, name)
+        {
+            hits.push((w, cell));
+        }
+    }
+    match hits.as_slice() {
+        [] => Err(name_not_defined(name, span)),
+        [(_, cell)] => read_cell(heap, Some(*cell), name, span),
+        [(a, _), (b, _), ..] => {
+            let from = |m: ModuleId| machine.load.path_of(m).unwrap_or_else(|| "?".into());
+            Err(Raise::new(
+                ExceptionKind::AmbiguousImport,
+                format!(
+                    "`{name}` is imported by wildcards from both `{}` and `{}` — import it \
+                     explicitly to say which one you mean",
+                    from(*a),
+                    from(*b),
+                ),
+                span,
+            ))
+        }
+    }
 }
 
 /// Finds a module cell by name (linear scan — the namespace is small and this

@@ -97,6 +97,11 @@ pub enum ExceptionKind {
     /// `details: {path, canonical_id, diagnostics}` — the full list, so an IDE renders an
     /// imported module's errors as it renders the main program's — await the rubric work.
     ModuleLoadError,
+    /// A name supplied by **two wildcard imports** was used (L§11.2, S-13): the reference
+    /// is ambiguous. Raised at the *use* site, its message naming both source modules; an
+    /// explicit or selective import (or a local declaration) of the name overrides the
+    /// wildcards and avoids this. **Provisional slug (M5.2c, pending user ratification).**
+    AmbiguousImport,
 }
 
 impl ExceptionKind {
@@ -126,6 +131,7 @@ impl ExceptionKind {
             ExceptionKind::ModuleNotFound => "module-not-found",
             ExceptionKind::CircularImport => "circular-import",
             ExceptionKind::ModuleLoadError => "module-load-error",
+            ExceptionKind::AmbiguousImport => "ambiguous-import",
         }
     }
 }

@@ -268,8 +268,16 @@ impl CancelToken {
 struct LoadedModule {
     resolved: Arc<ResolvedModule>,
     /// The module namespace (machine-design §6/§18): a small ordered list scanned
-    /// linearly by `find_cell`, so lookup is deterministic and hashing-free.
+    /// linearly by `find_cell`, so lookup is deterministic and hashing-free. Holds the
+    /// module's own globals + prelude + its **explicit** imports (module values, `as`
+    /// aliases, member aliases). Wildcard-imported names are *not* here — they resolve on
+    /// use through `wildcards` (AD5).
     namespace: Vec<(Box<str>, CellIdx)>,
+    /// The modules this one wildcard-imported (`import m.*`), in import order (AD5, S-13).
+    /// A free name not found in `namespace` is looked up across these modules' exports on
+    /// use: one match binds it (a live alias of the exporter's cell), two or more raise an
+    /// ambiguity naming the sources. Kept deduplicated.
+    wildcards: Vec<ModuleId>,
 }
 
 /// A running program: the machine state the host drives (engine spec E§3).

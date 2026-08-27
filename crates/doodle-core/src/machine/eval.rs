@@ -5,10 +5,10 @@
 //! binary right-operand step). The statement-level transitions stay in `step`.
 
 use super::cont::Cont;
-use super::control::{self, Namespace};
+use super::control;
 use super::error::Raise;
 use super::step::take_value;
-use super::{Machine, Value, arith, call, compare, dict, protect, record};
+use super::{LoadedModule, Machine, Value, arith, call, compare, dict, protect, record};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -146,9 +146,9 @@ pub(super) fn str_interp(
 /// reading a name raised.
 pub(super) fn eval(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &Namespace,
     node: NodeId,
 ) -> Result<(), Raise> {
     let value = match resolved.ast.node(node) {
@@ -198,7 +198,7 @@ pub(super) fn eval(
                 return Ok(());
             }
         },
-        Node::Ident(_) => control::read_ref(resolved, heap, machine, namespace, node)?,
+        Node::Ident(_) => control::read_ref(resolved, modules, heap, machine, node)?,
         // `if` in expression position: same machinery as the statement form; the
         // selected branch's value stays in the register for the consumer (L§6.8).
         Node::If { .. } => {

@@ -119,6 +119,7 @@ impl Instance {
             modules: vec![super::LoadedModule {
                 resolved,
                 namespace,
+                wildcards: Vec::new(),
             }],
             heap,
             machine: Machine {

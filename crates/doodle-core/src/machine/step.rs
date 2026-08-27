@@ -158,9 +158,7 @@ fn dispatch(
             seq_step(resolved, machine, block, next);
             Ok(())
         }
-        Some(Cont::Eval { node }) => {
-            eval::eval(resolved, heap, machine, &modules[cur].namespace, node)
-        }
+        Some(Cont::Eval { node }) => eval::eval(resolved, modules, heap, machine, node),
         Some(Cont::BinRhs { op, rhs, span }) => eval::bin_rhs(machine, op, rhs, span),
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;

@@ -394,6 +394,76 @@ fn a_member_import_whose_prefix_module_is_missing_raises_module_not_found() {
     );
 }
 
+// ---- M5.2c: wildcard imports + provenance/ambiguity (S-13) ----
+
+#[test]
+fn a_wildcard_import_brings_all_exports_into_scope() {
+    let lib = "const alpha = 1\nfn beta()\n  return 2\nend\n";
+    let mut inst = instance("import lib.*\nprint(alpha)\nprint(beta())\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"1\n2\n");
+}
+
+#[test]
+fn a_wildcard_imported_name_is_a_live_alias() {
+    let lib = "let count = 0\nto bump()\n  count = count + 1\nend\n";
+    let mut inst = instance("import lib.*\nbump()\nbump()\nprint(count)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"2\n");
+}
+
+#[test]
+fn an_explicit_import_overrides_a_wildcard() {
+    // Both wildcards would supply `x`, but the selective `import other.x` wins (explicit
+    // beats wildcard, S-13) — no ambiguity.
+    let mut inst = instance("import lib.*\nimport other.x\nprint(x)\n");
+    let outcome = bundle_run(
+        &mut inst,
+        &[("lib", "const x = 1\n"), ("other", "const x = 99\n")],
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"99\n");
+}
+
+#[test]
+fn a_local_declaration_shadows_a_wildcard_import() {
+    let mut inst = instance("import lib.*\nlet alpha = 100\nprint(alpha)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const alpha = 1\n")]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"100\n");
+}
+
+#[test]
+fn a_name_from_two_wildcards_is_ambiguous_on_use() {
+    // Exit criterion #3: a deliberate wildcard collision raises on use, naming both modules.
+    let mut inst = instance("import one.*\nimport two.*\nprint(shared)\n");
+    let outcome = bundle_run(
+        &mut inst,
+        &[("one", "const shared = 1\n"), ("two", "const shared = 2\n")],
+    );
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    let (kind, message) = inst.describe_raised(value);
+    assert_eq!(kind, "ambiguous-import");
+    assert!(
+        message.contains("shared") && message.contains("one") && message.contains("two"),
+        "the diagnostic names the name and both sources: {message}"
+    );
+}
+
+#[test]
+fn a_wildcard_name_in_no_source_is_undefined() {
+    let mut inst = instance("import lib.*\nprint(missing)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const x = 1\n")]);
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    assert_eq!(inst.describe_raised(value).0, "name-not-defined");
+}
+
 #[test]
 fn a_fetched_module_with_static_errors_raises_module_load_error() {
     // A host-supplied source that does not compile is the module author's program error

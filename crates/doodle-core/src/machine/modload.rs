@@ -149,9 +149,9 @@ impl ModuleLoad {
     }
 
     /// A dotted path that resolved to `module`, if one is recorded — for the circular-
-    /// import diagnostic. Returns the first registered path (an aliased module may have
-    /// several); the entry module has none.
-    fn path_of(&self, module: ModuleId) -> Option<Box<str>> {
+    /// import and ambiguity diagnostics. Returns the first registered path (an aliased
+    /// module may have several); the entry module has none.
+    pub(crate) fn path_of(&self, module: ModuleId) -> Option<Box<str>> {
         self.by_path
             .iter()
             .find(|(_, id)| *id == module)
@@ -215,6 +215,15 @@ pub(crate) fn step_import_targets(
         );
     }
     if path.len() > 1 && machine.load.is_not_module(&path) {
+        // A wildcard's whole path is the module path — no member fallback; if that module
+        // does not exist, it is a plain miss.
+        if target.wildcard {
+            return Err(Raise::new(
+                ExceptionKind::ModuleNotFound,
+                format!("the module `{}` was not found", join_path(&path)),
+                span,
+            ));
+        }
         let prefix: Vec<Box<str>> = path[..path.len() - 1].to_vec();
         let member: Box<str> = path.last().expect("a multi-segment path").clone();
         if let Some(module) = machine.load.by_path(&prefix) {
@@ -279,6 +288,7 @@ fn resolve_loaded(
         LoadState::Loaded => {
             match member {
                 Some(member) => bind_member(cur, modules, target, id, &member, span)?,
+                None if target.wildcard => bind_wildcard(cur, modules, id),
                 None => bind_module_value(cur, modules, heap, machine, target, id),
             }
             push_import_targets(machine, import, next + 1);
@@ -305,9 +315,6 @@ fn bind_module_value(
     target: &ImportTarget,
     id: ModuleId,
 ) {
-    if target.wildcard {
-        return; // wildcard aliasing is M5.2c
-    }
     let name: Box<str> = target
         .alias
         .clone()
@@ -317,6 +324,17 @@ fn bind_module_value(
     // A runtime-bound namespace cell must join the permanent GC roots (AD5): unlike the
     // load-seeded cells, it is added after `seed_namespace`, so root it explicitly.
     machine.module_root_cells.push(cell);
+}
+
+/// Records a wildcard import (`import m.*`, AD5, S-13): the exporter `id` joins the
+/// importer's wildcard-source list (deduplicated). Its exported names are *not* bound into
+/// the namespace — they resolve on use (`control::read_ref`), so an explicit binding always
+/// wins and a name from two wildcards is ambiguous only when used.
+fn bind_wildcard(cur: ModuleId, modules: &mut [LoadedModule], id: ModuleId) {
+    let wildcards = &mut modules[cur.0 as usize].wildcards;
+    if !wildcards.contains(&id) {
+        wildcards.push(id);
+    }
 }
 
 /// Binds a member import (`import m.x` / `import m.x as z`, S-7) into the importer's
