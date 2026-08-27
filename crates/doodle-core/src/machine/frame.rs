@@ -14,6 +14,7 @@ use super::Value;
 use super::cont::Cont;
 use crate::ast::NodeId;
 use crate::machine::{CalIdx, CellIdx};
+use crate::span::ModuleId;
 
 /// One frame-local slot (machine-design §7). A **direct** slot stores its value
 /// inline; a **cell-boxed** slot holds a reference to a heap [`CellObj`](crate::heap::CellObj)
@@ -103,6 +104,12 @@ pub(crate) struct BlockDescriptor {
 pub(crate) struct Frame {
     /// What this frame is running.
     pub(crate) kind: FrameKind,
+    /// The module this frame executes in (machine-design §6, AD5): the module whose
+    /// resolved AST and module-scope namespace its name reads and node lookups use. A
+    /// callable frame runs in the module its callable was **defined** in (the `CalObj`'s
+    /// module), a block in its defining frame's module, the top level in the loading
+    /// module. A cross-module call therefore switches the active module by frame.
+    pub(crate) module: ModuleId,
     /// Frame-local slots (machine-design §7), sized by the body's resolver
     /// `slot_count`. Each is direct or cell-boxed (see [`Local`]).
     pub(crate) locals: Vec<Local>,
@@ -136,9 +143,15 @@ pub(crate) struct Frame {
 impl Frame {
     /// A fresh module-top-level frame with pre-built `locals`, whose only pending
     /// work is `body_seq` (the sequencing continuation over the module's statements).
-    pub(crate) fn module_top_level(locals: Vec<Local>, body_seq: Cont, serial: u64) -> Self {
+    pub(crate) fn module_top_level(
+        module: ModuleId,
+        locals: Vec<Local>,
+        body_seq: Cont,
+        serial: u64,
+    ) -> Self {
         Frame {
             kind: FrameKind::ModuleTopLevel,
+            module,
             locals,
             conts: vec![body_seq],
             serial,
@@ -155,7 +168,9 @@ impl Frame {
     /// `do name` block argument, if any. Its pending work is the body `Seq` over a
     /// [`ReturnBarrier`](Cont::ReturnBarrier) (machine-design §8/§10); parameter
     /// defaults are pushed on top by the caller so they run before the body.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn callable(
+        module: ModuleId,
         cal: CalIdx,
         locals: Vec<Local>,
         body: NodeId,
@@ -166,6 +181,7 @@ impl Frame {
     ) -> Self {
         Frame {
             kind: FrameKind::Callable { cal },
+            module,
             locals,
             conts: callable_conts(body),
             serial,
@@ -182,8 +198,10 @@ impl Frame {
     /// (logical depth) and bumping `tail_count`. This is what makes a tail loop run
     /// in constant memory. Only a kind-matched marked-tail call reaches here (S-55);
     /// parameter defaults are pushed on top by the caller.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn reuse_as_callable(
         &mut self,
+        module: ModuleId,
         cal: CalIdx,
         locals: Vec<Local>,
         body: NodeId,
@@ -191,6 +209,9 @@ impl Frame {
         call_site: NodeId,
     ) {
         self.kind = FrameKind::Callable { cal };
+        // A tail call may cross into another module (the callee's), so update the active
+        // module even though the frame slot and serial are preserved.
+        self.module = module;
         self.locals = locals;
         self.conts = callable_conts(body);
         self.block_param = block_param;
@@ -210,6 +231,7 @@ impl Frame {
     // cohesive sub-group to extract, so the argument count is inherent.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn block(
+        module: ModuleId,
         defining: usize,
         defining_serial: u64,
         consumer: Consumer,
@@ -225,6 +247,7 @@ impl Frame {
                 defining_serial,
                 consumer,
             },
+            module,
             locals,
             conts: callable_conts(body),
             serial,

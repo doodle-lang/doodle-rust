@@ -186,7 +186,10 @@ fn block_apply(
     let locals = local::build(resolved, heap, block_id, &slots, &[]);
     let serial = machine.next_frame_serial();
     let dyn_depth = machine.dyn_stack.len() as u32;
+    // A block runs in its defining frame's module (its static-link parent, §7/AD5).
+    let block_module = machine.frames[desc.defining].module;
     machine.frames.push(Frame::block(
+        block_module,
         desc.defining,
         desc.defining_serial,
         Consumer::DoodleCall {
@@ -243,7 +246,10 @@ pub(crate) fn invoke_native(
     let boundary = machine.frames.len();
     let serial = machine.next_frame_serial();
     let dyn_depth = machine.dyn_stack.len() as u32;
+    // A block runs in its defining frame's module (its static-link parent, §7/AD5).
+    let block_module = machine.frames[desc.defining].module;
     machine.frames.push(Frame::block(
+        block_module,
         desc.defining,
         desc.defining_serial,
         Consumer::Native { boundary },

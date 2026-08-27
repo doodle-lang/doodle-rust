@@ -203,6 +203,9 @@ fn apply(
     // splice the closure's captured cells (§7/§10). `captured` is cloned so the
     // immutable read releases before the cell allocations.
     let captured = heap.callable(cal).captures.clone();
+    // The callee runs in the module it was defined in (its `CalObj`'s module), so its
+    // frame carries that module — a cross-module call switches the active module (AD5).
+    let callee_module = heap.callable(cal).module;
     let locals = local::build(resolved, heap, callable_id, &slots, &captured);
     if reuse {
         let top = machine
@@ -217,11 +220,12 @@ fn apply(
             .frames
             .last_mut()
             .expect("a frame is active")
-            .reuse_as_callable(cal, locals, body, block_param, call);
+            .reuse_as_callable(callee_module, cal, locals, body, block_param, call);
     } else {
         let serial = machine.next_frame_serial();
         let dyn_depth = machine.dyn_stack.len() as u32;
         machine.frames.push(Frame::callable(
+            callee_module,
             cal,
             locals,
             body,

@@ -140,6 +140,7 @@ impl Instance {
         let root = module.root;
         let resolved = Arc::new(module);
         let frame = Frame::module_top_level(
+            canonical_id, // the main module — `ModuleId(0)`
             locals,
             Cont::Seq {
                 block: root,
@@ -148,7 +149,10 @@ impl Instance {
             0, // the module frame is frame serial 0; further frames count up
         );
         Instance {
-            resolved,
+            modules: vec![super::LoadedModule {
+                resolved,
+                namespace,
+            }],
             heap,
             machine: Machine {
                 frames: vec![frame],
@@ -173,7 +177,6 @@ impl Instance {
                 cancel: Arc::new(AtomicBool::new(false)),
                 limits,
             },
-            namespace,
             state: InstanceState::Ready,
         }
     }

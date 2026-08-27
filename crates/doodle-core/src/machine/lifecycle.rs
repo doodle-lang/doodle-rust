@@ -87,7 +87,7 @@ impl Instance {
         let pending = self.machine.pending.take().expect("a parked request");
         let value = self.machine.handles.resolve(handle)?;
         let trace = super::observe::capture_trace(
-            &self.resolved,
+            self.current_resolved(),
             &self.heap,
             &self.machine,
             Some(pending.span),

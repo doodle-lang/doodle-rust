@@ -64,13 +64,21 @@ impl Instance {
             .iter()
             .rev()
             .find_map(|cont| self.cont_span(cont))
-            .or_else(|| frame.call_site.map(|node| self.resolved.ast.span(node)))
+            .or_else(|| {
+                frame
+                    .call_site
+                    .map(|node| self.current_resolved().ast.span(node))
+            })
             .unwrap_or_else(|| {
-                let end = self.resolved.ast.span(self.resolved.root).end;
+                let end = self
+                    .current_resolved()
+                    .ast
+                    .span(self.current_resolved().root)
+                    .end;
                 Span::new(end, end)
             });
         Some(Position {
-            module: self.resolved.canonical_id,
+            module: self.current_resolved().canonical_id,
             span,
         })
     }
@@ -93,7 +101,9 @@ impl Instance {
                     FrameKind::Callable { cal } => Some(cal),
                     FrameKind::Block { .. } | FrameKind::ModuleTopLevel => None,
                 };
-                let call_site = frame.call_site.map(|node| self.resolved.ast.span(node));
+                let call_site = frame
+                    .call_site
+                    .map(|node| self.current_resolved().ast.span(node));
                 (cal, call_site, frame.tail_count)
             })
             .collect();
@@ -116,7 +126,11 @@ impl Instance {
             .frames
             .iter()
             .rev()
-            .filter_map(|frame| frame.call_site.map(|node| self.resolved.ast.span(node)))
+            .filter_map(|frame| {
+                frame
+                    .call_site
+                    .map(|node| self.current_resolved().ast.span(node))
+            })
             .collect()
     }
 
@@ -124,7 +138,7 @@ impl Instance {
     /// for a span-less marker (a `ReturnBarrier`). Conts that carry an operator/operand
     /// span report it directly; those that name a node resolve it through the AST.
     fn cont_span(&self, cont: &Cont) -> Option<Span> {
-        let ast = &self.resolved.ast;
+        let ast = &self.current_resolved().ast;
         Some(match cont {
             Cont::Eval { node } => ast.span(*node),
             Cont::BindLet { decl } => ast.span(*decl),
@@ -174,7 +188,7 @@ impl Instance {
 
     /// The `next`-th statement node of a `Module`/`Block` body, if in range.
     fn stmt_at(&self, block: crate::ast::NodeId, next: u32) -> Option<crate::ast::NodeId> {
-        let stmts = match self.resolved.ast.node(block) {
+        let stmts = match self.current_resolved().ast.node(block) {
             Node::Module { stmts, .. } | Node::Block(stmts) => stmts,
             _ => return None,
         };

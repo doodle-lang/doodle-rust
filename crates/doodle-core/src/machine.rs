@@ -66,6 +66,7 @@ pub use value::{
 use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
+use crate::span::ModuleId;
 use crate::unicode::{UNICODE_VERSION, UnicodeVersion};
 use cont::Cont;
 use frame::Frame;
@@ -314,21 +315,48 @@ impl CancelToken {
     }
 }
 
+/// A loaded module (L§11.3, E§6, AD5): its resolved AST and its module-scope
+/// namespace (each module-level name bound to its binding cell). Modules are indexed
+/// by [`ModuleId`]; the main module is `ModuleId(0)`. The `{loading, loaded, failed}`
+/// load-state machine and multi-module *loading* join at M5.1 — at M5.0 an instance
+/// holds the single main module, and this table (with the per-frame `ModuleId`) makes
+/// the machine module-aware so a name read hits the executing frame's module.
+struct LoadedModule {
+    resolved: Arc<ResolvedModule>,
+    /// The module namespace (machine-design §6/§18): a small ordered list scanned
+    /// linearly by `find_cell`, so lookup is deterministic and hashing-free.
+    namespace: Vec<(Box<str>, CellIdx)>,
+}
+
 /// A running program: the machine state the host drives (engine spec E§3).
 ///
-/// Owns the immutable resolved module (shareable with tooling, machine-design §2),
-/// the [`Heap`], the [`Machine`] state, and the lifecycle [`InstanceState`]. The
-/// drive loop advances it via [`step`](Self::step); the module table for multiple
-/// modules is M5, so an instance holds a single module at M1/M2a.
+/// Owns the loaded-module table (each module's immutable resolved AST + namespace,
+/// shareable with tooling, machine-design §2), the [`Heap`], the [`Machine`] state, and
+/// the lifecycle [`InstanceState`]. The drive loop advances it via [`step`](Self::step),
+/// which reads the executing frame's module (AD5). At M5.0 the table holds the single
+/// main module; multi-module loading is M5.1.
 pub struct Instance {
-    resolved: Arc<ResolvedModule>,
+    /// The loaded modules, indexed by [`ModuleId`] (the main module is `ModuleId(0)`).
+    modules: Vec<LoadedModule>,
     heap: Heap,
     machine: Machine,
-    /// The module namespace (machine-design §6/§18): each module-level name bound
-    /// to its binding cell. A small ordered list (single module at M1/M2a);
-    /// scanned linearly, so lookup is deterministic and hashing-free.
-    namespace: Vec<(Box<str>, CellIdx)>,
     state: InstanceState,
+}
+
+impl Instance {
+    /// The module the top frame is executing in — whose resolved AST and namespace the
+    /// next transition reads (AD5). `ModuleId(0)` (the main module) when no frame is
+    /// active (before the first / after the last transition).
+    fn current_module(&self) -> ModuleId {
+        self.machine.frames.last().map_or(ModuleId(0), |f| f.module)
+    }
+
+    /// The resolved AST of the module the top frame is executing in (AD5). At M5.0 the
+    /// single main module; the observation surface's per-frame module resolution (a
+    /// trace's frames may span modules) joins with cross-module calls at M5.1.
+    fn current_resolved(&self) -> &ResolvedModule {
+        &self.modules[self.current_module().0 as usize].resolved
+    }
 }
 
 /// Releasing an instance's heap runs the finalizer of **every live foreign value**
@@ -459,7 +487,14 @@ impl Instance {
     /// survives and garbage is reclaimed.
     #[cfg(test)]
     pub(crate) fn force_collect(&mut self) {
-        gc::collect(&mut self.heap, &self.machine, &self.namespace);
+        // At M5.0 there is one module, so the current module's namespace is every
+        // namespace; rooting all loaded modules during any module's step is M5.1.
+        let m = self.current_module();
+        gc::collect(
+            &mut self.heap,
+            &self.machine,
+            &self.modules[m.0 as usize].namespace,
+        );
     }
 
     /// Makes every safe point collect (machine-design §15) — including those inside a
@@ -483,11 +518,13 @@ impl Instance {
     /// transition. `Err` stopped the drive — an uncaught raise or an engine fault
     /// (the drive loop maps each to its [`Outcome`](crate::drive::Outcome)).
     pub(crate) fn step(&mut self) -> Result<Option<usize>, Halt> {
+        // The transition reads the top frame's module's resolved AST + namespace (AD5).
+        let m = self.current_module().0 as usize;
         step::step(
-            &self.resolved,
+            &self.modules[m].resolved,
             &mut self.heap,
             &mut self.machine,
-            &self.namespace,
+            &self.modules[m].namespace,
         )
     }
 }
