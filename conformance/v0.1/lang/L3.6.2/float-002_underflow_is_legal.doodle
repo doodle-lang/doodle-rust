@@ -1,0 +1,4 @@
+#! clause: L3.6.2
+#! mode: run
+#! expect-out: 0.0
+print(1e-400)

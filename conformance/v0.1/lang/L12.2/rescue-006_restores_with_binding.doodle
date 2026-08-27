@@ -1,0 +1,19 @@
+#! clause: L12.2
+#! mode: run
+#! expect-out: 5
+#! expect-out: 1
+#! expect-out: 1
+parameter p = 1
+let inside = 0
+let in_rescue = 0
+try
+  with p = 5 do
+    inside = p
+    1 + true
+  end
+rescue e
+  in_rescue = p
+end
+print(inside)
+print(in_rescue)
+print(p)

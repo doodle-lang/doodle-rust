@@ -1,0 +1,21 @@
+#! clause: L12.2
+#! mode: run
+#! expect-out: outer
+let result = "none"
+try
+  try
+    raise "outer"
+  rescue e
+    loop do
+      try
+        raise "inner"
+      rescue e2
+        break
+      end
+    end
+    raise
+  end
+rescue outer_e
+  result = outer_e
+end
+print(result)

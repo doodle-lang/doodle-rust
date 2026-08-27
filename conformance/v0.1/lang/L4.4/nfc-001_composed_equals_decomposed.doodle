@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+print("caf\u{e9}" == "cafe\u{301}")

@@ -1,0 +1,5 @@
+#! clause: L3.6.2
+#! mode: static
+#! stage: parse
+#! expect-static-error: too big to be a Float @ 5:9
+let x = 1e400

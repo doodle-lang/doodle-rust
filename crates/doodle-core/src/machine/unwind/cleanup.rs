@@ -27,11 +27,19 @@ pub(crate) fn restore(machine: &mut Machine, heap: &mut Heap, dyn_mark: u32) {
 
 /// Runs the cleanup a discarded continuation carries as the unwinder pops past it
 /// (machine-design §12): a [`WithRestore`](Cont::WithRestore) restores its dynamic
-/// binding; every other cont — including a [`TryHandler`](Cont::TryHandler) on a
-/// non-raise unwind — is discarded inertly.
+/// binding, and a [`PopHandler`](Cont::PopHandler) pops the handling stack — the same
+/// two clean-ups [`raise_unwind`] runs, since a non-local exit (break/continue/return/
+/// cancel) abandons a rescue body exactly as a raise unwinding past it does. A
+/// [`TryHandler`](Cont::TryHandler) on a non-raise unwind is discarded inertly (only a
+/// raise catches there).
 pub(super) fn discard_cont(cont: &Cont, machine: &mut Machine, heap: &mut Heap) {
-    if let Cont::WithRestore { dyn_mark } = cont {
-        restore(machine, heap, *dyn_mark);
+    match cont {
+        Cont::WithRestore { dyn_mark } => restore(machine, heap, *dyn_mark),
+        // Without this, a `break`/`continue`/`return` out of a rescue body leaves its
+        // handling entry on the stack: a later bare `raise` re-raises the stale exception,
+        // and the stack grows unbounded (L§12.2).
+        Cont::PopHandler => machine.pop_handling(),
+        _ => {} // discarded inertly
     }
 }
 

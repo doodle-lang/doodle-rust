@@ -1,0 +1,4 @@
+#! clause: L4.4
+#! mode: run
+#! expect-out: true
+print(("\u{0dd9}" + "\u{0dcf}") == "\u{0ddc}")

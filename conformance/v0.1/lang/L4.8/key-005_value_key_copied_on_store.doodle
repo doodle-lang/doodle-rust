@@ -1,0 +1,9 @@
+#! clause: L4.8
+#! mode: run
+#! expect-out: hi
+record P with n end
+let d = {}
+let k = P(n: 1)
+d[k] = "hi"
+k.n = 9
+print(d[P(n: 1)])

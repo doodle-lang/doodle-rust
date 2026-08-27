@@ -32,6 +32,10 @@ pub enum DiagnosticCode {
     /// A malformed numeric literal — bad underscore, base prefix, or exponent
     /// (L§3.6.1/§3.6.2).
     MalformedNumber,
+    /// A float literal whose value rounds to ±∞ (e.g. `1e999`): a static error, so the
+    /// finite-float invariant (S-56, L§4.2) holds at the source boundary and no non-finite
+    /// value ever enters the AST (L§3.6.2). An underflow to `0.0`/a subnormal is legal.
+    FloatLiteralOutOfRange,
     /// A character that cannot begin a token here (L§3).
     UnexpectedCharacter,
     /// A backslash escape outside the closed set, e.g. `\q` (L§3.6.3).
@@ -109,6 +113,7 @@ impl DiagnosticCode {
             DiagnosticCode::ConstReassignment => "const-reassignment",
             DiagnosticCode::UnterminatedString => "unterminated-string",
             DiagnosticCode::MalformedNumber => "malformed-number",
+            DiagnosticCode::FloatLiteralOutOfRange => "float-literal-out-of-range",
             DiagnosticCode::UnexpectedCharacter => "unexpected-character",
             DiagnosticCode::UnknownEscape => "unknown-escape",
             DiagnosticCode::MalformedEscape => "malformed-escape",

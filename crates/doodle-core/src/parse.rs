@@ -266,7 +266,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Float => {
                 self.advance();
-                let node = lower_float(self.source, span);
+                let node = self.lower_float(span);
                 self.push(node, span)
             }
             TokenKind::Keyword(Keyword::True) => self.keyword_lit(Node::BoolLit(true), span),
@@ -387,6 +387,28 @@ impl<'a> Parser<'a> {
             .push(Diagnostic::error(code, self.module, span, message));
         self.recovering = true;
     }
+
+    /// Lowers a float-literal token's text to [`Node::FloatLit`]. A value that rounds to
+    /// ±∞ (e.g. `1e999`) is a **static error** (L§3.6.2, S-56): the finite-float invariant
+    /// is enforced at the source boundary, so no non-finite value enters the AST. An
+    /// underflow to `0.0`/a subnormal (e.g. `1e-999`) is legal. A malformed float (already
+    /// lexer-diagnosed) recovers to `Error`, not a degenerate NaN literal.
+    fn lower_float(&mut self, span: Span) -> Node {
+        let text = &self.source[span.start as usize..span.end as usize];
+        let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+        match cleaned.parse::<f64>() {
+            Ok(value) if value.is_infinite() => {
+                self.error_code(
+                    DiagnosticCode::FloatLiteralOutOfRange,
+                    span,
+                    "this number is too big to be a Float — the biggest is about 1.8e308",
+                );
+                Node::Error
+            }
+            Ok(value) => Node::FloatLit(value),
+            Err(_) => Node::Error,
+        }
+    }
 }
 
 fn infix_bp(kind: TokenKind) -> Option<(u8, u8, BinaryOp)> {
@@ -445,13 +467,4 @@ fn lower_int(source: &str, span: Span) -> Node {
             digits: digits.into(),
         },
     }
-}
-
-/// Lowers a float-literal token's text to [`Node::FloatLit`].
-fn lower_float(source: &str, span: Span) -> Node {
-    let text = &source[span.start as usize..span.end as usize];
-    let cleaned: String = text.chars().filter(|c| *c != '_').collect();
-    // A malformed float (already lexer-diagnosed) recovers to Error rather than
-    // a degenerate NaN literal.
-    cleaned.parse().map(Node::FloatLit).unwrap_or(Node::Error)
 }

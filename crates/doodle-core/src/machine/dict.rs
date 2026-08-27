@@ -19,9 +19,12 @@ use crate::span::Span;
 /// Inserts `key → value` (L§4.8). If an existing key is structurally `==` `key`, its
 /// value is overwritten and the **first key is kept** (first-key-wins); otherwise a
 /// new entry is appended in insertion order. Raises [`ExceptionKind::UnhashableKey`]
-/// if `key` is not hashable. A value record is copied on store (L§4.14) — a dict
-/// entry is a place — so this is the single copy choke for both dict literals and
-/// `d[k] = v` place assignment.
+/// if `key` is not hashable. Both the key **and** the value are copied on store
+/// (L§4.14/§9.5) — a dict entry is a place, and a stored key that aliased its source
+/// would let a later mutation of the source change the dict's key set (and desync a
+/// key from its hash bucket) — so this is the single copy choke for both dict literals
+/// and `d[k] = v` place assignment. A value-record copy is structurally `==` and hashes
+/// identically, so the pre-computed `hash` still applies.
 pub(super) fn insert(
     heap: &mut Heap,
     idx: DictIdx,
@@ -34,6 +37,7 @@ pub(super) fn insert(
     match find(heap, idx, key, hash) {
         Some(pos) => heap.dict_set_value(idx, pos, value),
         None => {
+            let key = super::record::copy_on_bind(key, heap);
             heap.dict_push_entry(idx, key, value, hash);
         }
     }
