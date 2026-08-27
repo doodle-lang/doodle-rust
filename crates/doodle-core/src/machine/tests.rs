@@ -1273,6 +1273,29 @@ fn each_keeps_heap_valued_elements_rooted_across_collection() {
 }
 
 #[test]
+fn an_import_bound_module_cell_survives_gc() {
+    // The cell `import lib` binds (`lib` -> its module value) is allocated at runtime,
+    // after the load-time namespace seeding, so `bind_target` must add it to the permanent
+    // GC roots (AD5). Force a collection at every safe point and read a member across it —
+    // if the bound cell were swept, `lib.answer` would fault.
+    use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+    let mut inst = load_source_with_print("import lib\nprint(lib.answer)\n");
+    inst.collect_at_every_safe_point();
+    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    while let Outcome::SuspendedImport(_) = &outcome {
+        outcome = resolve_import(
+            &mut inst,
+            ImportResolution::Source {
+                text: "const answer = 99\n".to_string(),
+                canonical_id: "lib".to_string(),
+            },
+        );
+    }
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"99\n");
+}
+
+#[test]
 fn a_failed_load_retains_its_exception_for_re_raise() {
     // S-8: a module whose load raises enters `failed` **retaining that exception value**,
     // so a reload/re-import (M9b) re-raises it unchanged. The re-raise is latent in a

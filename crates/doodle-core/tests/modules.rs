@@ -237,6 +237,82 @@ fn distinct_paths_with_one_canonical_id_load_once() {
     assert_eq!(inst.output(), b"shared body\n");
 }
 
+// ---- M5.2a: `import m` binding, `m.x` member access, cross-module calls ----
+
+#[test]
+fn import_binds_the_module_and_member_access_reads_a_const() {
+    // `import lib` binds `lib` to the module value; `lib.answer` reads lib's const member.
+    let mut inst = instance("import lib\nprint(lib.answer)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const answer = 42\n")]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"42\n");
+}
+
+#[test]
+fn import_as_renames_the_bound_module() {
+    let mut inst = instance("import lib as l\nprint(l.answer)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const answer = 7\n")]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"7\n");
+}
+
+#[test]
+fn a_cross_module_call_runs_in_the_callees_module() {
+    // `lib.greet()` invokes a function defined in `lib`; `apply` must read its parameters,
+    // body, and slot layout from lib's module, not the caller's (the cross-module fix).
+    let lib = "fn greet()\n  return \"hello from lib\"\nend\n";
+    let mut inst = instance("import lib\nprint(lib.greet())\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"hello from lib\n");
+}
+
+#[test]
+fn a_cross_module_call_uses_the_callees_parameter_defaults() {
+    // The default `b = 10` lives in lib's AST — `apply`'s `default_expr` must read it from
+    // the callee's module.
+    let lib = "fn add(a, b = 10)\n  return a + b\nend\n";
+    let mut inst = instance("import lib\nprint(lib.add(3))\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"13\n");
+}
+
+#[test]
+fn member_reads_are_live_across_a_cross_module_mutation() {
+    // `lib.bump()` mutates lib's own module-level `count`; a later `lib.count` reads the
+    // updated cell (member access reads the live cell, not a snapshot).
+    let lib = "let count = 0\nto bump()\n  count = count + 1\nend\n";
+    let mut inst = instance("import lib\nlib.bump()\nlib.bump()\nprint(lib.count)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", lib)]);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"2\n");
+}
+
+#[test]
+fn accessing_a_missing_module_member_raises() {
+    let mut inst = instance("import lib\nprint(lib.missing)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const x = 1\n")]);
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    let (kind, message) = inst.describe_raised(value);
+    assert_eq!(kind, "no-such-field");
+    assert!(message.contains("missing"), "message: {message}");
+}
+
+#[test]
+fn a_prelude_name_is_not_a_module_member() {
+    // `Int` is in lib's namespace (the seeded prelude) but is not one of lib's own
+    // definitions, so `lib.Int` is not a member.
+    let mut inst = instance("import lib\nprint(lib.Int)\n");
+    let outcome = bundle_run(&mut inst, &[("lib", "const x = 1\n")]);
+    let Outcome::Raised(value, _) = outcome else {
+        panic!("expected Raised, got {outcome:?}");
+    };
+    assert_eq!(inst.describe_raised(value).0, "no-such-field");
+}
+
 #[test]
 fn a_fetched_module_with_static_errors_raises_module_load_error() {
     // A host-supplied source that does not compile is the module author's program error

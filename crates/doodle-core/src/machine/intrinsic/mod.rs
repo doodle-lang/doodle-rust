@@ -21,15 +21,15 @@
 //! M2b.5; foreign *heap-backed* defaults are S-42/M7 — a default here is an inline
 //! value (the registry is built before the heap exists, so it can hold no heap ref).
 
-use super::control::Namespace;
 use super::error::Raise;
 use super::frame::BlockDescriptor;
-use super::{Halt, Machine, Value, block, step, unwind};
+use super::{Halt, LoadedModule, Machine, Value, block, step, unwind};
 use crate::ast::NodeId;
 use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
 use crate::resolve::{BodyKind, ResolvedModule};
-use crate::span::Span;
+use crate::span::{ModuleId, Span};
+use std::sync::Arc;
 
 /// A parked capability request (engine spec E§7.5, MD §14): a call to a **suspending
 /// capability** reached `apply`, so the machine stores the capability's identity + its
@@ -167,7 +167,10 @@ pub struct IntrinsicCtx<'a> {
     resolved: &'a ResolvedModule,
     heap: &'a mut Heap,
     machine: &'a mut Machine,
-    namespace: &'a Namespace,
+    /// The module table (AD5): a reentrant nested drive ([`invoke_block`]) steps the
+    /// machine, so it needs the same multi-module context the top drive has — deriving the
+    /// executing frame's module's AST per step and reaching cross-module callees.
+    modules: &'a mut [LoadedModule],
     args: Vec<Value>,
     block: Option<BlockDescriptor>,
     call_span: Span,
@@ -301,7 +304,12 @@ impl IntrinsicCtx<'_> {
                     Some(_) => BlockResult::NonLocalExit,
                 });
             }
-            match step::step(self.resolved, self.heap, self.machine, self.namespace) {
+            // Like the top drive, derive the executing frame's module's AST each step (a
+            // block may call across modules, AD5); clone the Arc so the table is free to
+            // borrow mutably alongside.
+            let cur = self.machine.frames.last().map_or(ModuleId(0), |f| f.module);
+            let resolved = Arc::clone(&self.modules[cur.0 as usize].resolved);
+            match step::step(&resolved, self.modules, self.heap, self.machine) {
                 Ok(_) => {
                     // A suspending capability was reached inside this native block-consumer's
                     // reentrant drive (S-15). The nested drive runs on the Rust stack, so the
@@ -341,9 +349,9 @@ impl IntrinsicCtx<'_> {
 /// [`CallableTarget::Intrinsic`](crate::heap::CallableTarget).
 pub(crate) fn apply(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &Namespace,
     call: NodeId,
     id: u32,
     arg_values: Vec<Value>,
@@ -381,9 +389,9 @@ pub(crate) fn apply(
             let result = {
                 let mut ctx = IntrinsicCtx {
                     resolved,
+                    modules,
                     heap,
                     machine,
-                    namespace,
                     args,
                     block,
                     call_span: span,

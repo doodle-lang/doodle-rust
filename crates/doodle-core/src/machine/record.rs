@@ -172,6 +172,7 @@ fn match_fields(
 /// the named field (L§9), raising if the field is absent or the value is not a record.
 pub(crate) fn field_read(
     resolved: &ResolvedModule,
+    modules: &[super::LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     field_node: NodeId,
@@ -181,6 +182,27 @@ pub(crate) fn field_read(
     let Node::Field { name, .. } = resolved.ast.node(field_node) else {
         unreachable!("record::field_read over a non-Field node");
     };
+    // A module member access `m.x` (L§4.11): `x` must be one of `m`'s own module-level
+    // definitions (its exports — the `exports` restriction is M5.3; prelude names in `m`'s
+    // namespace are not members). Reads the member's live cell (AD5 aliasing).
+    if let Value::Module(m) = object {
+        let target = &modules[m.0 as usize];
+        let is_member = target
+            .resolved
+            .globals
+            .iter()
+            .any(|g| g.name.as_ref() == name.as_ref());
+        if !is_member {
+            return Err(Raise::new(
+                ExceptionKind::NoSuchField,
+                format!("this module has no member `{name}`"),
+                span,
+            ));
+        }
+        let cell = super::control::find_cell(&target.namespace, name);
+        machine.reg = Some(super::control::read_cell(heap, cell, name, span)?);
+        return Ok(());
+    }
     let Value::Record(r) = object else {
         return Err(Raise::new(
             ExceptionKind::TypeMismatch,

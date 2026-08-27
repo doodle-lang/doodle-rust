@@ -470,13 +470,18 @@ impl Instance {
     /// transition. `Err` stopped the drive — an uncaught raise or an engine fault
     /// (the drive loop maps each to its [`Outcome`](crate::drive::Outcome)).
     pub(crate) fn step(&mut self) -> Result<Option<usize>, Halt> {
-        // The transition reads the top frame's module's resolved AST + namespace (AD5).
-        let m = self.current_module().0 as usize;
+        // The transition reads the top frame's module's resolved AST (AD5). The whole
+        // module table is threaded so the step can reach **another** module's resolved (a
+        // cross-module call) and **mutate** the importer's namespace (an import binding).
+        // Clone the current module's `resolved` Arc first (cheap — one atomic incref) so
+        // the table is free to borrow mutably alongside.
+        let cur = self.current_module();
+        let resolved = Arc::clone(&self.modules[cur.0 as usize].resolved);
         step::step(
-            &self.modules[m].resolved,
+            &resolved,
+            &mut self.modules,
             &mut self.heap,
             &mut self.machine,
-            &self.modules[m].namespace,
         )
     }
 }

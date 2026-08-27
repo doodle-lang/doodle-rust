@@ -358,7 +358,12 @@ pub(crate) fn outer_frame(machine: &Machine, hops: u16) -> usize {
     idx
 }
 
-fn read_cell(heap: &Heap, cell: Option<CellIdx>, name: &str, span: Span) -> Result<Value, Raise> {
+pub(crate) fn read_cell(
+    heap: &Heap,
+    cell: Option<CellIdx>,
+    name: &str,
+    span: Span,
+) -> Result<Value, Raise> {
     match cell {
         Some(c) => match heap.cell(c).value {
             Some(v) => Ok(v),
@@ -388,7 +393,7 @@ pub(super) fn param_cell(
 
 /// Finds a module cell by name (linear scan — the namespace is small and this
 /// keeps lookup deterministic and hashing-free).
-fn find_cell(namespace: &Namespace, name: &str) -> Option<CellIdx> {
+pub(crate) fn find_cell(namespace: &Namespace, name: &str) -> Option<CellIdx> {
     for (n, cell) in namespace {
         if n.as_ref() == name {
             return Some(*cell);

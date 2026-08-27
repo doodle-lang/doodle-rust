@@ -16,8 +16,8 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::FrameKind;
 use super::intrinsic::PendingRequest;
-use super::{Machine, Value};
-use crate::ast::{Node, NodeId};
+use super::{CellIdx, LoadedModule, Machine, Value};
+use crate::ast::{ImportTarget, Node, NodeId};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::span::{ModuleId, Span};
@@ -175,11 +175,13 @@ impl ModuleLoad {
 /// drives to completion, the target is retried (now loaded) and processing continues.
 pub(crate) fn step_import_targets(
     resolved: &ResolvedModule,
-    heap: &Heap,
+    modules: &mut [LoadedModule],
+    heap: &mut Heap,
     machine: &mut Machine,
     import: NodeId,
     next: u32,
 ) -> Result<(), Raise> {
+    let cur = resolved.canonical_id;
     let Node::Import(targets) = resolved.ast.node(import) else {
         unreachable!("ImportTargets over a non-import node");
     };
@@ -192,9 +194,10 @@ pub(crate) fn step_import_targets(
     let importer = machine.frames.last().expect("an importer frame").module;
     match machine.load.by_path(&path) {
         Some(id) => match machine.load.state(id) {
-            // Already loaded (L§11.3 singleton): advance to the next target. Binding the
-            // names this target introduces is M5.2 — at M5.1 a loaded target binds nothing.
+            // Already loaded (L§11.3 singleton): bind this target's name(s) into the
+            // importer's namespace (AD5), then advance to the next target.
             LoadState::Loaded => {
+                bind_target(cur, modules, heap, machine, target, id);
                 push_import_targets(machine, import, next + 1);
                 Ok(())
             }
@@ -222,6 +225,33 @@ pub(crate) fn step_import_targets(
             Ok(())
         }
     }
+}
+
+/// Binds one loaded import target into the importer's (`cur`'s) namespace (AD5). At M5.2a
+/// the loaded target is a **whole-path module** (`import m` / `import m as y`), bound to
+/// its `Value::Module` under the `as` alias or the path's last segment; the new cell joins
+/// the permanent GC roots. Member imports (S-7's member fallback, cell aliasing) and
+/// wildcard imports are M5.2b/M5.2c — a wildcard target binds nothing yet.
+fn bind_target(
+    cur: ModuleId,
+    modules: &mut [LoadedModule],
+    heap: &mut Heap,
+    machine: &mut Machine,
+    target: &ImportTarget,
+    id: ModuleId,
+) {
+    if target.wildcard {
+        return; // wildcard aliasing is M5.2c
+    }
+    let name: Box<str> = target
+        .alias
+        .clone()
+        .unwrap_or_else(|| target.path.last().expect("a non-empty import path").clone());
+    let cell: CellIdx = heap.alloc_cell(Some(Value::Module(id)));
+    modules[cur.0 as usize].namespace.push((name, cell));
+    // A runtime-bound namespace cell must join the permanent GC roots (AD5): unlike the
+    // load-seeded cells, it is added after `seed_namespace`, so root it explicitly.
+    machine.module_root_cells.push(cell);
 }
 
 /// Pushes an [`Cont::ImportTargets`] onto the importer's (top) frame.

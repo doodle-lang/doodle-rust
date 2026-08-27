@@ -20,7 +20,7 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{Frame, FrameKind, Local};
 use super::step::take_value;
-use super::{Machine, Value, block, control, intrinsic, local};
+use super::{LoadedModule, Machine, Value, block, control, intrinsic, local};
 use crate::ast::{Arg, Node, NodeId, Param};
 use crate::heap::{CalObj, CallableTarget, Heap};
 use crate::resolve::{BodyKind, ParamInfo, Resolution, ResolvedModule};
@@ -54,9 +54,9 @@ pub(crate) fn eval_call(
 /// or apply immediately when there are none.
 pub(crate) fn got_callee(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &control::Namespace,
     call: NodeId,
 ) -> Result<(), Raise> {
     let span = resolved.ast.span(call);
@@ -77,7 +77,7 @@ pub(crate) fn got_callee(
             frame.conts.push(Cont::Eval { node: first_expr });
             Ok(())
         }
-        None => apply(resolved, heap, machine, namespace, call, callee, Vec::new()),
+        None => apply(resolved, modules, heap, machine, call, callee, Vec::new()),
     }
 }
 
@@ -87,9 +87,9 @@ pub(crate) fn got_callee(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn got_arg(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &control::Namespace,
     call: NodeId,
     callee: Value,
     mut values: Vec<Value>,
@@ -114,7 +114,7 @@ pub(crate) fn got_arg(
             frame.conts.push(Cont::Eval { node: next_expr });
             Ok(())
         }
-        None => apply(resolved, heap, machine, namespace, call, callee, values),
+        None => apply(resolved, modules, heap, machine, call, callee, values),
     }
 }
 
@@ -127,9 +127,9 @@ pub(crate) fn got_arg(
 /// a missing required argument each raise (L§6.4/§8.3).
 fn apply(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &control::Namespace,
     call: NodeId,
     callee: Value,
     arg_values: Vec<Value>,
@@ -153,10 +153,17 @@ fn apply(
     // never becomes a callable frame — so it dispatches here, before any frame or
     // tail-reuse machinery. A source callable takes the frame path below.
     if let CallableTarget::Intrinsic(id) = heap.callable(cal).target {
-        return intrinsic::apply(resolved, heap, machine, namespace, call, id, arg_values);
+        return intrinsic::apply(resolved, modules, heap, machine, call, id, arg_values);
     }
+    // A source callable runs in the module it was **defined** in (its `CalObj`'s module),
+    // so its parameters, defaults, slot layout, and body come from **that** module's
+    // resolved AST — not the caller's — which is what makes a cross-module call correct
+    // (AD5). The caller's `resolved` still supplies the call-site context (span, argument
+    // nodes, tail mark, block argument).
+    let callee_module = heap.callable(cal).module;
+    let callee_resolved: &ResolvedModule = &modules[callee_module.0 as usize].resolved;
     let callable_id = heap.callable(cal).source_id() as usize;
-    let info = &resolved.callables[callable_id];
+    let info = &callee_resolved.callables[callable_id];
     let params = &info.params;
     let body = info.body;
     let (slots, filled) = bind_arguments(
@@ -178,7 +185,7 @@ fn apply(
             continue;
         }
         if pi.has_default {
-            defaults.push((pi.slot, default_expr(resolved, info.decl, i)));
+            defaults.push((pi.slot, default_expr(callee_resolved, info.decl, i)));
         } else {
             return Err(arg_error(
                 span,
@@ -201,12 +208,10 @@ fn apply(
         && reuses_current_frame(machine, resolved, heap, callee_kind);
     // Build the callee's slots (representation B): cell-box captured slots and
     // splice the closure's captured cells (§7/§10). `captured` is cloned so the
-    // immutable read releases before the cell allocations.
+    // immutable read releases before the cell allocations. The slot layout is the
+    // callee's, so `local::build` reads the callee's module (AD5).
     let captured = heap.callable(cal).captures.clone();
-    // The callee runs in the module it was defined in (its `CalObj`'s module), so its
-    // frame carries that module — a cross-module call switches the active module (AD5).
-    let callee_module = heap.callable(cal).module;
-    let locals = local::build(resolved, heap, callable_id, &slots, &captured);
+    let locals = local::build(callee_resolved, heap, callable_id, &slots, &captured);
     if reuse {
         let top = machine
             .frames

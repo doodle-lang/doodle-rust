@@ -10,13 +10,12 @@
 //! other node kinds reach an `unimplemented!`.
 
 use super::cont::Cont;
-use super::control::{self, Namespace};
 use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::FrameKind;
 use super::modload::LoadState;
 use super::{
-    Halt, Machine, Value, arith, block, call, compare, dict, dynamic, eval, limits, modload,
-    protect, record, stmt, strop, types, unwind,
+    Halt, LoadedModule, Machine, Value, arith, block, call, compare, control, dict, dynamic, eval,
+    limits, modload, protect, record, stmt, strop, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -30,9 +29,9 @@ use crate::resolve::ResolvedModule;
 /// drive loop may pause a `Step*`); `Ok(None)` means none. `Err` stopped the drive.
 pub(crate) fn step(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &Namespace,
 ) -> Result<Option<usize>, Halt> {
     // A non-local transfer in flight takes over the transition (§12): unwind toward
     // the exit's target instead of running continuations normally. Intervening cleanup
@@ -93,7 +92,7 @@ pub(crate) fn step(
         Some(Cont::Seq { .. }) | Some(Cont::ReturnBarrier) | None
     );
     let depth_before = machine.frames.len();
-    let dispatched = dispatch(resolved, heap, machine, namespace, cont);
+    let dispatched = dispatch(resolved, modules, heap, machine, cont);
     // A reentrant nested drive (a native block-consumer running its block) faulted —
     // a limit tripped, or the S-15 `NestedSuspend` (a suspending capability reached
     // inside the native consumer, forbidden — Decision #2). It parks the fault because
@@ -144,17 +143,24 @@ pub(crate) fn step(
 /// checks. Its error is a plain [`Raise`]; `step`'s `?` lifts it into [`Halt`].
 fn dispatch(
     resolved: &ResolvedModule,
+    modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &Namespace,
     cont: Option<Cont>,
 ) -> Result<(), Raise> {
+    // The executing module is the one whose resolved AST we hold (AD5); its namespace is
+    // `modules[cur].namespace`. Read arms borrow it inline (a short-lived shared reborrow);
+    // the call, field-read, and import arms take `modules` so they can reach another
+    // module's AST/namespace (cross-module call, `m.x`) or bind into the importer's.
+    let cur = resolved.canonical_id.0 as usize;
     match cont {
         Some(Cont::Seq { block, next }) => {
             seq_step(resolved, machine, block, next);
             Ok(())
         }
-        Some(Cont::Eval { node }) => eval::eval(resolved, heap, machine, namespace, node),
+        Some(Cont::Eval { node }) => {
+            eval::eval(resolved, heap, machine, &modules[cur].namespace, node)
+        }
         Some(Cont::BinRhs { op, rhs, span }) => eval::bin_rhs(machine, op, rhs, span),
         Some(Cont::BinApply { op, lhs, span }) => {
             let rhs = take_value(machine, span)?;
@@ -193,9 +199,11 @@ fn dispatch(
             machine.reg = Some(Value::Bool(compare::as_bool(v, "and/or", span)?));
             Ok(())
         }
-        Some(Cont::BindLet { decl }) => control::bind_let(resolved, heap, machine, namespace, decl),
+        Some(Cont::BindLet { decl }) => {
+            control::bind_let(resolved, heap, machine, &modules[cur].namespace, decl)
+        }
         Some(Cont::AssignTo { assign }) => {
-            control::assign_to(resolved, heap, machine, namespace, assign)
+            control::assign_to(resolved, heap, machine, &modules[cur].namespace, assign)
         }
         Some(Cont::AssignPlaceObj { assign }) => {
             control::assign_place_obj(resolved, machine, assign)
@@ -218,7 +226,7 @@ fn dispatch(
             Ok(())
         }
         Some(Cont::CallGotCallee { call }) => {
-            call::got_callee(resolved, heap, machine, namespace, call)
+            call::got_callee(resolved, modules, heap, machine, call)
         }
         Some(Cont::CallGotArg {
             call,
@@ -226,7 +234,7 @@ fn dispatch(
             values,
             index,
         }) => call::got_arg(
-            resolved, heap, machine, namespace, call, callee, values, index,
+            resolved, modules, heap, machine, call, callee, values, index,
         ),
         Some(Cont::BlockGotArg {
             call,
@@ -258,18 +266,20 @@ fn dispatch(
             call::bind_default(resolved, heap, machine, slot, default)
         }
         Some(Cont::DefineCallable { decl }) => {
-            call::define_callable(resolved, heap, machine, namespace, decl);
+            call::define_callable(resolved, heap, machine, &modules[cur].namespace, decl);
             Ok(())
         }
         Some(Cont::DefineRecord { decl }) => {
-            record::define(resolved, heap, machine, namespace, decl);
+            record::define(resolved, heap, machine, &modules[cur].namespace, decl);
             Ok(())
         }
-        Some(Cont::FieldRead { field }) => record::field_read(resolved, heap, machine, field),
+        Some(Cont::FieldRead { field }) => {
+            record::field_read(resolved, modules, heap, machine, field)
+        }
         // A `with`'s value is now in the register: open its dynamic binding and run the
         // body under a `WithRestore` (dynamic.rs).
         Some(Cont::WithBind { with }) => {
-            dynamic::with_bind(resolved, heap, machine, namespace, with)
+            dynamic::with_bind(resolved, heap, machine, &modules[cur].namespace, with)
         }
         // A `with` body completed normally: restore its dynamic binding (machine-design
         // §13). The body's value stays in the register as the `with`'s value.
@@ -290,10 +300,11 @@ fn dispatch(
         }
         Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
         Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
-        // Process one target of an `import` (E§6): advance past a loaded module, park an
-        // import suspension for an unloaded one, or raise a circular/failed import.
+        // Process one target of an `import` (E§6): bind a loaded module, park an import
+        // suspension for an unloaded one, or raise a circular/failed import. Binds into the
+        // importer's namespace, so it takes `modules` mutably.
         Some(Cont::ImportTargets { import, next }) => {
-            modload::step_import_targets(resolved, heap, machine, import, next)
+            modload::step_import_targets(resolved, modules, heap, machine, import, next)
         }
         // The frame's work is drained: return from it.
         None => {
