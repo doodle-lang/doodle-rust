@@ -76,6 +76,34 @@ impl Resolver<'_> {
         }
     }
 
+    /// Post-pass: each `exports` name must be a module-level declaration (L§11.1); one that
+    /// is not is `undeclared-export`. Builds the module's public surface (the union of the
+    /// declared exported names) — left `None` when the module has no `exports` statement, so
+    /// every definition stays public.
+    pub(super) fn check_exports(&mut self) {
+        let pending = std::mem::take(&mut self.pending_exports);
+        if pending.is_empty() {
+            return; // no `exports` statement: all module-level definitions are public
+        }
+        let mut public: Vec<Box<str>> = Vec::new();
+        for (node, name) in pending {
+            let declared = self.globals.iter().any(|g| *g.name == *name);
+            if !declared {
+                self.error(
+                    DiagnosticCode::UndeclaredExport,
+                    node,
+                    &format!(
+                        "`{name}` is exported but never declared in this module — \
+                         declare it, or remove it from `exports`"
+                    ),
+                );
+            } else if !public.iter().any(|n| **n == *name) {
+                public.push(name);
+            }
+        }
+        self.exports = Some(public);
+    }
+
     /// Post-pass: each `with` binds a dynamic parameter (L§5.5), so its target name
     /// must resolve to a module-level `parameter`. A different global kind (a lexical
     /// binding, a callable, a type/protocol/module) or no such declaration is a static

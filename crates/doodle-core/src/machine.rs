@@ -14,6 +14,7 @@
 //! drive stacks join with the features that need them (`plan/plan-m2a.md`).
 
 mod arith;
+mod assign;
 mod block;
 mod boundary;
 mod call;

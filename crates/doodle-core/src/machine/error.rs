@@ -114,6 +114,17 @@ pub enum ExceptionKind {
     /// form `P.member(args)`. Structured `details: {member, protocols: [a, b], type}` await
     /// the rubric work. (User-ratified spelling, 2026-08-27.)
     AmbiguousMember,
+    /// A module member that **exists but is not exported** was accessed from outside the
+    /// module (L§11.1): `m.private`, `import m.private`, or the wildcard error path. Raised
+    /// where the access executes, its message naming the module and member and pointing at
+    /// the fix (add it to the module's `exports`). Structured `details: {module, member}`.
+    /// (User-ratified spelling, 2026-08-27.)
+    NotExported,
+    /// A module member that **does not exist** was accessed (L§11.1): the module container's
+    /// own access-miss kind, parallel to `no-such-field` (record), `key-not-found` (dict),
+    /// and `index-out-of-range` (sequence) — modules never reuse `no-such-field`. Structured
+    /// `details: {module, member}`. (User-ratified spelling, 2026-08-27.)
+    NoSuchMember,
 }
 
 impl ExceptionKind {
@@ -146,6 +157,8 @@ impl ExceptionKind {
             ExceptionKind::AmbiguousImport => "ambiguous-import",
             ExceptionKind::ProtocolNotImplemented => "protocol-not-implemented",
             ExceptionKind::AmbiguousMember => "ambiguous-member",
+            ExceptionKind::NotExported => "not-exported",
+            ExceptionKind::NoSuchMember => "no-such-member",
         }
     }
 }

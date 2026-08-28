@@ -51,6 +51,11 @@ pub struct ResolvedModule {
     pub callables: Vec<CallableInfo>,
     /// Module-level declarations (names bound in the module namespace / cells).
     pub globals: Vec<GlobalDecl>,
+    /// The module's **public surface** (L§11.1): `None` when the module has no `exports`
+    /// statement (every module-level definition is public); `Some(list)` when it does (only
+    /// the listed names are public — the rest are private and invisible to other modules).
+    /// Consulted at every cross-module member access (`m.x`, `import m.x`, wildcard).
+    pub exports: Option<Box<[Box<str>]>>,
     /// Free-name reference sites, in encounter order; the per-instance cell cache
     /// is parallel to this by index.
     pub name_refs: Vec<NameRef>,
@@ -79,6 +84,32 @@ pub struct ResolvedModule {
     ///
     /// [`resolutions`]: Self::resolutions
     pub tail_calls: Vec<bool>,
+}
+
+/// How a name is visible as a **member** of a module from outside it (L§11.1) — the result
+/// of a cross-module member access (`m.x`, `import m.x`, wildcard).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Membership {
+    /// A public member: declared and (when the module has an `exports` list) listed.
+    Exported,
+    /// Declared, but not exported — private to the module (only possible with an `exports`).
+    Private,
+    /// Not a module-level declaration of this module at all.
+    Absent,
+}
+
+impl ResolvedModule {
+    /// How `name` is visible as a member of this module from outside (L§11.1).
+    pub fn member_visibility(&self, name: &str) -> Membership {
+        if !self.globals.iter().any(|g| g.name.as_ref() == name) {
+            return Membership::Absent;
+        }
+        match &self.exports {
+            None => Membership::Exported,
+            Some(list) if list.iter().any(|n| n.as_ref() == name) => Membership::Exported,
+            Some(_) => Membership::Private,
+        }
+    }
 }
 
 /// The lexical target of a non-local exit (machine-design §12): the resolver

@@ -121,6 +121,10 @@ pub enum DiagnosticCode {
     /// An `implement` method whose name is not a member of the protocol (L§10.2): a typo or
     /// a member that belongs to a different protocol.
     NotAProtocolMember,
+    /// An `exports` list names something the module never declares (L§11.1): the name is
+    /// exported but has no module-level declaration. Adjective-first, matching
+    /// `undeclared-assignment`.
+    UndeclaredExport,
 }
 
 impl DiagnosticCode {
@@ -159,6 +163,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImplementationParameterDefault => "implementation-parameter-default",
             DiagnosticCode::IncompleteImplementation => "incomplete-implementation",
             DiagnosticCode::NotAProtocolMember => "not-a-protocol-member",
+            DiagnosticCode::UndeclaredExport => "undeclared-export",
         }
     }
 }

@@ -114,6 +114,12 @@ pub(super) struct Resolver<'a> {
     /// module-level `parameter` (§5.5), checked in a post-pass once `globals` is
     /// complete (the `parameter` may be declared later in the module).
     pending_with_targets: Vec<(NodeId, Box<str>)>,
+    /// `exports` entries as `(exports-node, name)`: validated in a post-pass once `globals`
+    /// is complete (an exported name may be declared later, L§11.1).
+    pending_exports: Vec<(NodeId, Box<str>)>,
+    /// The module's public surface, built by `check_exports`: `None` until an `exports`
+    /// statement is seen, then the union of listed names (L§11.1).
+    exports: Option<Vec<Box<str>>>,
     /// Selective (non-wildcard) imports as `bound-name → source display`, so an
     /// assignment to an imported name gets a specific "imported from …" message
     /// (imports are read-only, S-39). Wildcard sources aren't nameable until load
@@ -148,6 +154,8 @@ impl<'a> Resolver<'a> {
             diagnostics: Vec::new(),
             pending_assigns: Vec::new(),
             pending_with_targets: Vec::new(),
+            pending_exports: Vec::new(),
+            exports: None,
             selective_imports: Vec::new(),
             loops_with_break: Vec::new(),
             frames: Vec::new(),
@@ -159,6 +167,7 @@ impl<'a> Resolver<'a> {
         r.check_pending_assigns(); // now that `globals` is complete
         r.check_with_targets(); // `with` binds a `parameter` (§5.5), globals complete
         r.check_protocols(root); // protocol/implement conformance (L§10, S-31/S-61)
+        r.check_exports(); // exported names must be declared (L§11.1), `globals` complete
         r.check_fn_tails(); // fn-falls-off-end (S-5), now that exits are annotated
         r.check_void_sites(root); // Void consumed as a value (S-6), globals complete
         r.mark_tail_calls(); // tail positions (L§8.7/§11); reads only ast + callables
@@ -175,6 +184,7 @@ impl<'a> Resolver<'a> {
             name_refs,
             stmt_spans,
             diagnostics,
+            exports,
             ..
         } = r;
         Resolved {
@@ -185,6 +195,7 @@ impl<'a> Resolver<'a> {
                 stmt_spans,
                 callables,
                 globals,
+                exports: exports.map(Vec::into_boxed_slice),
                 name_refs,
                 resolutions,
                 exit_targets,

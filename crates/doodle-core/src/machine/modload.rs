@@ -287,7 +287,7 @@ fn resolve_loaded(
     match machine.load.state(id) {
         LoadState::Loaded => {
             match member {
-                Some(member) => bind_member(cur, modules, target, id, &member, span)?,
+                Some(member) => bind_member(cur, modules, machine, target, id, &member, span)?,
                 None if target.wildcard => bind_wildcard(cur, modules, id),
                 None => bind_module_value(cur, modules, heap, machine, target, id),
             }
@@ -342,31 +342,35 @@ fn bind_wildcard(cur: ModuleId, modules: &mut [LoadedModule], id: ModuleId) {
 /// to `m`'s existing binding cell for `member`, so reads see `m`'s live value (assignment
 /// is already a static error, S-39). No new cell — the exporter's cell is already a GC
 /// root. Raises if `member` is not one of `m`'s own module-level definitions.
+#[allow(clippy::too_many_arguments)]
 fn bind_member(
     cur: ModuleId,
     modules: &mut [LoadedModule],
+    machine: &Machine,
     target: &ImportTarget,
     id: ModuleId,
     member: &str,
     span: Span,
 ) -> Result<(), Raise> {
     // No root to add — the aliased cell is the exporter's, already a GC root. Collect it
-    // before mutating the importer's namespace (disjoint from its own read).
+    // before mutating the importer's namespace (disjoint from its own read). Only a
+    // **public** member may be imported (L§11.1): a private one raises `not-exported`, an
+    // undeclared one `no-such-member`.
     let cell = {
         let exporter = &modules[id.0 as usize];
-        let is_member = exporter
-            .resolved
-            .globals
-            .iter()
-            .any(|g| g.name.as_ref() == member);
-        if !is_member {
-            return Err(Raise::new(
-                ExceptionKind::NoSuchField,
-                format!("the module has no member `{member}` to import"),
-                span,
-            ));
+        match exporter.resolved.member_visibility(member) {
+            crate::resolve::Membership::Exported => {
+                super::control::find_cell(&exporter.namespace, member).expect("a member has a cell")
+            }
+            crate::resolve::Membership::Private => {
+                let m = super::control::module_display(machine, id);
+                return Err(super::control::not_exported(&m, member, span));
+            }
+            crate::resolve::Membership::Absent => {
+                let m = super::control::module_display(machine, id);
+                return Err(super::control::no_such_member(&m, member, span));
+            }
         }
-        super::control::find_cell(&exporter.namespace, member).expect("a member has a cell")
     };
     let name: Box<str> = target.alias.clone().unwrap_or_else(|| member.into());
     modules[cur.0 as usize].namespace.push((name, cell));

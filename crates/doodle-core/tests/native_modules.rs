@@ -99,7 +99,7 @@ fn a_missing_member_of_a_native_module_raises() {
         panic!("expected a raise, got {outcome:?}");
     };
     let (kind, _message) = inst.describe_raised(value);
-    assert_eq!(kind, "no-such-field");
+    assert_eq!(kind, "no-such-member");
 }
 
 #[test]

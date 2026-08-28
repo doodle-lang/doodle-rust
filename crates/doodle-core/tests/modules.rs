@@ -297,7 +297,7 @@ fn accessing_a_missing_module_member_raises() {
         panic!("expected Raised, got {outcome:?}");
     };
     let (kind, message) = inst.describe_raised(value);
-    assert_eq!(kind, "no-such-field");
+    assert_eq!(kind, "no-such-member");
     assert!(message.contains("missing"), "message: {message}");
 }
 
@@ -310,7 +310,7 @@ fn a_prelude_name_is_not_a_module_member() {
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected Raised, got {outcome:?}");
     };
-    assert_eq!(inst.describe_raised(value).0, "no-such-field");
+    assert_eq!(inst.describe_raised(value).0, "no-such-member");
 }
 
 // ---- M5.2b: S-7 dotted-path resolution + member imports + cell aliasing ----
@@ -374,7 +374,7 @@ fn importing_a_missing_member_raises() {
         panic!("expected Raised, got {outcome:?}");
     };
     let (kind, message) = inst.describe_raised(value);
-    assert_eq!(kind, "no-such-field");
+    assert_eq!(kind, "no-such-member");
     assert!(message.contains("nope"), "message: {message}");
 }
 

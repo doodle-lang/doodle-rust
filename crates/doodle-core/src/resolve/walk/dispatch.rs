@@ -17,8 +17,15 @@ impl super::Resolver<'_> {
             | Node::BoolLit(_)
             | Node::NilLit
             | Node::BytesLit(_)
-            | Node::Error
-            | Node::Exports(_) => {}
+            | Node::Error => {}
+
+            // An `exports name, …` (L§11.1): collect its names for the post-pass that
+            // validates each is declared and builds the module's public surface.
+            Node::Exports(names) => {
+                for name in names.clone() {
+                    self.pending_exports.push((node, name));
+                }
+            }
 
             // Record selective imports so an assignment to an imported name gets a
             // specific "imported from …" message (imports are read-only, S-39).

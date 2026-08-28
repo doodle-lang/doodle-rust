@@ -232,6 +232,8 @@ pub(crate) fn build_native_module(
         stmt_spans: Vec::new(),
         callables: Vec::new(),
         globals,
+        // A native module's members are all public (M5.4 has no native `exports` API yet).
+        exports: None,
         name_refs: Vec::new(),
         resolutions: vec![None; node_count],
         exit_targets: vec![None; node_count],

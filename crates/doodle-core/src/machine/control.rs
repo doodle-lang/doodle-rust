@@ -108,97 +108,6 @@ pub(crate) fn bind_decl(
 /// module cell, a frame slot, or an enclosing local (a block writing outward). A
 /// value record is copied for binding (L§4.14). Field/index place targets take the
 /// [`assign_place_obj`] path instead (they are never dispatched here).
-pub(crate) fn assign_to(
-    resolved: &ResolvedModule,
-    heap: &mut Heap,
-    machine: &mut Machine,
-    namespace: &Namespace,
-    assign: NodeId,
-) -> Result<(), Raise> {
-    let Node::Assign { target, .. } = resolved.ast.node(assign) else {
-        unreachable!("AssignTo over a non-Assign node");
-    };
-    debug_assert!(
-        matches!(resolved.ast.node(*target), Node::Ident(_)),
-        "AssignTo is only dispatched for a name target; places go through AssignPlaceObj"
-    );
-    let target = *target;
-    let span = resolved.ast.span(assign);
-    let value = super::record::copy_on_bind(take_value(machine, span)?, heap);
-    match resolution(resolved, target) {
-        Resolution::LocalSlot(slot) => set_slot(machine, heap, slot, value),
-        Resolution::ModuleName(idx) => {
-            let name = &resolved.name_refs[idx as usize].name;
-            let cell = find_cell(namespace, name).ok_or_else(|| name_not_defined(name, span))?;
-            heap.cell_mut(cell).value = Some(value);
-        }
-        // A block body writing an enclosing local through the defining static link
-        // (§7/§8.5 — a block can mutate its enclosing variables).
-        Resolution::BlockOuter { hops, slot } => {
-            let owner = outer_frame(machine, hops);
-            set_slot_at(machine, heap, owner, slot, value);
-        }
-    }
-    Ok(())
-}
-
-/// A place assignment's target **object** is now in the register — the *actual*
-/// object (place navigation copies nothing, L§5.3). Branch on the target kind:
-/// a `Field` target evaluates the RHS next (then sets the field); an `Index` target
-/// evaluates the key first (left-to-right, L§14), then the RHS. The copy for binding
-/// fires at the final store, not here.
-pub(crate) fn assign_place_obj(
-    resolved: &ResolvedModule,
-    machine: &mut Machine,
-    assign: NodeId,
-) -> Result<(), Raise> {
-    let Node::Assign { target, value } = resolved.ast.node(assign) else {
-        unreachable!("AssignPlaceObj over a non-Assign node");
-    };
-    let (target, value) = (*target, *value);
-    let object = take_value(machine, resolved.ast.span(target))?;
-    let frame = machine.frames.last_mut().expect("a frame is active");
-    match resolved.ast.node(target) {
-        // `object.name = v`: evaluate the RHS, then set the field.
-        Node::Field { .. } => {
-            frame.conts.push(Cont::AssignFieldVal { assign, object });
-            frame.conts.push(Cont::Eval { node: value });
-        }
-        // `object[key] = v`: evaluate the key, then the RHS, then store.
-        Node::Index { index, .. } => {
-            let index = *index;
-            frame.conts.push(Cont::AssignIndexKey { assign, object });
-            frame.conts.push(Cont::Eval { node: index });
-        }
-        other => unreachable!("AssignPlaceObj over a non-place target: {other:?}"),
-    }
-    Ok(())
-}
-
-/// An index place assignment's key is now in the register, its object saved: stash
-/// the key and evaluate the RHS (left-to-right, L§14), which [`Cont::AssignIndexVal`]
-/// then stores.
-pub(crate) fn assign_index_key(
-    resolved: &ResolvedModule,
-    machine: &mut Machine,
-    assign: NodeId,
-    object: Value,
-) -> Result<(), Raise> {
-    let Node::Assign { target, value } = resolved.ast.node(assign) else {
-        unreachable!("AssignIndexKey over a non-Assign node");
-    };
-    let (target, value) = (*target, *value);
-    let key = take_value(machine, resolved.ast.span(target))?;
-    let frame = machine.frames.last_mut().expect("a frame is active");
-    frame.conts.push(Cont::AssignIndexVal {
-        assign,
-        object,
-        key,
-    });
-    frame.conts.push(Cont::Eval { node: value });
-    Ok(())
-}
-
 /// Schedules an `if`: evaluate the first arm's condition, then choose. Shared by
 /// statement- and expression-position `if`.
 pub(crate) fn schedule_if(frame: &mut Frame, resolved: &ResolvedModule, node: NodeId) {
@@ -299,7 +208,7 @@ fn read_slot(
     read_slot_at(machine, heap, machine.frames.len() - 1, slot, name, span)
 }
 
-fn set_slot(machine: &mut Machine, heap: &mut Heap, slot: u16, value: Value) {
+pub(crate) fn set_slot(machine: &mut Machine, heap: &mut Heap, slot: u16, value: Value) {
     let top = machine.frames.len() - 1;
     set_slot_at(machine, heap, top, slot, value);
 }
@@ -322,7 +231,13 @@ fn read_slot_at(
 }
 
 /// Writes to an existing slot (an assignment) — mutating the cell for a boxed slot.
-fn set_slot_at(machine: &mut Machine, heap: &mut Heap, frame: usize, slot: u16, value: Value) {
+pub(crate) fn set_slot_at(
+    machine: &mut Machine,
+    heap: &mut Heap,
+    frame: usize,
+    slot: u16,
+    value: Value,
+) {
     local::write(
         heap,
         &mut machine.frames[frame].locals[slot as usize],
@@ -411,21 +326,29 @@ fn wildcard_lookup(
     span: Span,
 ) -> Result<Value, Raise> {
     let mut hits: Vec<(ModuleId, CellIdx)> = Vec::new();
+    // A wildcard source that has this name **privately** (declared but not exported): if no
+    // export hits, this turns the confusing "I imported everything, why isn't it there?" miss
+    // into the helpful `not-exported` (L§11.1), naming the module — error path only.
+    let mut private_in: Option<ModuleId> = None;
     for &w in &modules[cur].wildcards {
-        let exporter = &modules[w.0 as usize];
-        // A wildcard exposes only the exporter's own module-level definitions (L§11.2).
-        if exporter
-            .resolved
-            .globals
-            .iter()
-            .any(|g| g.name.as_ref() == name)
-            && let Some(cell) = find_cell(&exporter.namespace, name)
-        {
-            hits.push((w, cell));
+        // A wildcard exposes only the exporter's own **exported** definitions (L§11.2/§11.1).
+        match modules[w.0 as usize].resolved.member_visibility(name) {
+            crate::resolve::Membership::Exported => {
+                if let Some(cell) = find_cell(&modules[w.0 as usize].namespace, name) {
+                    hits.push((w, cell));
+                }
+            }
+            crate::resolve::Membership::Private => {
+                private_in.get_or_insert(w);
+            }
+            crate::resolve::Membership::Absent => {}
         }
     }
     match hits.as_slice() {
-        [] => Err(name_not_defined(name, span)),
+        [] => match private_in {
+            Some(w) => Err(not_exported(&module_display(machine, w), name, span)),
+            None => Err(name_not_defined(name, span)),
+        },
         [(_, cell)] => read_cell(heap, Some(*cell), name, span),
         [(a, _), (b, _), ..] => {
             let from = |m: ModuleId| machine.load.path_of(m).unwrap_or_else(|| "?".into());
@@ -456,7 +379,7 @@ pub(crate) fn find_cell(namespace: &Namespace, name: &str) -> Option<CellIdx> {
 
 /// The resolver's resolution for `node` (an `Ident` reference, or an lvalue
 /// target — always resolved).
-fn resolution(resolved: &ResolvedModule, node: NodeId) -> Resolution {
+pub(crate) fn resolution(resolved: &ResolvedModule, node: NodeId) -> Resolution {
     resolved.resolutions[node.0 as usize].expect("a reference/lvalue is always resolved")
 }
 
@@ -478,7 +401,7 @@ fn decl_name(resolved: &ResolvedModule, decl: NodeId) -> &str {
     }
 }
 
-fn name_not_defined(name: &str, span: Span) -> Raise {
+pub(crate) fn name_not_defined(name: &str, span: Span) -> Raise {
     Raise::new(
         ExceptionKind::NameNotDefined,
         format!("`{name}` isn't defined"),
@@ -490,6 +413,38 @@ fn used_before_defined(name: &str, span: Span) -> Raise {
     Raise::new(
         ExceptionKind::UsedBeforeDefined,
         format!("`{name}` is used here before it's defined"),
+        span,
+    )
+}
+
+/// The display name of a module for a member-access diagnostic (L§11.1): its import path
+/// (or native module name), or a placeholder for the pathless entry module.
+pub(crate) fn module_display(machine: &Machine, module: ModuleId) -> Box<str> {
+    machine
+        .load
+        .path_of(module)
+        .unwrap_or_else(|| "this module".into())
+}
+
+/// A cross-module access of a **private** (declared but not exported) member (L§11.1): loud
+/// and true, pointing at the fix (add it to the module's `exports`).
+pub(crate) fn not_exported(module: &str, member: &str, span: Span) -> Raise {
+    Raise::new(
+        ExceptionKind::NotExported,
+        format!(
+            "`{member}` is private to module `{module}` — add it to `{module}`'s `exports` \
+             to use it here"
+        ),
+        span,
+    )
+}
+
+/// A cross-module access of a member the module **does not declare** (L§11.1): the module
+/// container's access-miss kind (never `no-such-field`, which is the record's).
+pub(crate) fn no_such_member(module: &str, member: &str, span: Span) -> Raise {
+    Raise::new(
+        ExceptionKind::NoSuchMember,
+        format!("module `{module}` has no member `{member}`"),
         span,
     )
 }

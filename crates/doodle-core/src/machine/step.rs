@@ -14,8 +14,8 @@ use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::FrameKind;
 use super::modload::LoadState;
 use super::{
-    Halt, LoadedModule, Machine, Value, arith, block, call, compare, control, dict, dynamic, eval,
-    limits, modload, protect, protocol, record, stmt, strop, types, unwind,
+    Halt, LoadedModule, Machine, Value, arith, assign, block, call, compare, control, dict,
+    dynamic, eval, limits, modload, protect, protocol, record, stmt, strop, types, unwind,
 };
 use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
 use crate::drive::EngineFault;
@@ -210,16 +210,16 @@ fn dispatch(
             control::bind_let(resolved, heap, machine, &modules[cur].namespace, decl)
         }
         Some(Cont::AssignTo { assign }) => {
-            control::assign_to(resolved, heap, machine, &modules[cur].namespace, assign)
+            assign::assign_to(resolved, heap, machine, &modules[cur].namespace, assign)
         }
         Some(Cont::AssignPlaceObj { assign }) => {
-            control::assign_place_obj(resolved, machine, assign)
+            assign::assign_place_obj(resolved, machine, assign)
         }
         Some(Cont::AssignFieldVal { assign, object }) => {
             record::field_set(resolved, heap, machine, assign, object)
         }
         Some(Cont::AssignIndexKey { assign, object }) => {
-            control::assign_index_key(resolved, machine, assign, object)
+            assign::assign_index_key(resolved, machine, assign, object)
         }
         Some(Cont::AssignIndexVal {
             assign,

@@ -98,6 +98,9 @@ pub(super) fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: 
             import: stmt,
             next: 0,
         }),
+        // `exports` (L§11.1) is a resolve-time declaration of the module's public surface
+        // (`ResolvedModule::exports`); it has no runtime effect.
+        Node::Exports(_) => {}
         other => unimplemented!("statement not yet in the machine (M5+): {other:?}"),
     }
 }
