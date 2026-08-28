@@ -99,7 +99,12 @@ impl Instance {
         // so it is created once here and remembered on the machine (an engine raise
         // materializes one without a namespace scan) and passed to each module's seeding.
         let error_type = alloc_error_type(&mut heap);
-        let namespace = seed_namespace(&module, &mut heap, error_type, &all_intrinsics);
+        // The instance-wide protocol registry, pre-populated with the engine's well-known
+        // `Stringable`/`Hashable` (L§15, D-M5-1) so interpolation and dict keys can dispatch
+        // them; each module's namespace then binds their names (`seed_namespace`).
+        let mut protocols = super::protocol::Registry::default();
+        protocols.register_wellknown();
+        let namespace = seed_namespace(&module, &mut heap, error_type, &all_intrinsics, &protocols);
         // Every loaded module's namespace cells are permanent GC roots; the main module's
         // come first, then each pre-loaded native module's (below).
         let mut module_root_cells: Vec<CellIdx> = namespace.iter().map(|(_, cell)| *cell).collect();
@@ -162,7 +167,7 @@ impl Instance {
                 output: Vec::new(),
                 pending: None,
                 load,
-                protocols: super::protocol::Registry::default(),
+                protocols,
                 module_root_cells,
                 directive: Directive::RunToCompletion,
                 pending_fault: None,
@@ -208,6 +213,7 @@ pub(super) fn seed_namespace(
     heap: &mut Heap,
     error_type: TypeIdx,
     intrinsics: &[intrinsic::Intrinsic],
+    protocols: &super::protocol::Registry,
 ) -> Vec<(Box<str>, CellIdx)> {
     let mut namespace: Vec<(Box<str>, CellIdx)> = module
         .globals
@@ -223,6 +229,9 @@ pub(super) fn seed_namespace(
         "Error".into(),
         heap.alloc_cell(CellKind::Const, Some(Value::Type(error_type))),
     ));
+    // The well-known protocol names (`Stringable`/`Hashable`/`to_string`, L§15) — part of the
+    // prelude, seeded after the type values so a user global still shadows them (S-43 order).
+    super::protocol::seed_wellknown(&mut namespace, heap, module.canonical_id, protocols);
     for (i, intrinsic) in intrinsics.iter().enumerate() {
         // Each flat intrinsic interns to one foreign `CalObj` (its registration index is the
         // `CallableTarget::Intrinsic` id) held by a read-only global cell.

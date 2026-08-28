@@ -23,11 +23,50 @@
 //! detection. [`check_hashable`] enforces this and names the offending field.
 
 use crate::heap::Heap;
+use crate::machine::error::{ExceptionKind, Raise};
 use crate::machine::{RecIdx, TypeKind, Value};
+use crate::span::Span;
 use num_bigint::BigInt;
 use std::hash::Hasher;
 
 use super::compare::{decompose, kind_name};
+
+/// The native `Hashable` default (L§15 hook 2): the bucket hash of a key, raising
+/// `UnhashableKey` if the value can't be a dict key (a list, a `ref` record, or a value
+/// record with such a field). The message names the offending field for a value record.
+/// This is the seam a dict key dispatches to when its type has no explicit `implement`.
+pub(super) fn native_key_hash(key: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
+    if let Err(reason) = check_hashable(key, heap) {
+        return Err(Raise::new(ExceptionKind::UnhashableKey, reason, span));
+    }
+    Ok(hash_value(key, heap))
+}
+
+/// The bucket hash for the value an explicit `Hashable.hash` returned (L§15 hook 2): it must
+/// be an `Int` (a hash is a number), and its exact value fixes the bucket — coherent with the
+/// implementer's guarantee that equal keys return equal hashes (structural `==` still resolves
+/// collisions, so distinct keys colliding here is harmless).
+pub(super) fn user_hash_to_bucket(h: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
+    match h {
+        Value::Int(_) | Value::BigInt(_) => Ok(hash_value(h, heap)),
+        other => Err(Raise::new(
+            ExceptionKind::TypeMismatch,
+            format!(
+                "a `hash` implementation must return an Int, but this one returned {}",
+                kind_name(other)
+            ),
+            span,
+        )),
+    }
+}
+
+/// A `u64` engine hash as a Doodle `Int` (canonical, MD §3) — for a `Hashable.hash(x)` call
+/// that falls to the native default. The value is deterministic within a run but, like all
+/// engine hashing, not stable across builds (module note); it is exposed only through an
+/// explicit qualified `Hashable.hash(...)` call.
+pub(super) fn hash_as_value(h: u64, heap: &mut Heap) -> Value {
+    super::arith::int_value(BigInt::from(h), heap)
+}
 
 // A fixed SipHash key. Any constant works — the hash is never serialized or
 // compared across engine builds — so these are simply two fixed 64-bit words.

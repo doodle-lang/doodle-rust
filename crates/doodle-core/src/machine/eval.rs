@@ -6,7 +6,8 @@
 
 use super::cont::Cont;
 use super::control;
-use super::error::Raise;
+use super::error::{ExceptionKind, Raise};
+use super::protocol::{self, Dispatch};
 use super::step::take_value;
 use super::{LoadedModule, Machine, Value, arith, call, compare, dict, protect, record};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart};
@@ -115,12 +116,15 @@ fn str_interp_advance(
     Ok(())
 }
 
-/// A string interpolation's `{expr}` value is now in the register (L§6.7): render it
-/// through the placeholder `Stringable` dispatcher — invoked **directly**, so a user's
-/// local `to_string` cannot change interpolation (§15 hook 1, S-37) — seam-append it to
-/// `acc`, then fold in the remaining parts.
+/// A string interpolation's `{expr}` value is now in the register (L§6.7): render it through
+/// real `Stringable` dispatch (L§15 hook 1, D-M5-1). The `to_string` member is invoked by id
+/// — a **hidden binding**, so a user's local `to_string` cannot change interpolation (S-37).
+/// A type with an explicit `implement Stringable` drives its `to_string` (a real call that can
+/// raise), resumed by [`str_interp_rendered`]; every other value renders through the native
+/// seam (scalars final, compound placeholder) and seam-appends here.
 pub(super) fn str_interp(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     node: NodeId,
@@ -136,8 +140,50 @@ pub(super) fn str_interp(
     let expr = *expr;
     // A procedure call `{p()}` produces no value; using it here is a Void-in-expression
     // raise attributed to the interpolated expression (L§6.11).
-    let value = take_value(machine, resolved.ast.span(expr))?;
+    let span = resolved.ast.span(expr);
+    let value = take_value(machine, span)?;
+    // Drive an explicit `implement Stringable` for the value's type; otherwise fall through
+    // to the native renderer. Restricting to `Stringable` keeps an unrelated user protocol
+    // that happens to declare a `to_string` member out of interpolation.
+    if let (Some(member), Some(filter)) = (
+        machine.protocols.to_string_member(),
+        machine.protocols.stringable_id(),
+    ) {
+        let dt = protocol::dispatch_type_of(value, heap, modules, &machine.intrinsics);
+        if let Dispatch::Call(cal) = machine.protocols.resolve(member, dt, Some(filter), heap) {
+            let frame = machine.frames.last_mut().expect("eval with no frame");
+            frame
+                .conts
+                .push(Cont::StrInterpRendered { node, acc, index });
+            return protocol::enter_unary(modules, heap, machine, cal, value, node, span);
+        }
+    }
     let acc = crate::unicode::seam_concat(&acc, &super::stringify::render(heap, value));
+    str_interp_advance(resolved, heap, machine, node, acc, index + 1)
+}
+
+/// A driven `Stringable.to_string` for an interpolated `{expr}` has returned its value into
+/// the register (L§15): a `to_string` yields text, so the value must be a `String` — else a
+/// clear type error. Seam-append it and continue folding the string's remaining parts.
+pub(super) fn str_interp_rendered(
+    resolved: &ResolvedModule,
+    heap: &mut Heap,
+    machine: &mut Machine,
+    node: NodeId,
+    acc: String,
+    index: usize,
+) -> Result<(), Raise> {
+    let span = resolved.ast.span(node);
+    let value = take_value(machine, span)?;
+    let Value::Str(idx) = value else {
+        return Err(Raise::new(
+            ExceptionKind::TypeMismatch,
+            "a `to_string` implementation must return a String".to_string(),
+            span,
+        ));
+    };
+    let rendered = heap.string(idx).utf8.to_string();
+    let acc = crate::unicode::seam_concat(&acc, &rendered);
     str_interp_advance(resolved, heap, machine, node, acc, index + 1)
 }
 
@@ -242,7 +288,9 @@ pub(super) fn eval(
         // A dict literal `{k: v, …}` (L§4.8): evaluate entries left to right (bare
         // keys are literal strings), then build the dict applying first-key-wins.
         // `dict_advance` handles the empty `{}` (it allocates immediately).
-        Node::Dict(_) => return dict::dict_advance(resolved, heap, machine, node, Vec::new(), 0),
+        Node::Dict(_) => {
+            return dict::dict_advance(resolved, modules, heap, machine, node, Vec::new(), 0);
+        }
         // A field read `object.name` (L§9): evaluate the object, then read the field.
         // (Assignment `object.name = v` is the place-chain path, M4.3.)
         Node::Field { object, .. } => {

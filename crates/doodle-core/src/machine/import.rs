@@ -67,6 +67,7 @@ impl Instance {
             &mut self.heap,
             self.machine.error_type,
             self.machine.intrinsics.prelude(),
+            &self.machine.protocols,
         );
         // This module's namespace cells join the instance's permanent GC roots (AD5): its
         // globals live for the instance, so a later collection during any module's step

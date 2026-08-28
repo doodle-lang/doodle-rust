@@ -154,8 +154,9 @@ impl Instance {
             Cont::CallGotArg { call, .. } => ast.span(*call),
             Cont::BlockGotArg { call, .. } => ast.span(*call),
             Cont::ListGotElem { list, .. } => ast.span(*list),
-            Cont::StrInterp { node, .. } => ast.span(*node),
+            Cont::StrInterp { node, .. } | Cont::StrInterpRendered { node, .. } => ast.span(*node),
             Cont::DictGotKey { dict, .. } | Cont::DictGotValue { dict, .. } => ast.span(*dict),
+            Cont::DictBuildHashed { node, .. } => ast.span(*node),
             Cont::FieldRead { field } => ast.span(*field),
             Cont::BindDefault { default, .. } => ast.span(*default),
             Cont::DefineCallable { decl } => ast.span(*decl),
@@ -180,6 +181,8 @@ impl Instance {
             | Cont::OrRhs { span, .. }
             | Cont::IndexGotObject { span, .. }
             | Cont::IndexApply { span, .. }
+            | Cont::IndexReadHashed { span, .. }
+            | Cont::IndexAssignHashed { span, .. }
             | Cont::AssertBool { span } => *span,
             // A `Seq` is about to run its next statement (or has drained the body).
             Cont::Seq { block, next } => match self.stmt_at(*block, *next) {

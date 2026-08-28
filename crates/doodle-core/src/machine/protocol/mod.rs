@@ -21,37 +21,30 @@
 //! order, which is host replay input (MD §6 replay note). Candidate protocols are
 //! reported in ascending id (load) order, so ambiguity messages are replay-stable.
 
+mod dispatch;
+mod dtype;
 mod load;
 
-pub(crate) use load::{define_implement, define_protocol, dispatch_call};
+pub(crate) use dispatch::{dispatch_call, enter_unary};
+pub(crate) use dtype::{DispatchType, dispatch_type_of};
+pub(crate) use load::{define_implement, define_protocol, seed_wellknown};
 
-use crate::heap::{CallableTarget, Heap};
-use crate::machine::value::{CalIdx, TypeIdx};
-use crate::machine::{BuiltinType, TypeKind, Value};
+use crate::heap::Heap;
+use crate::machine::value::CalIdx;
 use crate::resolve::BodyKind;
 use crate::span::ModuleId;
+use dtype::dispatch_type_name;
 
-/// A value's **runtime type** for dispatch (L§10.3): the concrete leaf type an
-/// `implement … for T` registers against and a call dispatches on. Built-in umbrella
-/// types (`Number`, `Callable`) are not runtime types — a value is always one leaf — so
-/// an `implement … for Number` expands to `Int` and `Float` at registration
-/// ([`Registry::type_keys`]) and a lookup by the value's leaf finds it.
+/// A member's **native default** (L§15): the engine-supplied fallback the language
+/// guarantees for a well-known protocol member when a value's type has no explicit
+/// `implement`. The stdlib's Doodle-written defaults replace these at M9a (D-M5-1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DispatchType {
-    Nil,
-    Bool,
-    Int,
-    Float,
-    Str,
-    Bytes,
-    List,
-    Dict,
-    /// A `to` value.
-    Procedure,
-    /// An `fn` value.
-    Function,
-    /// A record type, by its nominal type-value identity (L§6.5).
-    Record(TypeIdx),
+pub(crate) enum NativeDefault {
+    /// `Stringable.to_string` — the native value renderer (`super::stringify::render`).
+    Render,
+    /// `Hashable.hash` — the native content hasher (`super::hash`), which also decides
+    /// hashability (a list/ref-record has no native hash).
+    Hash,
 }
 
 /// One member of a protocol declaration (L§10.1): its dispatch name, `to`/`fn` kind,
@@ -72,6 +65,10 @@ struct MemberDecl {
     block_param: Option<Box<str>>,
     /// The default-implementation callable, or `None` for a required member.
     default: Option<CalIdx>,
+    /// The engine's native default (L§15), for a well-known member (`to_string`/`hash`)
+    /// with no user implementation. `None` for an ordinary protocol member — those raise
+    /// `protocol-not-implemented` when unimplemented rather than falling to a native seam.
+    native_default: Option<NativeDefault>,
 }
 
 /// A protocol definition (L§10): its name, the module it was declared in, its single
@@ -105,12 +102,21 @@ pub(crate) struct Registry {
     protocols: Vec<ProtocolDef>,
     /// Every registered `implement` block.
     impls: Vec<ImplBlock>,
+    /// The id of the well-known `Stringable` protocol, once natively registered (L§15
+    /// hook 1). `x is Stringable` and interpolation consult it. `None` before registration.
+    stringable: Option<u32>,
+    /// The id of the well-known `Hashable` protocol, once natively registered (L§15 hook 2).
+    hashable: Option<u32>,
 }
 
 /// How a member call resolves for a given runtime type (L§10.3).
 pub(crate) enum Dispatch {
     /// Call this implementation (a member impl or a protocol default) with the bound args.
     Call(CalIdx),
+    /// The type has no explicit implementation, but the member carries a native default
+    /// (L§15): run the engine's built-in `to_string`/`hash` seam on the argument. Only a
+    /// well-known member reaches this — an ordinary member is `NotImplemented` instead.
+    Native(NativeDefault),
     /// The type implements no protocol supplying the member — `protocol-not-implemented`.
     NotImplemented {
         type_name: String,
@@ -149,6 +155,52 @@ impl Registry {
             .iter()
             .position(|m| m.as_ref() == name)
             .map(|i| i as u32)
+    }
+
+    /// The native default of `member` (L§15), if a protocol declares it with one — the
+    /// engine seam that runs when no explicit implementation covers the runtime type.
+    fn member_native_default(&self, member: u32) -> Option<NativeDefault> {
+        self.protocols
+            .iter()
+            .flat_map(|p| p.members.iter())
+            .filter(|m| m.member == member)
+            .find_map(|m| m.native_default)
+    }
+
+    /// The well-known `Stringable` protocol id (L§15 hook 1), once registered.
+    pub(crate) fn stringable_id(&self) -> Option<u32> {
+        self.stringable
+    }
+
+    /// The well-known `Hashable` protocol id (L§15 hook 2), once registered.
+    pub(crate) fn hashable_id(&self) -> Option<u32> {
+        self.hashable
+    }
+
+    /// Whether `id` is the well-known `Stringable` protocol — its native default is total,
+    /// so `x is Stringable` holds for every value (D-M5-1; `is_op`).
+    pub(crate) fn is_stringable(&self, id: u32) -> bool {
+        self.stringable == Some(id)
+    }
+
+    /// Whether `id` is the well-known `Hashable` protocol — `x is Hashable` is value-aware
+    /// (native-hashable or explicitly implemented, D-M5-1; `is_op`).
+    pub(crate) fn is_hashable(&self, id: u32) -> bool {
+        self.hashable == Some(id)
+    }
+
+    /// The `to_string` member id (L§15 hook 1), interned at native registration. Interpolation
+    /// dispatches this member directly, a hidden binding immune to shadowing (S-37).
+    pub(crate) fn to_string_member(&self) -> Option<u32> {
+        self.stringable
+            .map(|id| self.protocols[id as usize].members[0].member)
+    }
+
+    /// The `hash` member id (L§15 hook 2), interned at native registration. Dict keys dispatch
+    /// this member to hash an incoming key.
+    pub(crate) fn hash_member(&self) -> Option<u32> {
+        self.hashable
+            .map(|id| self.protocols[id as usize].members[0].member)
     }
 
     /// The declared name of a protocol.
@@ -297,20 +349,30 @@ impl Registry {
             })
             .collect();
         match maximal.as_slice() {
-            [] => Dispatch::NotImplemented {
-                type_name: dispatch_type_name(ty, heap),
-                protocol: self.declaring_protocol(member, protocol_filter).into(),
-                member: self.member_name(member).into(),
+            // No implementing protocol: a well-known member falls to its native default
+            // (L§15), any other is not-implemented (L§10.3).
+            [] => match self.member_native_default(member) {
+                Some(nd) => Dispatch::Native(nd),
+                None => Dispatch::NotImplemented {
+                    type_name: dispatch_type_name(ty, heap),
+                    protocol: self.declaring_protocol(member, protocol_filter).into(),
+                    member: self.member_name(member).into(),
+                },
             },
+            // The one implementing protocol supplies the member (its impl or a chain
+            // default); failing that, a well-known member still has its native default.
             [p] => match self
                 .impl_method(*p, ty, member)
                 .or_else(|| self.nearest_default(*p, member))
             {
                 Some(cal) => Dispatch::Call(cal),
-                None => Dispatch::NotImplemented {
-                    type_name: dispatch_type_name(ty, heap),
-                    protocol: self.protocol_name(*p).into(),
-                    member: self.member_name(member).into(),
+                None => match self.member_native_default(member) {
+                    Some(nd) => Dispatch::Native(nd),
+                    None => Dispatch::NotImplemented {
+                        type_name: dispatch_type_name(ty, heap),
+                        protocol: self.protocol_name(*p).into(),
+                        member: self.member_name(member).into(),
+                    },
                 },
             },
             [a, b, ..] => Dispatch::Ambiguous {
@@ -366,31 +428,6 @@ impl Registry {
         defaults.chain(methods)
     }
 
-    /// The runtime-type keys a type *value* covers for `implement … for T`: a concrete
-    /// built-in is one leaf; an umbrella (`Number`, `Callable`) expands to its leaves; a
-    /// record type is its nominal identity (L§6.5). A protocol value has no keys (you
-    /// cannot implement *for* a protocol).
-    pub(crate) fn type_keys(idx: TypeIdx, heap: &Heap) -> Vec<DispatchType> {
-        match &heap.type_value(idx).kind {
-            TypeKind::Record(_) => vec![DispatchType::Record(idx)],
-            TypeKind::Protocol(_) => Vec::new(),
-            TypeKind::Builtin(b) => match b {
-                BuiltinType::Int => vec![DispatchType::Int],
-                BuiltinType::Float => vec![DispatchType::Float],
-                BuiltinType::Number => vec![DispatchType::Int, DispatchType::Float],
-                BuiltinType::Bool => vec![DispatchType::Bool],
-                BuiltinType::String => vec![DispatchType::Str],
-                BuiltinType::Bytes => vec![DispatchType::Bytes],
-                BuiltinType::Nil => vec![DispatchType::Nil],
-                BuiltinType::List => vec![DispatchType::List],
-                BuiltinType::Dict => vec![DispatchType::Dict],
-                BuiltinType::Procedure => vec![DispatchType::Procedure],
-                BuiltinType::Function => vec![DispatchType::Function],
-                BuiltinType::Callable => vec![DispatchType::Procedure, DispatchType::Function],
-            },
-        }
-    }
-
     /// Records a protocol definition (L§10.1), returning its id. `members` carries each
     /// member's signature and its default-body callable (already interned by the caller);
     /// `extends` is the parent's id, resolved parent-first by the caller (S-61).
@@ -410,6 +447,32 @@ impl Registry {
         (self.protocols.len() - 1) as u32
     }
 
+    /// Registers the engine's well-known protocols `Stringable` and `Hashable` (L§15) into
+    /// a fresh registry at instance load: each is a single member with a **native default**
+    /// (`to_string` → render, `hash` → hash), so the language can guarantee the call
+    /// (interpolation, dict keys) for every value before any stdlib loads. The stdlib's
+    /// Doodle-written defaults replace the natives at M9a (D-M5-1). The names `Stringable`/
+    /// `Hashable` and the `to_string` dispatcher are bound per module by `seed_namespace`.
+    pub(crate) fn register_wellknown(&mut self) {
+        self.stringable =
+            Some(self.add_wellknown("Stringable", "to_string", NativeDefault::Render));
+        self.hashable = Some(self.add_wellknown("Hashable", "hash", NativeDefault::Hash));
+    }
+
+    /// Adds one single-member well-known protocol (a `fn self` member with a native default).
+    fn add_wellknown(&mut self, protocol: &str, member: &str, nd: NativeDefault) -> u32 {
+        let member = self.intern_member(member);
+        let decl = MemberDecl {
+            member,
+            kind: BodyKind::Func,
+            params: vec!["self".into()],
+            block_param: None,
+            default: None,
+            native_default: Some(nd),
+        };
+        self.add_protocol(protocol.into(), ModuleId(0), None, vec![decl])
+    }
+
     /// Records an `implement P for T` block (L§10.2) for one runtime-type key.
     fn add_impl(&mut self, protocol: u32, ty: DispatchType, methods: Vec<(u32, CalIdx)>) {
         self.impls.push(ImplBlock {
@@ -417,66 +480,5 @@ impl Registry {
             ty,
             methods,
         });
-    }
-}
-
-/// A value's runtime type for dispatch (L§10.3). Every value has exactly one; a callable's
-/// `to`/`fn` split reads the callable's own module (a cross-module dispatch is still keyed
-/// by the concrete kind). A bare dispatcher value classifies as a `Function` (provisional,
-/// M5.5b — matching [`super::types`]).
-pub(crate) fn dispatch_type_of(
-    value: Value,
-    heap: &Heap,
-    modules: &[super::LoadedModule],
-    intrinsics: &super::intrinsic::Registry,
-) -> DispatchType {
-    match value {
-        Value::Nil => DispatchType::Nil,
-        Value::Bool(_) => DispatchType::Bool,
-        Value::Int(_) | Value::BigInt(_) => DispatchType::Int,
-        Value::Float(_) => DispatchType::Float,
-        Value::Str(_) => DispatchType::Str,
-        Value::Bytes(_) => DispatchType::Bytes,
-        Value::List(_) => DispatchType::List,
-        Value::Dict(_) => DispatchType::Dict,
-        Value::Record(r) => DispatchType::Record(heap.record(r).type_idx),
-        Value::Callable(cal) => {
-            let kind = match heap.callable(cal).target {
-                CallableTarget::Source(id) => {
-                    let m = heap.callable(cal).module.0 as usize;
-                    modules[m].resolved.callables[id as usize].kind
-                }
-                CallableTarget::Intrinsic(iid) => intrinsics.kind_of(iid),
-                CallableTarget::Dispatcher { .. } => BodyKind::Func,
-            };
-            match kind {
-                BodyKind::Proc => DispatchType::Procedure,
-                _ => DispatchType::Function,
-            }
-        }
-        // A module, a type value, or a foreign value is not a record/scalar; it has no
-        // useful dispatch leaf. No `implement … for` form targets these, so such a value
-        // never resolves a member — dispatch reports not-implemented via an unmatched key.
-        Value::Module(_) | Value::Type(_) | Value::Foreign(_) => DispatchType::Nil,
-    }
-}
-
-/// A display name for a runtime type, for diagnostics (L§10.3 messages).
-fn dispatch_type_name(ty: DispatchType, heap: &Heap) -> String {
-    match ty {
-        DispatchType::Nil => "Nil".into(),
-        DispatchType::Bool => "Bool".into(),
-        DispatchType::Int => "Int".into(),
-        DispatchType::Float => "Float".into(),
-        DispatchType::Str => "String".into(),
-        DispatchType::Bytes => "Bytes".into(),
-        DispatchType::List => "List".into(),
-        DispatchType::Dict => "Dict".into(),
-        DispatchType::Procedure => "Procedure".into(),
-        DispatchType::Function => "Function".into(),
-        DispatchType::Record(idx) => match &heap.type_value(idx).kind {
-            TypeKind::Record(rt) => rt.name.to_string(),
-            _ => "record".into(),
-        },
     }
 }

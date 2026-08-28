@@ -210,10 +210,21 @@ pub(crate) fn is_op(
         }
         // `x is P` for a protocol (L§6.5, §10.4): whether `x`'s runtime type implements `P`
         // (consults the registry — a registered `implement P for T`, plus the `extends`
-        // chain in M5.5b).
+        // chain). The two well-known protocols also count the engine's native default
+        // (D-M5-1): every value is `Stringable` (the native renderer is total), and a value
+        // is `Hashable` if it is natively hashable (a scalar or value record with hashable
+        // fields — not a list/dict/`ref` record) even without an explicit `implement`.
         TypeKind::Protocol(pt) => {
-            let dt = super::protocol::dispatch_type_of(lhs, heap, modules, intrinsics);
-            protocols.type_implements(dt, pt.id)
+            if protocols.is_stringable(pt.id) {
+                true
+            } else if protocols.is_hashable(pt.id) {
+                let dt = super::protocol::dispatch_type_of(lhs, heap, modules, intrinsics);
+                protocols.type_implements(dt, pt.id)
+                    || super::hash::check_hashable(lhs, heap).is_ok()
+            } else {
+                let dt = super::protocol::dispatch_type_of(lhs, heap, modules, intrinsics);
+                protocols.type_implements(dt, pt.id)
+            }
         }
     };
     Ok(Value::Bool(matches))

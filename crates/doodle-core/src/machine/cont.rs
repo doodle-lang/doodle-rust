@@ -10,6 +10,7 @@
 
 use crate::ast::{BinaryOp, NodeId, UnaryOp};
 use crate::machine::Value;
+use crate::machine::value::DictIdx;
 use crate::span::Span;
 
 /// One unit of pending work on a frame's continuation stack (machine-design §8).
@@ -208,6 +209,18 @@ pub(crate) enum Cont {
         /// The index (into the literal's parts) of the interpolation now in the register.
         index: usize,
     },
+    /// A driven `Stringable.to_string` (L§15, D-M5-1) for an interpolated `{expr}` at `index`
+    /// has returned its `String` into the register: seam-append it to `acc` and fold in the
+    /// following parts. Scheduled only when the value's type has an explicit `implement
+    /// Stringable`; a native-rendered value never leaves `StrInterp`.
+    StrInterpRendered {
+        /// The `StrLit` literal node.
+        node: NodeId,
+        /// The seam-joined NFC rendering of every part before `index`.
+        acc: String,
+        /// The index (into the literal's parts) of the interpolation just rendered.
+        index: usize,
+    },
     /// A dict literal entry's **computed** key is now in the register: pair it with
     /// the entry's value expression to evaluate next (L§4.8). (A bare-word key needs
     /// no eval, so it skips straight to [`DictGotValue`](Cont::DictGotValue).)
@@ -252,6 +265,42 @@ pub(crate) enum Cont {
         object: Value,
         /// The whole `Index` node's span, for a raise.
         span: Span,
+        /// The key expression node, a call site for a driven `Hashable.hash` (D-M5-1).
+        key_node: NodeId,
+    },
+    /// A driven `Hashable.hash` for an index-read key has returned its bucket `Int`
+    /// (L§15, D-M5-1): look the key up under that bucket and place the value (or raise).
+    IndexReadHashed {
+        /// The dict being read.
+        dict: DictIdx,
+        /// The key whose hash was just computed.
+        key: Value,
+        /// The `Index` node's span, for a `KeyNotFound` raise.
+        span: Span,
+    },
+    /// A driven `Hashable.hash` for an index-assign key has returned its bucket `Int`
+    /// (L§15, D-M5-1): store `key → value` under that bucket. The statement yields Void.
+    IndexAssignHashed {
+        /// The dict being written.
+        dict: DictIdx,
+        /// The key whose hash was just computed.
+        key: Value,
+        /// The already-evaluated right-hand side to store.
+        value: Value,
+        /// The assignment target's span.
+        span: Span,
+    },
+    /// A driven `Hashable.hash` for a dict-literal key has returned its bucket `Int`
+    /// (L§15, D-M5-1): insert that entry, then continue building the remaining entries.
+    DictBuildHashed {
+        /// The `Dict` literal node.
+        node: NodeId,
+        /// The dict being built (a GC root through this continuation).
+        dict: DictIdx,
+        /// The `(key, value)` pairs, in insertion order.
+        entries: Vec<(Value, Value)>,
+        /// The index of the entry whose key was just hashed.
+        index: u32,
     },
     /// A parameter default's value is now in the register: write it into the
     /// callee frame's slot (defaults are evaluated in the callee activation, L§8.2).
@@ -382,9 +431,31 @@ impl Cont {
                 f(*object);
                 f(*key);
             }
+            // The driven-hash resume continuations root the dict being read/written/built (it
+            // is otherwise reachable only from here while the user `hash` runs), plus the key
+            // and any pending value/entries.
+            Cont::IndexReadHashed { dict, key, .. } => {
+                f(Value::Dict(*dict));
+                f(*key);
+            }
+            Cont::IndexAssignHashed {
+                dict, key, value, ..
+            } => {
+                f(Value::Dict(*dict));
+                f(*key);
+                f(*value);
+            }
+            Cont::DictBuildHashed { dict, entries, .. } => {
+                f(Value::Dict(*dict));
+                entries.iter().for_each(|(k, v)| {
+                    f(*k);
+                    f(*v);
+                });
+            }
             // Value-free: NodeIds, slots, spans, operators only.
             Cont::Seq { .. }
             | Cont::StrInterp { .. }
+            | Cont::StrInterpRendered { .. }
             | Cont::AssignPlaceObj { .. }
             | Cont::FieldRead { .. }
             | Cont::DefineRecord { .. }

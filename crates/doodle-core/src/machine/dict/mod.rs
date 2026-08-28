@@ -4,17 +4,51 @@
 //! first-key-wins, and `==` collision resolution — lives here because it needs value
 //! hashing and equality (which the heap layer must not reach up to).
 
-use super::compare::{self, equal};
+mod index;
+
+pub(super) use index::{
+    index_apply, index_assign_hashed, index_got_object, index_read_hashed, index_set,
+};
+
+use super::compare::equal;
 use super::cont::Cont;
-use super::error::{ExceptionKind, Raise};
-use super::hash::{check_hashable, hash_value};
+use super::error::Raise;
+use super::hash::{hash_value, native_key_hash, user_hash_to_bucket};
+use super::protocol::{self, Dispatch};
 use super::step::take_value;
-use super::{Machine, Value};
+use super::{LoadedModule, Machine, Value};
 use crate::ast::{DictKey, Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::DictIdx;
+use crate::machine::value::CalIdx;
 use crate::resolve::ResolvedModule;
 use crate::span::Span;
+
+/// How an incoming dict key's hash is obtained (L§15 hook 2, D-M5-1): a key whose runtime
+/// type has an explicit `implement Hashable` drives that method (a real call); every other
+/// key uses the engine's native structural hash. Chosen by [`hash_plan`] at each dict site.
+enum HashPlan {
+    /// Use the native `Hashable` default (`hash::native_key_hash`) — raises if unhashable.
+    Native,
+    /// Drive this `hash` implementation on the key; its returned `Int` fixes the bucket.
+    Drive(CalIdx),
+}
+
+/// Decides how to hash an incoming dict key (L§4.8, D-M5-1): `Drive` when the key's type has an
+/// explicit `implement Hashable`, else `Native`. A non-`Hashable`-filtered resolution keeps an
+/// unrelated user protocol that happens to declare a `hash` member out of dict hashing.
+fn hash_plan(machine: &Machine, heap: &Heap, modules: &[LoadedModule], key: Value) -> HashPlan {
+    if let (Some(member), Some(filter)) = (
+        machine.protocols.hash_member(),
+        machine.protocols.hashable_id(),
+    ) {
+        let dt = protocol::dispatch_type_of(key, heap, modules, &machine.intrinsics);
+        if let Dispatch::Call(cal) = machine.protocols.resolve(member, dt, Some(filter), heap) {
+            return HashPlan::Drive(cal);
+        }
+    }
+    HashPlan::Native
+}
 
 /// Inserts `key → value` (L§4.8). If an existing key is structurally `==` `key`, its
 /// value is overwritten and the **first key is kept** (first-key-wins); otherwise a
@@ -32,7 +66,15 @@ pub(super) fn insert(
     value: Value,
     span: Span,
 ) -> Result<(), Raise> {
-    let hash = key_hash(key, heap, span)?;
+    let hash = native_key_hash(key, heap, span)?;
+    insert_with_hash(heap, idx, key, value, hash);
+    Ok(())
+}
+
+/// Inserts `key → value` under an already-computed `hash` (L§4.8): the store choke once the
+/// bucket hash is known, whether from the native default or a driven `Hashable.hash`. Applies
+/// first-key-wins and copies both key and value on store (see [`insert`]).
+fn insert_with_hash(heap: &mut Heap, idx: DictIdx, key: Value, value: Value, hash: u64) {
     let value = super::record::copy_on_bind(value, heap);
     match find(heap, idx, key, hash) {
         Some(pos) => heap.dict_set_value(idx, pos, value),
@@ -41,7 +83,6 @@ pub(super) fn insert(
             heap.dict_push_entry(idx, key, value, hash);
         }
     }
-    Ok(())
 }
 
 /// Looks up `key`, returning its value or `None` if absent. Using a non-hashable
@@ -52,8 +93,14 @@ pub(super) fn get(
     key: Value,
     span: Span,
 ) -> Result<Option<Value>, Raise> {
-    let hash = key_hash(key, heap, span)?;
-    Ok(find(heap, idx, key, hash).map(|pos| heap.dict(idx).entries[pos as usize].1))
+    let hash = native_key_hash(key, heap, span)?;
+    Ok(get_with_hash(heap, idx, key, hash))
+}
+
+/// Looks up `key` under an already-computed `hash` (the bucket from the native default or a
+/// driven `Hashable.hash`); `None` if absent. `==` still resolves collisions.
+fn get_with_hash(heap: &Heap, idx: DictIdx, key: Value, hash: u64) -> Option<Value> {
+    find(heap, idx, key, hash).map(|pos| heap.dict(idx).entries[pos as usize].1)
 }
 
 /// The value stored under a key `==`-equal to `key`, or `None` if absent. Used by
@@ -75,15 +122,6 @@ fn find(heap: &Heap, idx: DictIdx, key: Value, hash: u64) -> Option<u32> {
         .find(|&p| equal(d.entries[p as usize].0, key, heap))
 }
 
-/// Hashes a key, raising if it is not hashable (L§4.8). The raise's message names
-/// the offending field for a value record with a non-hashable field.
-fn key_hash(key: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
-    if let Err(reason) = check_hashable(key, heap) {
-        return Err(Raise::new(ExceptionKind::UnhashableKey, reason, span));
-    }
-    Ok(hash_value(key, heap))
-}
-
 // --- dict-literal + index-read evaluation (the continuation handlers `step` dispatches) ---
 
 /// Drives a dict literal's entry at `index` (L§4.8): a **bare** key is the string
@@ -92,6 +130,7 @@ fn key_hash(key: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
 /// insert applies first-key-wins for duplicate keys.
 pub(super) fn dict_advance(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     node: NodeId,
@@ -101,15 +140,12 @@ pub(super) fn dict_advance(
     let Node::Dict(literal) = resolved.ast.node(node) else {
         unreachable!("a Dict continuation over a non-Dict node");
     };
-    let span = resolved.ast.span(node);
     match literal.get(index as usize) {
+        // Past the last entry: allocate the dict, then insert each pair — driving an explicit
+        // `Hashable.hash` per key (D-M5-1) — via the build loop.
         None => {
             let dict = heap.alloc_dict();
-            for (key, value) in entries {
-                insert(heap, dict, key, value, span)?;
-            }
-            machine.reg = Some(Value::Dict(dict));
-            Ok(())
+            dict_build(resolved, modules, heap, machine, node, dict, entries, 0)
         }
         Some(entry) => {
             let value_node = entry.value;
@@ -171,8 +207,10 @@ pub(super) fn dict_got_key(
 }
 
 /// A dict entry's value is in the register: record `key → value` and move on.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dict_got_value(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     node: NodeId,
@@ -182,146 +220,76 @@ pub(super) fn dict_got_value(
 ) -> Result<(), Raise> {
     let value = take_value(machine, resolved.ast.span(node))?;
     entries.push((key, value));
-    dict_advance(resolved, heap, machine, node, entries, index + 1)
+    dict_advance(resolved, modules, heap, machine, node, entries, index + 1)
 }
 
-/// An index expression's object is in the register: stash it, evaluate the key.
-pub(super) fn index_got_object(
+/// Inserts the collected `(key, value)` pairs of a dict literal into `dict` from `index` on
+/// (L§4.8, D-M5-1). A key with a native hash inserts inline (the common case, no per-entry
+/// continuation); the first key whose type has an explicit `implement Hashable` drives that
+/// `hash` and parks [`Cont::DictBuildHashed`] to resume with the returned bucket. `dict` is a
+/// GC root through the parked continuation, so it survives an allocation inside the driven hash.
+#[allow(clippy::too_many_arguments)]
+fn dict_build(
+    resolved: &ResolvedModule,
+    modules: &[LoadedModule],
+    heap: &mut Heap,
     machine: &mut Machine,
-    index: NodeId,
-    span: crate::span::Span,
+    node: NodeId,
+    dict: DictIdx,
+    entries: Vec<(Value, Value)>,
+    mut index: usize,
 ) -> Result<(), Raise> {
-    let object = take_value(machine, span)?;
-    let frame = machine.frames.last_mut().expect("a frame is active");
-    frame.conts.push(Cont::IndexApply { object, span });
-    frame.conts.push(Cont::Eval { node: index });
+    let span = resolved.ast.span(node);
+    while index < entries.len() {
+        let (key, value) = entries[index];
+        match hash_plan(machine, heap, modules, key) {
+            HashPlan::Native => {
+                insert(heap, dict, key, value, span)?;
+                index += 1;
+            }
+            HashPlan::Drive(cal) => {
+                let frame = machine.frames.last_mut().expect("a frame is active");
+                frame.conts.push(Cont::DictBuildHashed {
+                    node,
+                    dict,
+                    entries,
+                    index: index as u32,
+                });
+                return protocol::enter_unary(modules, heap, machine, cal, key, node, span);
+            }
+        }
+    }
+    machine.reg = Some(Value::Dict(dict));
     Ok(())
 }
 
-/// An index expression's key is in the register: `object[key]` (L§6.3). A `Dict` indexes
-/// by key (absent → `KeyNotFound`); a `List`/`String`/`Bytes` indexes by an `Int` position
-/// in `0 <= k < length` (out of range → `IndexOutOfRange`) — a `String` by extended
-/// grapheme cluster (yielding a length-one string), `Bytes` by byte (yielding an `Int`).
-pub(super) fn index_apply(
-    heap: &mut Heap,
-    machine: &mut Machine,
-    object: Value,
-    span: crate::span::Span,
-) -> Result<(), Raise> {
-    let key = take_value(machine, span)?;
-    match object {
-        Value::Dict(d) => match get(heap, d, key, span)? {
-            Some(value) => {
-                machine.reg = Some(value);
-                Ok(())
-            }
-            None => Err(Raise::new(
-                ExceptionKind::KeyNotFound,
-                "that key isn't in the dict",
-                span,
-            )),
-        },
-        Value::List(l) => {
-            let i = sequence_index(heap, key, heap.list(l).items.len(), span)?;
-            machine.reg = Some(heap.list(l).items[i]);
-            Ok(())
-        }
-        Value::Bytes(b) => {
-            let i = sequence_index(heap, key, heap.byte_string(b).bytes.len(), span)?;
-            machine.reg = Some(Value::Int(heap.byte_string(b).bytes[i] as i64));
-            Ok(())
-        }
-        Value::Str(s) => {
-            let i = sequence_index(heap, key, heap.grapheme_offsets(s).len(), span)?;
-            // The i-th grapheme: the substring between cluster boundaries. It is a slice of
-            // an NFC string at normalization boundaries, so it is itself NFC.
-            let (start, end) = {
-                let offsets = heap.grapheme_offsets(s);
-                let start = offsets[i] as usize;
-                let end = offsets
-                    .get(i + 1)
-                    .map_or(heap.string(s).utf8.len(), |&e| e as usize);
-                (start, end)
-            };
-            let grapheme: Box<str> = heap.string(s).utf8[start..end].into();
-            machine.reg = Some(Value::Str(heap.alloc_string(grapheme)));
-            Ok(())
-        }
-        other => Err(Raise::new(
-            ExceptionKind::TypeMismatch,
-            format!("you can't index {} with `[…]`", compare::kind_name(other)),
-            span,
-        )),
-    }
-}
-
-/// Resolves a sequence index `key` against a container of `length` positions (L§6.3): a
-/// non-negative `Int` in range yields the `usize` position; a negative or too-large `Int`
-/// (or a bignum, which no real container can index) raises `IndexOutOfRange`; a non-`Int`
-/// raises `TypeMismatch`. The out-of-range message branches on sign — a negative index
-/// gets the deliberate no-negative-positions hint (a Python habit).
-fn sequence_index(heap: &Heap, key: Value, length: usize, span: Span) -> Result<usize, Raise> {
-    match key {
-        Value::Int(n) if n >= 0 && (n as u128) < length as u128 => Ok(n as usize),
-        Value::Int(n) => Err(out_of_range(&n.to_string(), n < 0, length, span)),
-        Value::BigInt(idx) => {
-            let value = &heap.bigint(idx).value;
-            let negative = value.sign() == num_bigint::Sign::Minus;
-            Err(out_of_range(&value.to_string(), negative, length, span))
-        }
-        other => Err(Raise::new(
-            ExceptionKind::TypeMismatch,
-            format!(
-                "an index must be a whole number (an Int), not {}",
-                compare::kind_name(other)
-            ),
-            span,
-        )),
-    }
-}
-
-/// The `IndexOutOfRange` raise (L§6.3, S-58), its message branching on sign: a negative
-/// index carries the no-negative-positions hint; a too-large one names the length.
-fn out_of_range(index: &str, negative: bool, length: usize, span: Span) -> Raise {
-    let message = if negative {
-        format!(
-            "there's no position {index} — Doodle has no negative positions; to reach the \
-             last item, use `length - 1`"
-        )
-    } else {
-        format!("there's no position {index} — the length is {length}")
-    };
-    Raise::new(ExceptionKind::IndexOutOfRange, message, span)
-}
-
-/// Completes an index place assignment `object[key] = rhs` (L§5.3): `object` (the
-/// place, no copy) and `key` are passed in; the RHS is in the register. For a dict,
-/// stores `key → rhs` ([`insert`] applies first-key-wins and copies a value-record RHS
-/// for binding). A `String`/`Bytes` is immutable (L§4.4/§4.5) so its index is never an
-/// assignment target; a `List` element assignment (`xs[i] = v`) is a separate, still-
-/// pending list-mutation item — until it lands, a non-dict object raises `TypeMismatch`.
-/// The statement yields Void.
-pub(super) fn index_set(
+/// A driven `Hashable.hash` for the key of dict-literal entry `index` has returned its bucket
+/// `Int` (L§15 hook 2): insert that pair, then continue building the remaining entries.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dict_build_hashed(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    assign: NodeId,
-    object: Value,
-    key: Value,
+    node: NodeId,
+    dict: DictIdx,
+    entries: Vec<(Value, Value)>,
+    index: u32,
 ) -> Result<(), Raise> {
-    let Node::Assign { target, value } = resolved.ast.node(assign) else {
-        unreachable!("dict::index_set over a non-Assign node");
-    };
-    let span = resolved.ast.span(*target);
-    let rhs = take_value(machine, resolved.ast.span(*value))?;
-    match object {
-        Value::Dict(d) => insert(heap, d, key, rhs, span),
-        other => Err(Raise::new(
-            ExceptionKind::TypeMismatch,
-            format!("you can't index {} with `[…]`", compare::kind_name(other)),
-            span,
-        )),
-    }
+    let span = resolved.ast.span(node);
+    let bucket = user_hash_to_bucket(take_value(machine, span)?, heap, span)?;
+    let (key, value) = entries[index as usize];
+    insert_with_hash(heap, dict, key, value, bucket);
+    dict_build(
+        resolved,
+        modules,
+        heap,
+        machine,
+        node,
+        dict,
+        entries,
+        index as usize + 1,
+    )
 }
 
 #[cfg(test)]

@@ -225,7 +225,7 @@ fn dispatch(
             assign,
             object,
             key,
-        }) => dict::index_set(resolved, heap, machine, assign, object, key),
+        }) => dict::index_set(resolved, modules, heap, machine, assign, object, key),
         Some(Cont::IfChoose { node, index }) => control::if_choose(resolved, machine, node, index),
         Some(Cont::WhileCheck { node }) => control::while_check(resolved, machine, node),
         Some(Cont::LoopReloop { node }) => {
@@ -254,7 +254,10 @@ fn dispatch(
             index,
         }) => eval::list_got_elem(resolved, heap, machine, list, values, index),
         Some(Cont::StrInterp { node, acc, index }) => {
-            eval::str_interp(resolved, heap, machine, node, acc, index)
+            eval::str_interp(resolved, modules, heap, machine, node, acc, index)
+        }
+        Some(Cont::StrInterpRendered { node, acc, index }) => {
+            eval::str_interp_rendered(resolved, heap, machine, node, acc, index)
         }
         Some(Cont::DictGotKey {
             dict,
@@ -266,9 +269,28 @@ fn dispatch(
             entries,
             index,
             key,
-        }) => dict::dict_got_value(resolved, heap, machine, dict, entries, index, key),
+        }) => dict::dict_got_value(resolved, modules, heap, machine, dict, entries, index, key),
+        Some(Cont::DictBuildHashed {
+            node,
+            dict,
+            entries,
+            index,
+        }) => dict::dict_build_hashed(resolved, modules, heap, machine, node, dict, entries, index),
         Some(Cont::IndexGotObject { index, span }) => dict::index_got_object(machine, index, span),
-        Some(Cont::IndexApply { object, span }) => dict::index_apply(heap, machine, object, span),
+        Some(Cont::IndexApply {
+            object,
+            span,
+            key_node,
+        }) => dict::index_apply(modules, heap, machine, object, key_node, span),
+        Some(Cont::IndexReadHashed { dict, key, span }) => {
+            dict::index_read_hashed(heap, machine, dict, key, span)
+        }
+        Some(Cont::IndexAssignHashed {
+            dict,
+            key,
+            value,
+            span,
+        }) => dict::index_assign_hashed(heap, machine, dict, key, value, span),
         Some(Cont::BindDefault { slot, default }) => {
             call::bind_default(resolved, heap, machine, slot, default)
         }
