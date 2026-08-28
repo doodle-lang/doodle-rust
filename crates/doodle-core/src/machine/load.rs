@@ -90,21 +90,24 @@ impl Instance {
         // members join the flat intrinsics in one id space `CallableTarget::Intrinsic`
         // indexes, appended after the flat ones so the flat ids stay stable.
         let (mut all_intrinsics, native_modules) = intrinsics.into_parts();
-        // The flat intrinsics are the prelude seeded into every module; native modules'
-        // function members append after them (below) but seed no module's prelude.
+        // The flat intrinsics are the prelude's own functions (bound in the prelude module
+        // below); native modules' function members append after them in the one
+        // `CallableTarget::Intrinsic` id space, so the flat ids stay stable.
         let prelude_count = all_intrinsics.len();
         // The built-in `Error` record type (L§12.1, S-58): the value record
         // `Error(kind, message, details)` the engine raises and Doodle code can
         // construct/inspect. One `Error` type is shared by every module in the instance,
         // so it is created once here and remembered on the machine (an engine raise
-        // materializes one without a namespace scan) and passed to each module's seeding.
+        // materializes one without a namespace scan) and bound in the prelude module below.
         let error_type = alloc_error_type(&mut heap);
         // The instance-wide protocol registry, pre-populated with the engine's well-known
         // `Stringable`/`Hashable` (L§15, D-M5-1) so interpolation and dict keys can dispatch
-        // them; each module's namespace then binds their names (`seed_namespace`).
+        // them; the prelude module binds their names.
         let mut protocols = super::protocol::Registry::default();
         protocols.register_wellknown();
-        let namespace = seed_namespace(&module, &mut heap, error_type, &all_intrinsics, &protocols);
+        // A source module's namespace holds only its own globals; the prelude names resolve
+        // through its implicit prelude wildcard (S-60), added below.
+        let namespace = seed_namespace(&module, &mut heap);
         // Every loaded module's namespace cells are permanent GC roots; the main module's
         // come first, then each pre-loaded native module's (below).
         let mut module_root_cells: Vec<CellIdx> = namespace.iter().map(|(_, cell)| *cell).collect();
@@ -151,6 +154,32 @@ impl Instance {
                 wildcards: Vec::new(),
             });
         }
+        // The prelude module (L§11.2, S-60): built after the native modules so it takes the
+        // last id, holding the type values, `Error`, well-known protocols, and the flat
+        // intrinsics (`all_intrinsics[..prelude_count]`). Registered `Loaded` under the path
+        // `prelude` so it is named in an ambiguity message (and importable to disambiguate).
+        let prelude = ModuleId(modules.len() as u32);
+        let built = build_prelude(
+            prelude,
+            &mut heap,
+            error_type,
+            &all_intrinsics[..prelude_count],
+            &protocols,
+        );
+        module_root_cells.extend(&built.cells);
+        let prelude_path: Box<str> = "prelude".into();
+        load.begin(std::slice::from_ref(&prelude_path), &prelude_path, prelude);
+        load.set_state(prelude, super::modload::LoadState::Loaded);
+        modules.push(super::LoadedModule {
+            resolved: Arc::new(built.resolved),
+            namespace: built.namespace,
+            wildcards: Vec::new(),
+        });
+        // Every source module implicitly wildcard-imports the prelude. The main module is the
+        // only source module at construction; each `import`ed source module gets it at load
+        // (`machine/import.rs`). Native/prelude modules never resolve free names, so they get
+        // no wildcard.
+        modules[0].wildcards.push(prelude);
         Instance {
             modules,
             heap,
@@ -163,11 +192,12 @@ impl Instance {
                 fuel: FusedCounter::new(&limits),
                 gc_threshold: limits::GC_MIN_BYTES,
                 handles: HandleTable::new(),
-                intrinsics: intrinsic::Registry::from_intrinsics(all_intrinsics, prelude_count),
+                intrinsics: intrinsic::Registry::from_intrinsics(all_intrinsics),
                 output: Vec::new(),
                 pending: None,
                 load,
                 protocols,
+                prelude,
                 module_root_cells,
                 directive: Directive::RunToCompletion,
                 pending_fault: None,
@@ -197,29 +227,35 @@ fn alloc_error_type(heap: &mut Heap) -> TypeIdx {
     })
 }
 
-/// Seeds a module's namespace in S-43 order: the module's own globals (uninitialized
-/// cells — their `let`/`const`/`to`/`fn` fill them in execution order, the temporal dead
-/// zone), then the built-in type-value prelude, then the `Error` type value, then the host
-/// intrinsics. Each later group is appended after, so an earlier binding of the same name
-/// wins the linear `find_cell` scan (control.rs): a user global shadows a type value or an
-/// intrinsic — the relationship the M5 prelude star-import preserves. Every module in the
-/// instance (the main module or one loaded by `import`, E§6) is seeded the same way, so an
-/// imported module's own top level sees the same prelude; `error_type` is the shared
-/// built-in `Error`. The built-in type *values* are per-module heap objects for now —
-/// cross-module type-value identity (an `Int` from one module `==` another's) is an M5.5
-/// dispatch concern, not yet observable (an imported module runs only for effect at M5.1).
-pub(super) fn seed_namespace(
-    module: &ResolvedModule,
+/// Seeds a module's namespace with its **own** module-level globals (machine-design §6):
+/// one uninitialized cell per declaration, filled by its `let`/`const`/`to`/`fn` in
+/// execution order (the temporal dead zone). The prelude names (type values, `Error`, the
+/// well-known protocols, host intrinsics) are **not** here — they live in the shared prelude
+/// module and resolve through the module's implicit prelude wildcard (L§11.2, S-60), so a
+/// user global of the same name shadows the prelude (own declaration beats any wildcard).
+pub(super) fn seed_namespace(module: &ResolvedModule, heap: &mut Heap) -> Vec<(Box<str>, CellIdx)> {
+    module
+        .globals
+        .iter()
+        .map(|g| (g.name.clone(), heap.alloc_cell(cell_kind_of(g.kind), None)))
+        .collect()
+}
+
+/// Builds the engine **prelude** module (L§11.2, S-43/S-60): one shared synthetic module
+/// holding the built-in type values, the `Error` type, the well-known `Stringable`/`Hashable`
+/// protocols + `to_string` dispatcher, and the host's flat intrinsics — every prelude name as
+/// a read-only `const`. Every source module implicitly wildcard-imports it, so these resolve
+/// as ordinary wildcard names. `intrinsics` is the flat prelude slice (its index is each one's
+/// `CallableTarget::Intrinsic` id); `id` is the module's own id (the `CalObj.module` of its
+/// intrinsics). All members are public (`exports: None`), so the wildcard exposes them all.
+fn build_prelude(
+    id: ModuleId,
     heap: &mut Heap,
     error_type: TypeIdx,
     intrinsics: &[intrinsic::Intrinsic],
     protocols: &super::protocol::Registry,
-) -> Vec<(Box<str>, CellIdx)> {
-    let mut namespace: Vec<(Box<str>, CellIdx)> = module
-        .globals
-        .iter()
-        .map(|g| (g.name.clone(), heap.alloc_cell(cell_kind_of(g.kind), None)))
-        .collect();
+) -> super::native::BuiltNativeModule {
+    let mut namespace: Vec<(Box<str>, CellIdx)> = Vec::new();
     for &(name, builtin) in types::BUILTINS {
         let kind = crate::machine::TypeKind::Builtin(builtin);
         let ty = Value::Type(heap.alloc_type(crate::heap::TypeObj { kind }));
@@ -229,14 +265,10 @@ pub(super) fn seed_namespace(
         "Error".into(),
         heap.alloc_cell(CellKind::Const, Some(Value::Type(error_type))),
     ));
-    // The well-known protocol names (`Stringable`/`Hashable`/`to_string`, L§15) — part of the
-    // prelude, seeded after the type values so a user global still shadows them (S-43 order).
-    super::protocol::seed_wellknown(&mut namespace, heap, module.canonical_id, protocols);
+    super::protocol::seed_wellknown(&mut namespace, heap, id, protocols);
     for (i, intrinsic) in intrinsics.iter().enumerate() {
-        // Each flat intrinsic interns to one foreign `CalObj` (its registration index is the
-        // `CallableTarget::Intrinsic` id) held by a read-only global cell.
         let cal = heap.alloc_callable(crate::heap::CalObj {
-            module: module.canonical_id,
+            module: id,
             target: crate::heap::CallableTarget::Intrinsic(i as u32),
             captures: Vec::new(),
         });
@@ -245,7 +277,7 @@ pub(super) fn seed_namespace(
             heap.alloc_cell(CellKind::Const, Some(Value::Callable(cal))),
         ));
     }
-    namespace
+    super::native::synthetic_module(id, namespace)
 }
 
 /// The [`CellKind`] a module global's declaration category maps to (machine-design

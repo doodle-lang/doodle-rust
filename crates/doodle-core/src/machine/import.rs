@@ -62,13 +62,7 @@ impl Instance {
         let out = crate::resolve::resolve(parsed.ast, parsed.root, id);
         let module = out.module;
         let static_error = parse_error.or_else(|| first_error(&out.diagnostics));
-        let namespace = super::load::seed_namespace(
-            &module,
-            &mut self.heap,
-            self.machine.error_type,
-            self.machine.intrinsics.prelude(),
-            &self.machine.protocols,
-        );
+        let namespace = super::load::seed_namespace(&module, &mut self.heap);
         // This module's namespace cells join the instance's permanent GC roots (AD5): its
         // globals live for the instance, so a later collection during any module's step
         // keeps them alive. (A `failed` module never runs, but rooting its cells is
@@ -100,10 +94,12 @@ impl Instance {
             serial,
         );
         self.machine.load.begin(&pending.path, canonical_id, id);
+        // A source module implicitly wildcard-imports the prelude (S-60), so its free prelude
+        // names resolve; explicit `import m.*` sources append after it.
         self.modules.push(LoadedModule {
             resolved: Arc::new(module),
             namespace,
-            wildcards: Vec::new(),
+            wildcards: vec![self.machine.prelude],
         });
         self.machine.frames.push(frame);
     }

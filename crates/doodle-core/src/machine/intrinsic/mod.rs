@@ -113,10 +113,6 @@ pub enum HostError {
 pub struct Registry {
     intrinsics: Vec<Intrinsic>,
     modules: Vec<super::native::NativeModule>,
-    /// How many leading `intrinsics` are the flat **prelude** set seeded into *every*
-    /// module's namespace (S-43). Native modules' function members are appended after these
-    /// (same id space) but are bound only in their own module, not seeded as a prelude.
-    prelude_count: usize,
 }
 
 impl Registry {
@@ -125,7 +121,6 @@ impl Registry {
         Registry {
             intrinsics: Vec::new(),
             modules: Vec::new(),
-            prelude_count: 0,
         }
     }
 
@@ -162,29 +157,22 @@ impl Registry {
         Ok(())
     }
 
-    /// Consumes the registry into its parts: the flat intrinsics (seeded into the main
-    /// module's namespace, S-43) and the native modules (pre-loaded as their own modules,
-    /// E§5.5). Called once at load.
+    /// Consumes the registry into its parts: the flat intrinsics (the prelude module's own
+    /// functions, S-43/S-60) and the native modules (pre-loaded as their own modules, E§5.5).
+    /// Called once at load.
     pub(crate) fn into_parts(self) -> (Vec<Intrinsic>, Vec<super::native::NativeModule>) {
         (self.intrinsics, self.modules)
     }
 
     /// Builds the instance's runtime intrinsic registry from the flat intrinsic list — the
-    /// host's registered intrinsics (the first `prelude_count`) followed by every native
+    /// host's registered intrinsics (bound in the prelude module) followed by every native
     /// module's function members, in a single id space `CallableTarget::Intrinsic` indexes
     /// (E§5.5). Load-time only.
-    pub(crate) fn from_intrinsics(intrinsics: Vec<Intrinsic>, prelude_count: usize) -> Self {
+    pub(crate) fn from_intrinsics(intrinsics: Vec<Intrinsic>) -> Self {
         Registry {
             intrinsics,
             modules: Vec::new(),
-            prelude_count,
         }
-    }
-
-    /// The flat **prelude** intrinsics seeded into every module's namespace (S-43) — the
-    /// host's registered intrinsics, excluding native modules' function members.
-    pub(crate) fn prelude(&self) -> &[Intrinsic] {
-        &self.intrinsics[..self.prelude_count]
     }
 
     /// The intrinsic at registration index `id` (its `CallableTarget::Intrinsic` id).

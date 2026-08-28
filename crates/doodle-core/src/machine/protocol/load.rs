@@ -110,8 +110,10 @@ pub(crate) fn define_protocol(
     // cell → used-before-defined), so the chain is acyclic and parent-first by construction.
     let parent = match &extends {
         Some(pname) => Some(protocol_id_of(
+            modules,
+            cur,
+            machine,
             heap,
-            &modules[cur].namespace,
             pname,
             resolved.ast.span(decl),
         )?),
@@ -179,17 +181,19 @@ pub(crate) fn define_protocol(
     Ok(())
 }
 
-/// Resolves a protocol name to its registry id at load (for `extends`, L§10.1): reads its
-/// namespace cell and requires a protocol value (an undefined / not-yet-defined name raises
-/// name-/used-before-defined; a non-protocol raises).
+/// Resolves a protocol name to its registry id at load (for `extends`, L§10.1): resolves the
+/// name as a free module name (own namespace → wildcards, the prelude among them) and requires
+/// a protocol value (an undefined / not-yet-defined name raises name-/used-before-defined; a
+/// non-protocol raises).
 fn protocol_id_of(
+    modules: &[LoadedModule],
+    cur: usize,
+    machine: &Machine,
     heap: &Heap,
-    namespace: &[(Box<str>, crate::machine::value::CellIdx)],
     name: &str,
     span: Span,
 ) -> Result<u32, Raise> {
-    let cell = control::find_cell(namespace, name);
-    match control::read_cell(heap, cell, name, span)? {
+    match control::lookup_free(modules, cur, machine, heap, name, span)? {
         Value::Type(idx) => match &heap.type_value(idx).kind {
             TypeKind::Protocol(pt) => Ok(pt.id),
             _ => Err(not_a_protocol(name, span)),
@@ -220,19 +224,17 @@ pub(crate) fn define_implement(
         unreachable!("define_implement over a non-Implement node");
     };
     let (protocol, type_name, methods) = (protocol.clone(), type_name.clone(), methods.clone());
-    let namespace = &modules[cur].namespace;
-    // Resolve `P` to a protocol value (its declaration ran earlier at the module top level).
-    let pcell = control::find_cell(namespace, &protocol);
-    let proto_id = match control::read_cell(heap, pcell, &protocol, span)? {
+    // Resolve `P` (own declaration or a prelude/wildcard protocol) to a protocol value.
+    let proto_id = match control::lookup_free(modules, cur, machine, heap, &protocol, span)? {
         Value::Type(idx) => match &heap.type_value(idx).kind {
             TypeKind::Protocol(pt) => pt.id,
             _ => return Err(not_a_protocol(&protocol, span)),
         },
         _ => return Err(not_a_protocol(&protocol, span)),
     };
-    // Resolve `T` to its runtime-type key(s).
-    let tcell = control::find_cell(namespace, &type_name);
-    let Value::Type(tidx) = control::read_cell(heap, tcell, &type_name, span)? else {
+    // Resolve `T` to its runtime-type key(s) — a built-in type value is a prelude name.
+    let Value::Type(tidx) = control::lookup_free(modules, cur, machine, heap, &type_name, span)?
+    else {
         return Err(Raise::new(
             ExceptionKind::TypeMismatch,
             format!("`{type_name}` is not a type, so you can't `implement … for` it"),

@@ -28,6 +28,8 @@ impl Machine {
             pending: None,
             load: modload::ModuleLoad::new(),
             protocols: super::protocol::Registry::default(),
+            // No modules in this bare machine; the prelude id is a placeholder never resolved.
+            prelude: crate::span::ModuleId(0),
             module_root_cells: Vec::new(),
             directive: Directive::RunToCompletion,
             pending_fault: None,

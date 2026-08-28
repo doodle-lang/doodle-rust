@@ -174,16 +174,7 @@ pub(crate) fn build_native_module(
     heap: &mut Heap,
     intrinsics: &mut Vec<Intrinsic>,
 ) -> BuiltNativeModule {
-    let mut ast = Ast::new();
-    let root = ast.push(
-        Node::Module {
-            stmts: Vec::new(),
-            doc: None,
-        },
-        Span::DUMMY,
-    );
     let mut namespace: Vec<(Box<str>, CellIdx)> = Vec::with_capacity(module.members.len());
-    let mut globals: Vec<GlobalDecl> = Vec::with_capacity(module.members.len());
     for (name, member) in module.members {
         let value = match member {
             NativeMember::Function(function) => {
@@ -213,17 +204,37 @@ pub(crate) fn build_native_module(
                 }))
             }
         };
-        let cell = heap.alloc_cell(CellKind::Const, Some(value));
-        namespace.push((name.clone(), cell));
-        // The member is a module-level public binding; its declaring node is the module root
-        // (a native member has no real declaration, and the node is never dereferenced as one
-        // — the top level does not run and members are pre-bound).
-        globals.push(GlobalDecl {
-            name,
+        namespace.push((name, heap.alloc_cell(CellKind::Const, Some(value))));
+    }
+    synthetic_module(id, namespace)
+}
+
+/// Assembles a **pre-loaded synthetic module** — a native module or the engine prelude — from
+/// a namespace of already-materialized member cells (E§5.5, S-60). Gives it an empty `Module`
+/// AST and one public `const` global per member, so `member_visibility` reports every name
+/// `Exported` (a wildcard exposes them all) and the cells join the instance's GC roots. The
+/// module's top level never runs — its members are pre-bound — and the declaring node is the
+/// module root (never dereferenced as a real declaration).
+pub(crate) fn synthetic_module(
+    id: ModuleId,
+    namespace: Vec<(Box<str>, CellIdx)>,
+) -> BuiltNativeModule {
+    let mut ast = Ast::new();
+    let root = ast.push(
+        Node::Module {
+            stmts: Vec::new(),
+            doc: None,
+        },
+        Span::DUMMY,
+    );
+    let globals: Vec<GlobalDecl> = namespace
+        .iter()
+        .map(|(name, _)| GlobalDecl {
+            name: name.clone(),
             kind: GlobalKind::Const,
             decl: root,
-        });
-    }
+        })
+        .collect();
     let node_count = ast.len();
     let resolved = ResolvedModule {
         canonical_id: id,
@@ -232,7 +243,6 @@ pub(crate) fn build_native_module(
         stmt_spans: Vec::new(),
         callables: Vec::new(),
         globals,
-        // A native module's members are all public (M5.4 has no native `exports` API yet).
         exports: None,
         name_refs: Vec::new(),
         resolutions: vec![None; node_count],

@@ -46,12 +46,7 @@ pub(crate) fn read_ref(
         Resolution::ModuleName(idx) => {
             let name = &resolved.name_refs[idx as usize].name;
             let cur = resolved.canonical_id.0 as usize;
-            // An explicit binding (own decl, prelude, or a non-wildcard import) wins; a
-            // free name not in the namespace resolves through the wildcard imports (AD5).
-            match find_cell(&modules[cur].namespace, name) {
-                Some(cell) => read_cell(heap, Some(cell), name, span),
-                None => wildcard_lookup(modules, cur, machine, heap, name, span),
-            }
+            lookup_free(modules, cur, machine, heap, name, span)
         }
         // A block body reading an enclosing local through the defining static link
         // (§7): chase `defining` `hops` times, then read that frame's slot.
@@ -312,11 +307,30 @@ pub(super) fn param_cell(
     ))
 }
 
-/// Resolves a free `name` not found in module `cur`'s namespace through its wildcard
-/// imports (`import m.*`, AD5, S-13): scans each wildcard source's own exports, in import
-/// order. No match is undefined; exactly one binds a **live alias** of the exporter's cell;
-/// two or more is **ambiguous** — raised at the use site naming both sources (an explicit
-/// import disambiguates).
+/// Resolves a **free** module-level name (L§11.2): an explicit binding — the module's own
+/// declaration or a selective import, both in its namespace — wins; otherwise it resolves
+/// through the module's wildcard imports, the implicit prelude among them (S-60). Shared by
+/// name reads (`read_ref`) and load-time protocol/type-name resolution (`implement`/`extends`).
+pub(crate) fn lookup_free(
+    modules: &[LoadedModule],
+    cur: usize,
+    machine: &Machine,
+    heap: &Heap,
+    name: &str,
+    span: Span,
+) -> Result<Value, Raise> {
+    match find_cell(&modules[cur].namespace, name) {
+        Some(cell) => read_cell(heap, Some(cell), name, span),
+        None => wildcard_lookup(modules, cur, machine, heap, name, span),
+    }
+}
+
+/// Resolves a free `name` not found in module `cur`'s namespace through its wildcard imports
+/// (`import m.*` and the implicit prelude, AD5, S-13/S-60): scans each wildcard source's own
+/// exports, in import order. No match is undefined; wildcards supplying one **distinct
+/// binding** (one cell — including two wildcards that alias the *same* exporter cell, S-39)
+/// bind that live alias; two or more **distinct** bindings are **ambiguous**, raised at the
+/// use site naming both sources (an explicit import disambiguates).
 fn wildcard_lookup(
     modules: &[LoadedModule],
     cur: usize,
@@ -344,7 +358,16 @@ fn wildcard_lookup(
             crate::resolve::Membership::Absent => {}
         }
     }
-    match hits.as_slice() {
+    // Distinct **bindings**, not distinct sources: two wildcards aliasing the same exporter
+    // cell (S-39 live aliases — e.g. the prelude re-exporting a stdlib member the user also
+    // wildcard-imports directly) are one binding, not a collision.
+    let mut distinct: Vec<(ModuleId, CellIdx)> = Vec::new();
+    for (w, cell) in hits {
+        if !distinct.iter().any(|(_, c)| *c == cell) {
+            distinct.push((w, cell));
+        }
+    }
+    match distinct.as_slice() {
         [] => match private_in {
             Some(w) => Err(not_exported(&module_display(machine, w), name, span)),
             None => Err(name_not_defined(name, span)),

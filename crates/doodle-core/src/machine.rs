@@ -188,6 +188,13 @@ pub(crate) struct Machine {
     /// member-default and impl-method callables are GC roots (`machine/gc.rs`) — no
     /// namespace cell references them.
     protocols: protocol::Registry,
+    /// The engine **prelude** module (L§11.2, S-43/S-60): a pre-loaded synthetic module
+    /// holding the built-in type values, `Error`, the well-known protocols, and the host
+    /// intrinsics. Every source module implicitly wildcard-imports it, so a bare prelude
+    /// name resolves as an ordinary wildcard (own declarations → selective imports →
+    /// wildcards, the prelude among them). Registered before the first drive, so it is
+    /// always present.
+    prelude: ModuleId,
     /// The binding cells of **every loaded module's** namespace (machine-design §6/§15,
     /// AD5): each module's globals live for the instance's life (a module is a singleton,
     /// never unloaded in v0.1), so their cells are **permanent GC roots**. Every module
