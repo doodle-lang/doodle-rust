@@ -134,6 +134,42 @@ fn without_an_exports_statement_every_member_is_public() {
 }
 
 #[test]
+fn a_file_level_module_block_wraps_the_file() {
+    // `module App … end` wrapping the whole file is unwrapped: its body is the file's top
+    // level, so it runs exactly as if the block weren't there (the name is documentation).
+    let mut inst = instance("module App\n    print(\"wrapped\")\nend\n");
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(_)), "{outcome:?}");
+    assert_eq!(inst.output(), b"wrapped\n");
+}
+
+fn resolve_slugs(src: &str) -> Vec<String> {
+    let nfc = normalize(src);
+    let parsed = parse_program(nfc.as_ref(), ModuleId(0));
+    let resolved = resolve_module(parsed.ast, parsed.root, ModuleId(0));
+    resolved
+        .diagnostics
+        .iter()
+        .map(|d| d.code.slug().to_string())
+        .collect()
+}
+
+#[test]
+fn a_module_block_that_does_not_wrap_the_file_is_a_static_error() {
+    // A `module` block alongside other top-level statements is a nested sub-namespace,
+    // deferred past v0.1 (D-M5-5).
+    let slugs = resolve_slugs("let x = 1\nmodule Inner\n    let y = 2\nend\n");
+    assert!(slugs.iter().any(|s| s == "nested-module"), "{slugs:?}");
+}
+
+#[test]
+fn a_module_nested_inside_a_wrapper_is_a_static_error() {
+    // Even inside a file-wrapping module, a second (nested) `module` block is unsupported.
+    let slugs = resolve_slugs("module Outer\n    module Inner\n        let y = 2\n    end\nend\n");
+    assert!(slugs.iter().any(|s| s == "nested-module"), "{slugs:?}");
+}
+
+#[test]
 fn exporting_an_undeclared_name_is_a_static_error() {
     let src = "to a()\n    print(\"a\")\nend\nexports a, ghost\n";
     let nfc = normalize(src);

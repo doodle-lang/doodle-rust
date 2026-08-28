@@ -125,6 +125,10 @@ pub enum DiagnosticCode {
     /// exported but has no module-level declaration. Adjective-first, matching
     /// `undeclared-assignment`.
     UndeclaredExport,
+    /// A `module … end` block that is not the sole file-wrapping statement (L§11.1, D-M5-5):
+    /// a nested sub-namespace, deferred past v0.1. **Provisional** — retired when nested
+    /// modules land.
+    NestedModule,
 }
 
 impl DiagnosticCode {
@@ -164,6 +168,7 @@ impl DiagnosticCode {
             DiagnosticCode::IncompleteImplementation => "incomplete-implementation",
             DiagnosticCode::NotAProtocolMember => "not-a-protocol-member",
             DiagnosticCode::UndeclaredExport => "undeclared-export",
+            DiagnosticCode::NestedModule => "nested-module",
         }
     }
 }

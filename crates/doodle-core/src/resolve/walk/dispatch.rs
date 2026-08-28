@@ -257,11 +257,18 @@ impl super::Resolver<'_> {
                 self.declare_binding(node, &name, GlobalKind::Parameter);
             }
             Node::ModuleDecl { name, .. } => {
-                // A nested module has its own namespace; declare the name here, but
-                // its body's resolution (a separate namespace) is deferred (M1.11+),
-                // so nodes inside it stay unresolved for now.
+                // A file-wrapping `module Name … end` is unwrapped in `resolve_module`; any
+                // `module` block that reaches the walk is *not* the sole top-level statement,
+                // so it is a nested sub-namespace — deferred past v0.1 (D-M5-5).
                 let name = name.clone();
-                self.declare_binding(node, &name, GlobalKind::Module);
+                self.error(
+                    crate::diag::DiagnosticCode::NestedModule,
+                    node,
+                    &format!(
+                        "`module {name}` here is a nested module — for now a `module … end` \
+                         block may only wrap a whole file; nested modules aren't supported yet"
+                    ),
+                );
             }
 
             // A bare Block only reaches here defensively (bodies are entered by

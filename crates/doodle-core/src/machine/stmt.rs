@@ -101,6 +101,13 @@ pub(super) fn dispatch_stmt(resolved: &ResolvedModule, frame: &mut Frame, stmt: 
         // `exports` (L§11.1) is a resolve-time declaration of the module's public surface
         // (`ResolvedModule::exports`); it has no runtime effect.
         Node::Exports(_) => {}
+        // A file-wrapping `module Name … end` (L§11.1, D-M5-5): the resolver already resolved
+        // its body as the module top level, so run the body's statements in this frame. A
+        // *nested* `module` is a static error (`nested-module`), so it never reaches here.
+        Node::ModuleDecl { body, .. } => frame.conts.push(Cont::Seq {
+            block: *body,
+            next: 0,
+        }),
         other => unimplemented!("statement not yet in the machine (M5+): {other:?}"),
     }
 }

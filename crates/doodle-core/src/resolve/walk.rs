@@ -210,8 +210,22 @@ impl<'a> Resolver<'a> {
         let Node::Module { stmts, doc } = self.ast.node(root) else {
             return; // a non-module root can't occur from parse_program
         };
-        let doc = *doc;
-        let stmts = stmts.clone();
+        let mut doc = *doc;
+        let mut stmts = stmts.clone();
+        // A file-level `module Name … end` wrapping the whole file (D-M5-5): unwrap it — its
+        // body becomes the file module's top level, and its docstring the module's. `Name` is
+        // documentation (should equal the base name); the module's identity is its canonical
+        // id, so the name has no runtime effect. A `module` block anywhere else (not the sole
+        // top-level statement) is a nested sub-namespace, which is `nested-module` (deferred
+        // past v0.1) when the walk reaches it.
+        if let [only] = stmts.as_slice()
+            && let Node::ModuleDecl {
+                body, doc: mdoc, ..
+            } = self.ast.node(*only)
+            && let Node::Block(inner) = self.ast.node(*body)
+        {
+            (doc, stmts) = (*mdoc, inner.clone());
+        }
         // Collect module-global names up front (whole-scope, so a nested local can
         // be seen to shadow a global declared later, L§5.1).
         self.module_global_names = self.collect_global_names(&stmts);
