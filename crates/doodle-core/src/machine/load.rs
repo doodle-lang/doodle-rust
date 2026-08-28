@@ -10,6 +10,7 @@ use super::{
     TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local, ring, types,
 };
 use crate::heap::CellKind;
+use crate::span::ModuleId;
 
 impl Instance {
     /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
@@ -84,17 +85,24 @@ impl Instance {
         );
         let mut heap = Heap::new();
         let canonical_id = module.canonical_id;
+        // The registered intrinsics (flat, seeded into the main module, S-43) and native
+        // modules (pre-loaded as their own modules, E§5.5) — a native module's function
+        // members join the flat intrinsics in one id space `CallableTarget::Intrinsic`
+        // indexes, appended after the flat ones so the flat ids stay stable.
+        let (mut all_intrinsics, native_modules) = intrinsics.into_parts();
+        // The flat intrinsics are the prelude seeded into every module; native modules'
+        // function members append after them (below) but seed no module's prelude.
+        let prelude_count = all_intrinsics.len();
         // The built-in `Error` record type (L§12.1, S-58): the value record
         // `Error(kind, message, details)` the engine raises and Doodle code can
         // construct/inspect. One `Error` type is shared by every module in the instance,
         // so it is created once here and remembered on the machine (an engine raise
         // materializes one without a namespace scan) and passed to each module's seeding.
         let error_type = alloc_error_type(&mut heap);
-        let namespace = seed_namespace(&module, &mut heap, error_type, &intrinsics);
-        // The main module's namespace cells are the instance's first permanent GC roots
-        // (each loaded module appends its own, `machine/import.rs`); captured before
-        // `namespace` moves into the module table.
-        let module_root_cells: Vec<CellIdx> = namespace.iter().map(|(_, cell)| *cell).collect();
+        let namespace = seed_namespace(&module, &mut heap, error_type, &all_intrinsics);
+        // Every loaded module's namespace cells are permanent GC roots; the main module's
+        // come first, then each pre-loaded native module's (below).
+        let mut module_root_cells: Vec<CellIdx> = namespace.iter().map(|(_, cell)| *cell).collect();
         // The module top level's construct-body locals may be cell-boxed (a `fn`
         // captured one, §7), so build its slots like any frame — no params, no
         // captures. `raw` is all-`None`; `let`s fill the slots as they execute.
@@ -116,12 +124,30 @@ impl Instance {
             },
             0, // the module frame is frame serial 0; further frames count up
         );
-        Instance {
-            modules: vec![super::LoadedModule {
-                resolved,
-                namespace,
+        // The main module is `ModuleId(0)`; native modules take `1..=k` in registration
+        // order (replay-identity input, E§11), pre-loaded and marked `Loaded`.
+        let mut modules = vec![super::LoadedModule {
+            resolved,
+            namespace,
+            wildcards: Vec::new(),
+        }];
+        let mut load = ModuleLoad::new();
+        for module in native_modules {
+            let id = ModuleId(modules.len() as u32);
+            let path: Box<str> = module.name.clone();
+            let built =
+                super::native::build_native_module(module, id, &mut heap, &mut all_intrinsics);
+            module_root_cells.extend(&built.cells);
+            load.begin(std::slice::from_ref(&path), &path, id);
+            load.set_state(id, super::modload::LoadState::Loaded);
+            modules.push(super::LoadedModule {
+                resolved: Arc::new(built.resolved),
+                namespace: built.namespace,
                 wildcards: Vec::new(),
-            }],
+            });
+        }
+        Instance {
+            modules,
             heap,
             machine: Machine {
                 frames: vec![frame],
@@ -132,10 +158,10 @@ impl Instance {
                 fuel: FusedCounter::new(&limits),
                 gc_threshold: limits::GC_MIN_BYTES,
                 handles: HandleTable::new(),
-                intrinsics,
+                intrinsics: intrinsic::Registry::from_intrinsics(all_intrinsics, prelude_count),
                 output: Vec::new(),
                 pending: None,
-                load: ModuleLoad::new(),
+                load,
                 protocols: super::protocol::Registry::default(),
                 module_root_cells,
                 directive: Directive::RunToCompletion,
@@ -181,7 +207,7 @@ pub(super) fn seed_namespace(
     module: &ResolvedModule,
     heap: &mut Heap,
     error_type: TypeIdx,
-    intrinsics: &intrinsic::Registry,
+    intrinsics: &[intrinsic::Intrinsic],
 ) -> Vec<(Box<str>, CellIdx)> {
     let mut namespace: Vec<(Box<str>, CellIdx)> = module
         .globals
@@ -198,7 +224,7 @@ pub(super) fn seed_namespace(
         heap.alloc_cell(CellKind::Const, Some(Value::Type(error_type))),
     ));
     for (i, intrinsic) in intrinsics.iter().enumerate() {
-        // Each intrinsic interns to one foreign `CalObj` (its registration index is the
+        // Each flat intrinsic interns to one foreign `CalObj` (its registration index is the
         // `CallableTarget::Intrinsic` id) held by a read-only global cell.
         let cal = heap.alloc_callable(crate::heap::CalObj {
             module: module.canonical_id,

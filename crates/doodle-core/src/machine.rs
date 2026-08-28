@@ -38,6 +38,7 @@ mod limits;
 mod load;
 mod local;
 mod modload;
+mod native;
 mod observe;
 mod ops;
 mod protect;
@@ -52,6 +53,7 @@ mod types;
 mod unwind;
 mod value;
 
+pub use crate::heap::Finalizer;
 pub use boundary::{Kind, ValueError};
 pub use cancel::CancelToken;
 pub(crate) use error::Halt;
@@ -64,6 +66,7 @@ pub use intrinsic::{
     print as print_intrinsic, read_line as read_line_intrinsic, set_turtle as set_turtle_intrinsic,
     sin as sin_intrinsic,
 };
+pub use native::{ConstValue, NativeMember, NativeModule};
 pub use observe::{FrameObservation, Position};
 pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{
