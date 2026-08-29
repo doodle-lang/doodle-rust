@@ -1,0 +1,6 @@
+#! clause: L11.2
+#! mode: run
+#! expect-raise: both @ 6:1
+import a.*
+import b.*
+draw()

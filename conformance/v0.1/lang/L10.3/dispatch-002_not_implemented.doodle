@@ -1,0 +1,9 @@
+#! clause: L10.3
+#! mode: run
+#! expect-raise: sound @ 9:7
+record Fish with name end
+protocol Speaker
+    fn sound(self)
+    end
+end
+print(sound(Fish(name: "Nemo")))

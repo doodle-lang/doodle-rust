@@ -1,0 +1,24 @@
+#! clause: L10.4
+#! mode: run
+#! expect-out: true
+#! expect-out: true
+protocol Animal
+    fn kind(self)
+    end
+end
+protocol Dog extends Animal
+    fn bark(self)
+    end
+end
+record Pug with name end
+implement Dog for Pug
+    fn kind(self)
+        return "dog"
+    end
+    fn bark(self)
+        return "woof"
+    end
+end
+let p = Pug(name: "x")
+print("{p is Dog}")
+print("{p is Animal}")

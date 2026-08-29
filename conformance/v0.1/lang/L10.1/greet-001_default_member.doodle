@@ -1,0 +1,12 @@
+#! clause: L10.1
+#! mode: run
+#! expect-out: hi from the default
+record Bot with id end
+protocol Greeter
+    fn greet(self)
+        return "hi from the default"
+    end
+end
+implement Greeter for Bot
+end
+print(greet(Bot(id: 1)))

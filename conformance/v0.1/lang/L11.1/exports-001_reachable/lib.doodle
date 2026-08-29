@@ -1,0 +1,7 @@
+to hello()
+    print("hi")
+end
+to secret()
+    print("shh")
+end
+exports hello

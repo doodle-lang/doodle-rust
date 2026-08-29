@@ -1,0 +1,14 @@
+#! clause: L10.3
+#! mode: run
+#! expect-out: woof
+record Dog with name end
+protocol Speaker
+    fn sound(self)
+    end
+end
+implement Speaker for Dog
+    fn sound(d)
+        return "woof"
+    end
+end
+print(Speaker.sound(Dog(name: "Rex")))

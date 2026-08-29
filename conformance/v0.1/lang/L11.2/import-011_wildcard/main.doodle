@@ -1,0 +1,7 @@
+#! clause: L11.2
+#! mode: run
+#! expect-out: hi
+#! expect-out: bye
+import lib.*
+hello()
+goodbye()

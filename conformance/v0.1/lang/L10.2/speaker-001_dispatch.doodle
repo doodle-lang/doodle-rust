@@ -1,0 +1,22 @@
+#! clause: L10.2
+#! mode: run
+#! expect-out: woof
+#! expect-out: meow
+record Dog with name end
+record Cat with name end
+protocol Speaker
+    fn sound(self)
+    end
+end
+implement Speaker for Dog
+    fn sound(d)
+        return "woof"
+    end
+end
+implement Speaker for Cat
+    fn sound(c)
+        return "meow"
+    end
+end
+print(sound(Dog(name: "Rex")))
+print(sound(Cat(name: "Tom")))

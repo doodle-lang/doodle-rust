@@ -1,0 +1,5 @@
+#! clause: L11.2
+#! mode: run
+#! expect-out: hi
+import lib.hello
+hello()

@@ -10,7 +10,7 @@
 
 use crate::model::{Expectation, Test};
 use doodle_core::diag::{Diagnostic, Severity};
-use doodle_core::drive::{Directive, Outcome, run};
+use doodle_core::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
 use doodle_core::machine::{
     Instance, Registry, decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic,
     print_intrinsic,
@@ -21,14 +21,19 @@ use doodle_core::source::{LineIndex, Position, normalize};
 use doodle_core::span::ModuleId;
 use doodle_core::stage::Stage;
 use doodle_core::{full_to_diagnostics, lex_to_diagnostics, parse_to_diagnostics};
+use std::path::Path;
 
-/// Executes `test` (whose required stage doodle-core implements) against
-/// `source`, returning `Ok(())` on a full match or `Err(reasons)` listing every
-/// mismatch found.
-pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
+/// Executes `test` (whose required stage doodle-core implements) against `source`, returning
+/// `Ok(())` on a full match or `Err(reasons)` listing every mismatch. `modules_dir` is the
+/// directory a multi-module fixture's `import name` resolves within (`<dir>/name.doodle`).
+pub(crate) fn execute(
+    test: &Test,
+    source: &str,
+    modules_dir: Option<&Path>,
+) -> Result<(), Vec<String>> {
     match test.required {
         Stage::Lex | Stage::Parse | Stage::Full => run_static(test, source, test.required),
-        Stage::Run => run_dynamic(test, source),
+        Stage::Run => run_dynamic(test, source, modules_dir),
     }
 }
 
@@ -36,7 +41,7 @@ pub(crate) fn execute(test: &Test, source: &str) -> Result<(), Vec<String>> {
 /// its outcome against the test's `expect-raise` expectations and its captured
 /// output against `expect-out` (conformance/README.md § `mode: run`). The `print`
 /// intrinsic is registered before load (S-43), so `expect-out` tests execute at M2b.
-fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
+fn run_dynamic(test: &Test, source: &str, modules_dir: Option<&Path>) -> Result<(), Vec<String>> {
     let nfc = normalize(source);
     let index = LineIndex::new(nfc.as_ref());
 
@@ -54,7 +59,10 @@ fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
     }
 
     let mut instance = Instance::load_with_intrinsics(resolved.module, demo_registry());
-    let outcome = run(&mut instance, Directive::RunToCompletion);
+    let outcome = match drive_to_terminal(&mut instance, modules_dir) {
+        Ok(outcome) => outcome,
+        Err(reason) => return Err(vec![reason]),
+    };
     // Check the outcome (raise/completion) and the captured output independently, so
     // a fixture asserting both, or either alone, gets every mismatch reported.
     let mut reasons = Vec::new();
@@ -69,6 +77,39 @@ fn run_dynamic(test: &Test, source: &str) -> Result<(), Vec<String>> {
     } else {
         Err(reasons)
     }
+}
+
+/// Drives `instance` to a terminal outcome, resolving each `import` to a sibling module file
+/// `<modules_dir>/<path>.doodle` (a multi-module fixture, directory-as-fixture). A path with no
+/// such file — or a single-module fixture (`modules_dir` is `None`) — resolves `NotFound`, so the
+/// program meets a `module-not-found` it can assert. A resolved but unreadable file is a runner
+/// error (a mis-authored fixture), surfaced as the one failure reason.
+fn drive_to_terminal(
+    instance: &mut Instance,
+    modules_dir: Option<&Path>,
+) -> Result<Outcome, String> {
+    let mut outcome = run(instance, Directive::RunToCompletion);
+    while let Outcome::SuspendedImport(req) = &outcome {
+        let joined = req
+            .path
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<&str>>()
+            .join("/");
+        let file = modules_dir.map(|d| d.join(&joined).with_extension("doodle"));
+        let resolution = match file {
+            Some(path) if path.is_file() => match std::fs::read_to_string(&path) {
+                Ok(text) => ImportResolution::Source {
+                    text,
+                    canonical_id: joined.clone(),
+                },
+                Err(e) => return Err(format!("reading module {}: {e}", path.display())),
+            },
+            _ => ImportResolution::NotFound,
+        };
+        outcome = resolve_import(instance, resolution);
+    }
+    Ok(outcome)
 }
 
 /// The registry the runner drives with: the demo intrinsics a `mode: run` fixture may
@@ -186,10 +227,10 @@ fn match_run_outcome(
         Outcome::Suspended(_) => Err(vec![
             "program suspended (no capabilities at M2a)".to_string(),
         ]),
-        // Import conformance vectors — the runner acting as a bundling host — land with the
-        // M5 module chapter (M5.10); an unresolved import here is a test setup error.
+        // `drive_to_terminal` resolves every import (a multi-module fixture's siblings, else
+        // `NotFound`) before returning, so a `SuspendedImport` never reaches here.
         Outcome::SuspendedImport(_) => Err(vec![
-            "program suspended on an import (module conformance vectors are M5.10)".to_string(),
+            "internal: import left unresolved by the drive loop".to_string(),
         ]),
         Outcome::Paused(_) => Err(vec!["program paused (no observation at M2a)".to_string()]),
     }
@@ -346,18 +387,18 @@ mod tests {
     }
 
     fn reasons_of(test: &Test, source: &str) -> Vec<String> {
-        execute(test, source).unwrap_err()
+        execute(test, source, None).unwrap_err()
     }
 
     #[test]
     fn clean_source_with_no_expectations_passes() {
-        assert!(execute(&lex_test(vec![]), "let x = 1 + 2\n").is_ok());
+        assert!(execute(&lex_test(vec![]), "let x = 1 + 2\n", None).is_ok());
     }
 
     #[test]
     fn matches_a_static_error_by_substring_and_position() {
         let t = lex_test(vec![expect_error("between digits", 1, 1)]);
-        assert!(execute(&t, "1__0\n").is_ok());
+        assert!(execute(&t, "1__0\n", None).is_ok());
     }
 
     #[test]
@@ -383,7 +424,7 @@ mod tests {
     #[test]
     fn an_expected_error_that_never_occurs_fails() {
         let t = lex_test(vec![expect_error("between digits", 1, 1)]);
-        assert!(execute(&t, "42\n").is_err());
+        assert!(execute(&t, "42\n", None).is_err());
     }
 
     #[test]
@@ -428,12 +469,12 @@ mod tests {
         // `1 = 2` is a parse-stage static error (a non-lvalue assignment target)
         // the lexer alone would never surface — so this exercises the parser arm.
         let t = parse_test(vec![expect_error("the left side of", 1, 1)]);
-        assert!(execute(&t, "1 = 2\n").is_ok());
+        assert!(execute(&t, "1 = 2\n", None).is_ok());
     }
 
     #[test]
     fn parse_stage_clean_source_passes() {
-        assert!(execute(&parse_test(vec![]), "let x = 1\nx = x + 1\n").is_ok());
+        assert!(execute(&parse_test(vec![]), "let x = 1\nx = x + 1\n", None).is_ok());
     }
 
     #[test]
@@ -463,11 +504,11 @@ mod tests {
         // Reassigning a `const` is a resolver-stage static error that lex+parse
         // alone never surface — so this exercises the resolver (full) arm.
         let t = full_test(vec![expect_error("can't assign to", 2, 1)]);
-        assert!(execute(&t, "const c = 1\nc = 2\n").is_ok());
+        assert!(execute(&t, "const c = 1\nc = 2\n", None).is_ok());
     }
 
     #[test]
     fn full_stage_clean_source_passes() {
-        assert!(execute(&full_test(vec![]), "fn f()\n  1\nend\n").is_ok());
+        assert!(execute(&full_test(vec![]), "fn f()\n  1\nend\n", None).is_ok());
     }
 }

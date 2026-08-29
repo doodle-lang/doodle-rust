@@ -38,16 +38,29 @@ non-zero only on an unexpected result (a FAIL — e.g. a malformed test file).
 conformance/
   v0.1/
     lang/
-      L3.2/sep-001_two_statements_one_line.doodle
+      L3.2/sep-001_two_statements_one_line.doodle              # single-module
       L6.5/arith-001_int_add.doodle
+      L11.2/import-010_selective/main.doodle                   # multi-module
+      L11.2/import-010_selective/lib.doodle
       ...
 ```
 
-One file per test (multi-module tests get a directory form, spec'd at M5 when
-imports land). The path encodes the primary clause; the filename is
-`<topic>-<seq>_<slug>.doodle`. The **test id** is `<clause>-<topic>-<seq>`
+A **single-module** test is one `.doodle` file. A **multi-module** test
+(directory-as-fixture, M5) is a *directory* holding `main.doodle` — the entry,
+which carries the `#!` directives — plus sibling `<name>.doodle` module files;
+an `import name` in the program resolves to `<name>.doodle` in that directory
+(a nested `import a.b` to `a/b.doodle`), and any other module resolves
+`module-not-found`. A directory holding `main.doodle` is one fixture: its other
+`.doodle` files are its modules, not separate tests. Native-module and
+suspending-capability scenarios are not expressible as pure-Doodle fixtures and
+stay as `doodle-core` integration tests.
+
+The path encodes the primary clause; a single-module file is
+`<topic>-<seq>_<slug>.doodle` and a multi-module directory is
+`<topic>-<seq>_<slug>/`. The **test id** is `<clause>-<topic>-<seq>`
 (e.g. `L6.5-arith-001`), unique across the suite. The runner enforces that a
-test's clause directory matches its primary `#! clause:` directive.
+test's clause directory (the file's, or the fixture directory's, parent)
+matches its primary `#! clause:` directive.
 
 Frozen suites (`v0.1` after the M10 freeze) are never edited — later changes
 create `v0.2/`.
@@ -123,6 +136,5 @@ budget bounds it; hitting it is a FAIL). Runnable from **M2b** (the host's
 - **Engine drive scripts** (JSON: directives+resolutions in, expected
   outcome/position/stack stream out) — spec'd at M2b, under
   `conformance/v0.1/engine/`.
-- **Multi-module tests** (directory form with a manifest) — M5.
 - **Determinism harness** (run twice + GC-stress, diff traces) — a runner
   flag, M2a.

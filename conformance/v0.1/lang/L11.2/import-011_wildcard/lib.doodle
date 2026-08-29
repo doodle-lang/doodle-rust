@@ -1,0 +1,6 @@
+to hello()
+    print("hi")
+end
+to goodbye()
+    print("bye")
+end

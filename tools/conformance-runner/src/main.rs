@@ -24,6 +24,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// A discovered fixture: a **single-module** `*.doodle` file, or a **multi-module**
+/// directory holding `main.doodle` (the entry, carrying the `#!` directives) plus sibling
+/// `<name>.doodle` modules an `import name` resolves to. `logical` is the fixture's identity
+/// path — the file itself, or the directory — used for the id and the clause-directory check;
+/// `entry` is the file to parse; `modules_dir` is `Some(dir)` for a multi-module fixture.
+struct Fixture {
+    logical: PathBuf,
+    entry: PathBuf,
+    modules_dir: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let root = std::env::args()
         .nth(1)
@@ -41,16 +52,16 @@ fn main() -> ExitCode {
 /// Runs the suite rooted at `root`, printing the report. Returns the number of
 /// failed tests (0 = green), or an `Err` for a runner-level failure.
 fn run(root: &Path) -> Result<usize, String> {
-    let files = discover(root)?;
+    let fixtures = discover(root)?;
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut clause_tests: BTreeMap<String, usize> = BTreeMap::new();
 
-    for path in &files {
-        let rel = rel_path(root, path);
-        let source = match std::fs::read_to_string(path) {
+    for fixture in &fixtures {
+        let rel = rel_path(root, &fixture.logical);
+        let source = match std::fs::read_to_string(&fixture.entry) {
             Ok(source) => source,
             Err(e) => {
                 // A non-UTF-8 or unreadable file is one malformed test, not a
@@ -67,7 +78,7 @@ fn run(root: &Path) -> Result<usize, String> {
                 failed += 1;
             }
             Ok(test) => {
-                if let Some(message) = clause_path_mismatch(path, &test) {
+                if let Some(message) = clause_path_mismatch(&fixture.logical, &test) {
                     println!("FAIL  {rel}: {message}");
                     failed += 1;
                     continue;
@@ -91,7 +102,7 @@ fn run(root: &Path) -> Result<usize, String> {
                     );
                     skipped += 1;
                 } else {
-                    match matcher::execute(&test, &source) {
+                    match matcher::execute(&test, &source, fixture.modules_dir.as_deref()) {
                         Ok(()) => {
                             println!("PASS  {header}");
                             passed += 1;
@@ -119,18 +130,30 @@ fn run(root: &Path) -> Result<usize, String> {
     Ok(failed)
 }
 
-/// Discovers `*.doodle` files under `root`, in a deterministic sorted order.
-fn discover(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// Discovers fixtures under `root`, in a deterministic sorted order (by logical path).
+fn discover(root: &Path) -> Result<Vec<Fixture>, String> {
     if !root.exists() {
         return Err(format!("suite root `{}` does not exist", root.display()));
     }
     let mut out = Vec::new();
     collect(root, &mut out)?;
-    out.sort();
+    out.sort_by(|a, b| a.logical.cmp(&b.logical));
     Ok(out)
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect(dir: &Path, out: &mut Vec<Fixture>) -> Result<(), String> {
+    // A directory holding `main.doodle` is a **single multi-module fixture**: its `main.doodle`
+    // is the entry and its other `.doodle` files are its modules (not separate fixtures), so
+    // this branch does not recurse.
+    let main = dir.join("main.doodle");
+    if main.is_file() {
+        out.push(Fixture {
+            logical: dir.to_path_buf(),
+            entry: main,
+            modules_dir: Some(dir.to_path_buf()),
+        });
+        return Ok(());
+    }
     let read = std::fs::read_dir(dir).map_err(|e| format!("reading dir {}: {e}", dir.display()))?;
     let mut entries: Vec<PathBuf> = Vec::new();
     for entry in read {
@@ -149,7 +172,11 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
             collect(&path, out)?;
         } else if file_type.is_file() && path.extension().and_then(|x| x.to_str()) == Some("doodle")
         {
-            out.push(path);
+            out.push(Fixture {
+                logical: path.clone(),
+                entry: path,
+                modules_dir: None,
+            });
         }
     }
     Ok(())

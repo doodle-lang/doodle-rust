@@ -1,0 +1,8 @@
+#! clause: L4.12
+#! mode: run
+#! expect-out: true true true false
+#! expect-out: true false true
+record Point with x, y end
+print("{5 is Int} {5 is Number} {3.5 is Float} {3.5 is Int}")
+let f = fn() 1 end
+print("{f is Function} {f is Procedure} {f is Callable}")
