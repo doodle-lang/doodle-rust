@@ -24,7 +24,10 @@ impl Resolver<'_> {
     pub(super) fn record_selective_imports(&mut self, targets: &[ImportTarget]) {
         for t in targets {
             if t.wildcard {
-                continue; // a wildcard's names aren't known until load (M5)
+                // A wildcard's names aren't known until load (M5); note only that one exists,
+                // so a free `with` target defers its kind check to runtime (S-39).
+                self.has_wildcard_import = true;
+                continue;
             }
             let Some(last) = t.path.last() else { continue };
             let name = t.alias.clone().unwrap_or_else(|| last.clone());
@@ -118,6 +121,7 @@ impl Resolver<'_> {
                 .map(|g| g.kind)
             {
                 Some(GlobalKind::Parameter) => {}
+                // A lexically-visible same-module non-parameter: caught here, precisely (S-39).
                 Some(kind) => {
                     let what = with_target_kind(kind);
                     self.error(
@@ -130,14 +134,25 @@ impl Resolver<'_> {
                         ),
                     );
                 }
-                None => self.error(
-                    DiagnosticCode::WithTargetNotParameter,
-                    node,
-                    &format!(
-                        "`with` needs a dynamic parameter named `{name}`, but none is \
-                         declared — declare it with `parameter {name} = default`"
-                    ),
-                ),
+                // Not a module declaration. If it is a selective import, or a wildcard import
+                // could supply it, its kind is unknown until load — defer the parameter check
+                // to runtime (`control::param_cell`, S-39, ratified 2026-08-28). Only when
+                // nothing could supply it (no wildcard, not a selective import) is a free
+                // `with` target a static "no such parameter" — the typo is caught.
+                None => {
+                    let could_import = self.has_wildcard_import
+                        || self.selective_imports.iter().any(|(n, _)| **n == *name);
+                    if !could_import {
+                        self.error(
+                            DiagnosticCode::WithTargetNotParameter,
+                            node,
+                            &format!(
+                                "`with` needs a dynamic parameter named `{name}`, but none is \
+                                 declared — declare it with `parameter {name} = default`"
+                            ),
+                        );
+                    }
+                }
             }
         }
     }

@@ -125,6 +125,10 @@ pub(super) struct Resolver<'a> {
     /// (imports are read-only, S-39). Wildcard sources aren't nameable until load
     /// (M5), so a wildcard-supplied name falls to the generic undeclared message.
     selective_imports: Vec<(Box<str>, Box<str>)>,
+    /// Whether the module has **any** `import m.*` (a wildcard could supply a name the
+    /// resolver can't see): a free `with` target then defers its parameter-kind check to
+    /// runtime rather than a static "no such parameter" (S-39, ratified 2026-08-28).
+    has_wildcard_import: bool,
     /// Loops (`while`/`loop` nodes) that have a `break` lexically bound to them —
     /// for the S-5 tail classifier's loop-divergence check (a `loop` with no bound
     /// `break` diverges; one with a bound `break` is value-less).
@@ -157,6 +161,7 @@ impl<'a> Resolver<'a> {
             pending_exports: Vec::new(),
             exports: None,
             selective_imports: Vec::new(),
+            has_wildcard_import: false,
             loops_with_break: Vec::new(),
             frames: Vec::new(),
             scopes: Vec::new(),

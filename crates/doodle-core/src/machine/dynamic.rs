@@ -14,10 +14,9 @@
 use super::cont::Cont;
 use super::error::Raise;
 use super::step::take_value;
-use super::{Machine, control, record};
+use super::{LoadedModule, Machine, control, record};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
-use crate::machine::control::Namespace;
 use crate::resolve::{Resolution, ResolvedModule};
 
 /// Opens a `with`'s dynamic binding once its value is in the register (§5.5): resolve
@@ -28,9 +27,9 @@ use crate::resolve::{Resolution, ResolvedModule};
 /// touches only the cell and the save stack.
 pub(crate) fn with_bind(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-    namespace: &Namespace,
     with_node: NodeId,
 ) -> Result<(), Raise> {
     let Node::With { body, .. } = resolved.ast.node(with_node) else {
@@ -38,14 +37,15 @@ pub(crate) fn with_bind(
     };
     let body = *body;
     // The resolver records the dynamic-parameter name as a free module-name reference
-    // on the `with` node itself; its cell is a module global.
+    // on the `with` node itself; it resolves like any free name (own namespace → wildcards).
     let Some(Resolution::ModuleName(idx)) = resolved.resolutions[with_node.0 as usize] else {
         unreachable!("a `with` records its parameter name as a module-name reference");
     };
     let span = resolved.ast.span(with_node);
     let value = take_value(machine, span)?;
     let name = &resolved.name_refs[idx as usize].name;
-    let (cell, old) = control::param_cell(heap, namespace, name, span)?;
+    let cur = resolved.canonical_id.0 as usize;
+    let (cell, old) = control::param_cell(modules, cur, machine, heap, name, span)?;
     // Establishing the binding copies a value record, like any binding (L§4.14); the
     // saved `old` is likewise a value that was copied when it was itself bound.
     let value = record::copy_on_bind(value, heap);

@@ -125,6 +125,13 @@ pub enum ExceptionKind {
     /// and `index-out-of-range` (sequence) — modules never reuse `no-such-field`. Structured
     /// `details: {module, member}`. (User-ratified spelling, 2026-08-27.)
     NoSuchMember,
+    /// A `with` targeted a name that is not a dynamic parameter (L§5.5): the **runtime** face
+    /// of the static `with-target-not-parameter` diagnostic, for an **imported** target whose
+    /// kind the resolver cannot see (a selective/wildcard import of a `const`/`to`/`fn`/…).
+    /// One rule, one slug across both catalogs (like `procedure-in-expression`, S-6/S-58).
+    /// Raised when the `with` executes, before any binding, attributed to the `with` statement.
+    /// Structured `details: {name, module, kind}`. (User-ratified, 2026-08-28.)
+    WithTargetNotParameter,
 }
 
 impl ExceptionKind {
@@ -157,6 +164,7 @@ impl ExceptionKind {
             ExceptionKind::AmbiguousImport => "ambiguous-import",
             ExceptionKind::ProtocolNotImplemented => "protocol-not-implemented",
             ExceptionKind::AmbiguousMember => "ambiguous-member",
+            ExceptionKind::WithTargetNotParameter => "with-target-not-parameter",
             ExceptionKind::NotExported => "not-exported",
             ExceptionKind::NoSuchMember => "no-such-member",
         }

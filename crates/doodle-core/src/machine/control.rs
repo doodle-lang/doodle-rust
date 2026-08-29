@@ -289,22 +289,49 @@ pub(crate) fn read_cell(
     }
 }
 
-/// Resolves a dynamic-parameter cell and reads its current value — for `with` to save
-/// before it rebinds (machine-design §13). Raises `NameNotDefined` if the name has no
-/// cell (an undeclared parameter, §5.5) or `UsedBeforeDefined` if the cell is not yet
-/// initialized (a `with` reached before the `parameter` declaration ran).
+/// Resolves a `with`'s dynamic-parameter cell and reads its current value — for `with` to save
+/// before it rebinds (machine-design §13, L§5.5). The name resolves like any free name (own
+/// namespace → wildcards, S-39/S-13): an own declaration or selective import in the namespace,
+/// else a wildcard-supplied name (two distinct wildcard bindings raise `ambiguous-import`, since
+/// a `with` target is a *use*). The target must be a **dynamic parameter**; an imported
+/// non-parameter — whose kind the resolver could not see — raises `with-target-not-parameter`
+/// here, before any binding. Raises `NameNotDefined`/`UsedBeforeDefined` as a name read would.
 pub(super) fn param_cell(
+    modules: &[LoadedModule],
+    cur: usize,
+    machine: &Machine,
     heap: &Heap,
-    namespace: &Namespace,
     name: &str,
     span: Span,
 ) -> Result<(CellIdx, Value), Raise> {
-    let cell = find_cell(namespace, name);
-    let old = read_cell(heap, cell, name, span)?;
-    Ok((
-        cell.expect("read_cell returned Ok, so the cell exists"),
-        old,
-    ))
+    let cell = match find_cell(&modules[cur].namespace, name) {
+        Some(c) => c,
+        None => wildcard_cell(modules, cur, machine, name, span)?,
+    };
+    if !matches!(heap.cell(cell).kind, crate::heap::CellKind::Parameter) {
+        return Err(with_target_not_parameter(name, heap.cell(cell).kind, span));
+    }
+    let old = read_cell(heap, Some(cell), name, span)?;
+    Ok((cell, old))
+}
+
+/// The runtime `with-target-not-parameter` raise (L§5.5, S-58): a `with` targeted an imported
+/// name that is not a dynamic parameter. The kind word is as precise as the cell records — a
+/// `to`/`fn`/`record`/`const` all bind a `const` cell, so all read as "a constant" here (the
+/// static diagnostic distinguishes them for a same-module target).
+fn with_target_not_parameter(name: &str, kind: crate::heap::CellKind, span: Span) -> Raise {
+    use crate::heap::CellKind;
+    let what = match kind {
+        CellKind::Const => "a constant",
+        CellKind::Let => "a variable",
+        CellKind::Dispatcher(_) => "a protocol member",
+        CellKind::Parameter => "a dynamic parameter",
+    };
+    Raise::new(
+        ExceptionKind::WithTargetNotParameter,
+        format!("`{name}` is {what}, not a dynamic parameter — `with` needs a parameter"),
+        span,
+    )
 }
 
 /// Resolves a **free** module-level name (L§11.2): an explicit binding — the module's own
@@ -325,12 +352,49 @@ pub(crate) fn lookup_free(
     }
 }
 
-/// Resolves a free `name` not found in module `cur`'s namespace through its wildcard imports
-/// (`import m.*` and the implicit prelude, AD5, S-13/S-60): scans each wildcard source's own
-/// exports, in import order. No match is undefined; wildcards supplying one **distinct
-/// binding** (one cell — including two wildcards that alias the *same* exporter cell, S-39)
-/// bind that live alias; two or more **distinct** bindings are **ambiguous**, raised at the
-/// use site naming both sources (an explicit import disambiguates).
+/// The outcome of resolving a free `name` across module `cur`'s wildcard imports (S-13/S-60):
+/// a single **distinct binding** (one cell — two wildcards aliasing the *same* exporter cell,
+/// S-39, are one binding), an **ambiguity** of two distinct bindings, or **nothing** (with the
+/// module that has the name *privately*, for the helpful `not-exported` miss).
+enum Wildcard {
+    Bound(CellIdx),
+    Ambiguous(ModuleId, ModuleId),
+    None { private_in: Option<ModuleId> },
+}
+
+/// Resolves `name` across `cur`'s wildcard imports (`import m.*` and the implicit prelude, AD5),
+/// scanning each source's own exports in import order and deduping by cell identity. Shared by
+/// the read path ([`wildcard_lookup`]) and the `with`-target cell path ([`wildcard_cell`]).
+fn wildcard_resolve(modules: &[LoadedModule], cur: usize, name: &str) -> Wildcard {
+    let mut hits: Vec<(ModuleId, CellIdx)> = Vec::new();
+    let mut private_in: Option<ModuleId> = None;
+    for &w in &modules[cur].wildcards {
+        // A wildcard exposes only the exporter's own **exported** definitions (L§11.2/§11.1).
+        match modules[w.0 as usize].resolved.member_visibility(name) {
+            crate::resolve::Membership::Exported => {
+                if let Some(cell) = find_cell(&modules[w.0 as usize].namespace, name)
+                    && !hits.iter().any(|(_, c)| *c == cell)
+                {
+                    hits.push((w, cell));
+                }
+            }
+            // Declared but not exported: remembered for the helpful `not-exported` miss.
+            crate::resolve::Membership::Private => {
+                private_in.get_or_insert(w);
+            }
+            crate::resolve::Membership::Absent => {}
+        }
+    }
+    match hits.as_slice() {
+        [] => Wildcard::None { private_in },
+        [(_, cell)] => Wildcard::Bound(*cell),
+        [(a, _), (b, _), ..] => Wildcard::Ambiguous(*a, *b),
+    }
+}
+
+/// Resolves a free `name` not found in `cur`'s namespace to a **value** through its wildcard
+/// imports (S-13/S-60): one distinct binding reads its live alias; two are ambiguous; none is
+/// undefined (or `not-exported` when a source has it privately).
 fn wildcard_lookup(
     modules: &[LoadedModule],
     cur: usize,
@@ -339,53 +403,51 @@ fn wildcard_lookup(
     name: &str,
     span: Span,
 ) -> Result<Value, Raise> {
-    let mut hits: Vec<(ModuleId, CellIdx)> = Vec::new();
-    // A wildcard source that has this name **privately** (declared but not exported): if no
-    // export hits, this turns the confusing "I imported everything, why isn't it there?" miss
-    // into the helpful `not-exported` (L§11.1), naming the module — error path only.
-    let mut private_in: Option<ModuleId> = None;
-    for &w in &modules[cur].wildcards {
-        // A wildcard exposes only the exporter's own **exported** definitions (L§11.2/§11.1).
-        match modules[w.0 as usize].resolved.member_visibility(name) {
-            crate::resolve::Membership::Exported => {
-                if let Some(cell) = find_cell(&modules[w.0 as usize].namespace, name) {
-                    hits.push((w, cell));
-                }
-            }
-            crate::resolve::Membership::Private => {
-                private_in.get_or_insert(w);
-            }
-            crate::resolve::Membership::Absent => {}
-        }
+    match wildcard_resolve(modules, cur, name) {
+        Wildcard::Bound(cell) => read_cell(heap, Some(cell), name, span),
+        Wildcard::Ambiguous(a, b) => Err(ambiguous_import(machine, name, a, b, span)),
+        Wildcard::None { private_in } => Err(wildcard_miss(machine, private_in, name, span)),
     }
-    // Distinct **bindings**, not distinct sources: two wildcards aliasing the same exporter
-    // cell (S-39 live aliases — e.g. the prelude re-exporting a stdlib member the user also
-    // wildcard-imports directly) are one binding, not a collision.
-    let mut distinct: Vec<(ModuleId, CellIdx)> = Vec::new();
-    for (w, cell) in hits {
-        if !distinct.iter().any(|(_, c)| *c == cell) {
-            distinct.push((w, cell));
-        }
+}
+
+/// Resolves a free `name` not found in `cur`'s namespace to a **cell** through its wildcard
+/// imports — for `with` binding an imported dynamic parameter (S-39): it needs the exporter's
+/// own cell (the same one reads see), not just its value. Same resolution as [`wildcard_lookup`].
+fn wildcard_cell(
+    modules: &[LoadedModule],
+    cur: usize,
+    machine: &Machine,
+    name: &str,
+    span: Span,
+) -> Result<CellIdx, Raise> {
+    match wildcard_resolve(modules, cur, name) {
+        Wildcard::Bound(cell) => Ok(cell),
+        Wildcard::Ambiguous(a, b) => Err(ambiguous_import(machine, name, a, b, span)),
+        Wildcard::None { private_in } => Err(wildcard_miss(machine, private_in, name, span)),
     }
-    match distinct.as_slice() {
-        [] => match private_in {
-            Some(w) => Err(not_exported(&module_display(machine, w), name, span)),
-            None => Err(name_not_defined(name, span)),
-        },
-        [(_, cell)] => read_cell(heap, Some(*cell), name, span),
-        [(a, _), (b, _), ..] => {
-            let from = |m: ModuleId| machine.load.path_of(m).unwrap_or_else(|| "?".into());
-            Err(Raise::new(
-                ExceptionKind::AmbiguousImport,
-                format!(
-                    "`{name}` is imported by wildcards from both `{}` and `{}` — import it \
-                     explicitly to say which one you mean",
-                    from(*a),
-                    from(*b),
-                ),
-                span,
-            ))
-        }
+}
+
+/// The raise for a name supplied by two distinct wildcard bindings (L§11.2, S-13).
+fn ambiguous_import(machine: &Machine, name: &str, a: ModuleId, b: ModuleId, span: Span) -> Raise {
+    let from = |m: ModuleId| machine.load.path_of(m).unwrap_or_else(|| "?".into());
+    Raise::new(
+        ExceptionKind::AmbiguousImport,
+        format!(
+            "`{name}` is imported by wildcards from both `{}` and `{}` — import it \
+             explicitly to say which one you mean",
+            from(a),
+            from(b),
+        ),
+        span,
+    )
+}
+
+/// The raise for a wildcard miss: `not-exported` when a source has the name privately (the
+/// helpful "I imported everything, why isn't it there?" case), else `name-not-defined`.
+fn wildcard_miss(machine: &Machine, private_in: Option<ModuleId>, name: &str, span: Span) -> Raise {
+    match private_in {
+        Some(w) => not_exported(&module_display(machine, w), name, span),
+        None => name_not_defined(name, span),
     }
 }
 

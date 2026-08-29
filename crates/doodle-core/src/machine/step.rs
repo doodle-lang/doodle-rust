@@ -313,9 +313,7 @@ fn dispatch(
         }
         // A `with`'s value is now in the register: open its dynamic binding and run the
         // body under a `WithRestore` (dynamic.rs).
-        Some(Cont::WithBind { with }) => {
-            dynamic::with_bind(resolved, heap, machine, &modules[cur].namespace, with)
-        }
+        Some(Cont::WithBind { with }) => dynamic::with_bind(resolved, modules, heap, machine, with),
         // A `with` body completed normally: restore its dynamic binding (machine-design
         // §13). The body's value stays in the register as the `with`'s value.
         Some(Cont::WithRestore { dyn_mark }) => {
