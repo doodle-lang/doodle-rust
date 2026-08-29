@@ -1108,6 +1108,21 @@ fn gc_stress_determinism_gate_over_the_corpus() {
         "1 + true\n",
         "5()\n",
         "1.0e308 + 1.0e308\n",
+        // Protocol dispatch (M5.5): single dispatch on the first argument's runtime type,
+        // the extends chain, and protocol defaults — the registry is index-addressed and
+        // scanned linearly (no hashing/address identity), so dispatch is GC-order-stable.
+        "record A with n end\nrecord B with n end\n\
+         protocol P\nfn v(self)\nend\nend\n\
+         implement P for A\nfn v(a)\nreturn 1\nend\nend\n\
+         implement P for B\nfn v(b)\nreturn 2\nend\nend\n\
+         v(A(n: 0)) + v(B(n: 0))\n",
+        "protocol Base\nfn base(self)\nreturn 10\nend\nend\n\
+         protocol Ext extends Base\nfn ext(self)\nend\nend\n\
+         record R with n end\n\
+         implement Ext for R\nfn ext(self)\nreturn 5\nend\nend\n\
+         base(R(n: 0)) + ext(R(n: 0))\n",
+        // A dispatch that raises (protocol-not-implemented) is GC-order-stable too.
+        "record F with n end\nprotocol P\nfn v(self)\nend\nend\nv(F(n: 0))\n",
     ];
     for src in corpus {
         let normal = drive_terminal(&mut load_source(src), false);
@@ -1255,6 +1270,89 @@ fn load_source_with_print(src: &str) -> Instance {
     registry.register(print_intrinsic()).unwrap();
     registry.register(each_intrinsic()).unwrap();
     Instance::load_with_intrinsics(resolved.module, registry)
+}
+
+/// Drives a multi-module program to its terminal, resolving each `import name` from `mods`
+/// (name → source; an unlisted name is `module-not-found`), optionally collecting at **every**
+/// safe point (maximal GC pressure across module loading + dispatch). Returns the captured
+/// output and the terminal outcome in the by-kind comparable form.
+fn drive_multi(main: &str, mods: &[(&str, &str)], gc_stress: bool) -> (Vec<u8>, Terminal) {
+    use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+    let mut inst = load_source_with_print(main);
+    if gc_stress {
+        inst.collect_at_every_safe_point();
+    }
+    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let terminal = loop {
+        match outcome {
+            Outcome::SuspendedImport(ref req) => {
+                let name = req
+                    .path
+                    .iter()
+                    .map(|s| s.as_ref())
+                    .collect::<Vec<&str>>()
+                    .join("/");
+                let res = match mods.iter().find(|(n, _)| *n == name) {
+                    Some((n, src)) => ImportResolution::Source {
+                        text: (*src).to_string(),
+                        canonical_id: (*n).to_string(),
+                    },
+                    None => ImportResolution::NotFound,
+                };
+                outcome = resolve_import(&mut inst, res);
+            }
+            Outcome::Completed(v) => break Terminal::Value(value_repr(v)),
+            Outcome::Raised(v, _) => break Terminal::Raised(inst.describe_raised(v).0),
+            Outcome::Faulted(f) => break Terminal::Faulted(f),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    (inst.output().to_vec(), terminal)
+}
+
+/// The determinism gate over **module loading + cross-module dispatch** (M5.10b): a
+/// multi-module program produces a bit-identical transcript and terminal whether or not a
+/// collection is forced at every safe point. Module namespaces, the wildcard/prelude
+/// resolution, the protocol registry, and the shared prelude cells are all index-addressed and
+/// scanned linearly (no hashing, no address identity, load-order numbering), so nothing a
+/// collection could perturb is observable. Covers exports + `m.member`, selective + wildcard
+/// import, a two-wildcard `ambiguous-import` (order-stable naming), and a protocol implemented
+/// in a wrapper module and dispatched cross-module through the qualified `P.member` form.
+#[test]
+fn gc_stress_determinism_over_module_loading_and_dispatch() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "import lib\nimport lib.*\nlib.hello()\nhello()\ngoodbye()\n",
+            &[(
+                "lib",
+                "to hello()\nprint(\"hi\")\nend\nto goodbye()\nprint(\"bye\")\nend\n",
+            )],
+        ),
+        (
+            "import a.*\nimport b.*\ndraw()\n",
+            &[
+                ("a", "to draw()\nprint(\"a\")\nend\n"),
+                ("b", "to draw()\nprint(\"b\")\nend\n"),
+            ],
+        ),
+        (
+            "import shapes.*\nprint(Shape.area(Square(side: 3)))\n",
+            &[(
+                "shapes",
+                "record Square with side end\n\
+                 protocol Shape\nfn area(self)\nend\nend\n\
+                 implement Shape for Square\nfn area(s)\nreturn s.side * s.side\nend\nend\n",
+            )],
+        ),
+    ];
+    for (main, mods) in cases {
+        let normal = drive_multi(main, mods, false);
+        let stressed = drive_multi(main, mods, true);
+        assert_eq!(
+            normal, stressed,
+            "GC-stress changed the transcript/terminal of {main:?}"
+        );
+    }
 }
 
 #[test]
