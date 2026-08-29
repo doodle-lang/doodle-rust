@@ -369,3 +369,27 @@ fn returning_a_value_after_a_non_local_exit_faults() {
     );
     assert_eq!(inst.state(), crate::machine::InstanceState::Faulted);
 }
+
+#[test]
+fn register_rejects_a_reserved_prelude_name() {
+    // A host intrinsic may not shadow a fixed prelude name (M5.10): `Error` and the well-known
+    // protocol names + `to_string` join the built-in type values as reserved — else the
+    // intrinsic would bind a silently shadowed cell in the shared prelude namespace.
+    let make = |name: &str| Intrinsic {
+        name: name.into(),
+        kind: BodyKind::Func,
+        params: Vec::new(),
+        body: ForeignBody::Sync(|_ctx| Ok(Some(Value::Int(0)))),
+    };
+    for name in ["Int", "Error", "Stringable", "Hashable", "to_string"] {
+        let mut reg = Registry::new();
+        assert!(
+            matches!(
+                reg.register(make(name)),
+                Err(HostError::CollidesWithBuiltin(_))
+            ),
+            "`{name}` should be a reserved prelude name"
+        );
+    }
+    assert!(Registry::new().register(make("draw")).is_ok());
+}

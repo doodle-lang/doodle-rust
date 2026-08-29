@@ -131,12 +131,25 @@ impl super::Resolver<'_> {
             return;
         };
         let (protocol, methods) = (protocol.clone(), methods.clone());
-        // A cross-module protocol is invisible to the resolver — its checks fall to load.
-        let Some(&(_, pnode)) = protos.iter().find(|(n, _)| n.as_ref() == protocol.as_ref()) else {
-            return;
-        };
-        let (chain, cross_ancestor) = self.same_module_chain(pnode, protos);
-        let members = self.effective_members(&chain);
+        // The member set to conform against: a **same-module** protocol (its `extends` chain),
+        // or the engine's **well-known** `Stringable`/`Hashable` (a fixed shape the resolver
+        // knows even though they aren't AST nodes — so a typo'd or mis-shaped `implement
+        // Stringable for T` is caught at author time, not silently no-op'd to the native
+        // default, M5.10). A user's own `protocol Stringable` shadows the well-known one (it is
+        // then in `protos`). Any other cross-module protocol is invisible → its checks fall to
+        // load. `cross_ancestor` gates the typo check; `check_missing` the required-member check
+        // (a well-known member has a native default, so an *empty* implement is complete).
+        let (members, cross_ancestor, check_missing) =
+            match protos.iter().find(|(n, _)| n.as_ref() == protocol.as_ref()) {
+                Some(&(_, pnode)) => {
+                    let (chain, cross) = self.same_module_chain(pnode, protos);
+                    (self.effective_members(&chain), cross, !cross)
+                }
+                None => match wellknown_members(&protocol) {
+                    Some(members) => (members, false, false),
+                    None => return,
+                },
+            };
         let mut provided: Vec<Box<str>> = Vec::new();
         for &method in &methods {
             let Node::Callable {
@@ -188,8 +201,9 @@ impl super::Resolver<'_> {
             }
         }
         // Every required member the chain declares must be provided (S-61). Skipped when an
-        // ancestor is cross-module, since the required set is then unknown.
-        if !cross_ancestor {
+        // ancestor is cross-module (required set unknown) or the protocol is well-known (its
+        // members have native defaults, so an empty implement is complete).
+        if check_missing {
             let missing: Vec<&EffMember> = members
                 .iter()
                 .filter(|e| e.required && !provided.iter().any(|p| p.as_ref() == e.name.as_ref()))
@@ -274,6 +288,26 @@ impl super::Resolver<'_> {
         }
         eff
     }
+}
+
+/// The fixed member shape of a **well-known** engine protocol (L§15), for conformance-checking
+/// an `implement Stringable`/`Hashable` the resolver can't see as an AST node (M5.10). Each has
+/// one member — `to_string` / `hash` — taking a single ordinary parameter (`self`), no block;
+/// `required: false` because the member carries a native default, so an empty `implement` is a
+/// valid (native-default) implementation. `None` for any other protocol name.
+fn wellknown_members(protocol: &str) -> Option<Vec<EffMember>> {
+    let member = match protocol {
+        "Stringable" => "to_string",
+        "Hashable" => "hash",
+        _ => return None,
+    };
+    Some(vec![EffMember {
+        name: member.into(),
+        arity: 1,
+        has_block: false,
+        required: false,
+        requiring: protocol.into(),
+    }])
 }
 
 /// The message for an implementation method whose shape doesn't match its member (S-31).

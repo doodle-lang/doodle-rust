@@ -488,3 +488,19 @@ fn a_fetched_module_with_static_errors_raises_module_load_error() {
         "message names the module: {message}"
     );
 }
+
+// A host that calls the capability `resolve()` on an instance suspended on an IMPORT (it should
+// call `resolve_import`) is a host-contract violation. In a debug build it is caught by the
+// guard's `debug_assert!` with a clear message (this test); in release the guard returns
+// `Faulted(Internal)` instead of the old `unreachable!` panic (M5.10 — reachable via the WASM
+// facade). Gated to debug builds, where CI runs, so `#[should_panic]` is exercised.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "resolve() requires an instance suspended on a capability")]
+fn resolve_on_an_import_suspension_is_a_contract_violation() {
+    let mut inst = instance("import a\n");
+    let first = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(first, Outcome::SuspendedImport(_)), "{first:?}");
+    let handle = inst.make_string(b"x").unwrap();
+    let _ = resolve(&mut inst, Resolution::Value(handle));
+}

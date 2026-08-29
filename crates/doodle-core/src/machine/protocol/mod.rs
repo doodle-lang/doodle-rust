@@ -244,13 +244,18 @@ impl Registry {
     }
 
     /// The member-name id `P.member` selects, if protocol `id` declares a member named
-    /// `name` (for the qualified form `P.member`, L§10.3). `None` if it does not.
+    /// `name` — its **own** members or any inherited along the `extends` chain (S-61:
+    /// requirements are transitive, so an inherited member is as much `P.member` as a
+    /// direct one, and the qualified form must reach it exactly as unqualified dispatch
+    /// does via `transitively_declares`). `None` if no protocol in the chain declares it.
     pub(crate) fn qualified_member(&self, id: u32, name: &str) -> Option<u32> {
-        self.protocols[id as usize]
-            .members
-            .iter()
-            .find(|m| self.members[m.member as usize].as_ref() == name)
-            .map(|m| m.member)
+        self.chain(id).into_iter().find_map(|p| {
+            self.protocols[p as usize]
+                .members
+                .iter()
+                .find(|m| self.members[m.member as usize].as_ref() == name)
+                .map(|m| m.member)
+        })
     }
 
     /// The `to`/`fn` kind and block-parameter presence of a member, and its ordinary
@@ -258,11 +263,21 @@ impl Registry {
     /// unqualified call binds against; unrelated protocols sharing a name are the
     /// ambiguity case and never reach binding).
     fn member_signature(&self, member: u32, protocol_filter: Option<u32>) -> Option<&MemberDecl> {
-        self.protocols
-            .iter()
-            .enumerate()
-            .filter(|(p, _)| protocol_filter.is_none_or(|f| *p as u32 == f))
-            .find_map(|(_, def)| def.members.iter().find(|m| m.member == member))
+        // A qualified `P.member` may name a member P *inherits* (S-61), so search the filtered
+        // protocol's whole `extends` chain — matching `qualified_member`, which resolves it, and
+        // dispatch, which finds its default along the chain. Unfiltered, any declarer serves.
+        match protocol_filter {
+            Some(f) => self.chain(f).into_iter().find_map(|p| {
+                self.protocols[p as usize]
+                    .members
+                    .iter()
+                    .find(|m| m.member == member)
+            }),
+            None => self
+                .protocols
+                .iter()
+                .find_map(|def| def.members.iter().find(|m| m.member == member)),
+        }
     }
 
     /// Whether `(protocol, ty)` has a registered `implement` block.

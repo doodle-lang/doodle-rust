@@ -217,12 +217,23 @@ pub(crate) fn enter_unary(
     let callee_resolved: &ResolvedModule = &modules[callee_module.0 as usize].resolved;
     let callable_id = heap.callable(cal).source_id() as usize;
     let info = &callee_resolved.callables[callable_id];
-    let Some(pi) = info.params.iter().find(|p| !p.is_block) else {
+    // A well-known unary member (`to_string`/`hash`) takes exactly its `self` — one ordinary
+    // parameter, no block. A malformed implementation (extra parameter, or a block) must raise
+    // rather than run with an unbound slot; the static conformance check catches a same-module
+    // one, this is the backstop for a native-protocol implementation the resolver can't see.
+    let ordinary = info.params.iter().filter(|p| !p.is_block).count();
+    let has_block = info.params.iter().any(|p| p.is_block);
+    if ordinary != 1 || has_block {
         return Err(arg_err(
             span,
-            "this `to_string` has no input to receive the value".into(),
+            "this implementation must take exactly one input (the value) and no block".into(),
         ));
-    };
+    }
+    let pi = info
+        .params
+        .iter()
+        .find(|p| !p.is_block)
+        .expect("one ordinary parameter, just checked");
     let mut slots: Vec<Option<Value>> = vec![None; info.slot_count as usize];
     slots[pi.slot as usize] = Some(crate::machine::record::copy_on_bind(arg, heap));
     let body = info.body;

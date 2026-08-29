@@ -219,13 +219,21 @@ pub fn resolve_slice(
     resolution: Resolution,
     fuel: Option<u64>,
 ) -> Outcome {
+    // A capability suspension is `Suspended` **and not** import-suspended: an import-suspended
+    // instance is also `Suspended`, so without the second half `resolve()` (the capability
+    // entry) would proceed into `take_capability` and hit its `unreachable!`. Use
+    // `resolve_import()` for an import — a mismatched call is a host-contract violation
+    // (debug-asserted; `Faulted(Internal)` in release, never a panic).
+    let capability_suspended =
+        matches!(instance.state(), InstanceState::Suspended) && !instance.is_import_suspended();
     debug_assert!(
-        matches!(instance.state(), InstanceState::Suspended),
-        "resolve() requires a Suspended instance (got {:?}); it continues a pending \
-         capability request (E§7.3/§7.5)",
-        instance.state()
+        capability_suspended,
+        "resolve() requires an instance suspended on a capability (got {:?}, import={}); use \
+         resolve_import() for an import (E§7.3/§7.5)",
+        instance.state(),
+        instance.is_import_suspended()
     );
-    if !matches!(instance.state(), InstanceState::Suspended) {
+    if !capability_suspended {
         return Outcome::Faulted(EngineFault::Internal);
     }
     match resolution {

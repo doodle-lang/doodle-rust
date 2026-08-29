@@ -602,3 +602,56 @@ end
 ";
     assert_eq!(resolve_diags(src), Vec::new());
 }
+
+// --- M5.10 exit-review fixes ---
+
+#[test]
+fn the_qualified_form_reaches_an_inherited_member() {
+    // `Child.greet` resolves `greet` inherited from `Parent` along the extends chain (S-61) —
+    // the qualified escape hatch works for an inherited member, like unqualified dispatch.
+    let out = run_output(
+        "record Q with n end\n\
+         protocol Parent\n    fn greet(self)\n        return \"hi\"\n    end\nend\n\
+         protocol Child extends Parent\n    fn tag(self)\n    end\nend\n\
+         implement Child for Q\n    fn tag(self)\n        return \"t\"\n    end\nend\n\
+         print(Child.greet(Q(n: 0)))\n",
+    );
+    assert_eq!(out, "hi\n");
+}
+
+#[test]
+fn a_misnamed_well_known_method_is_a_static_error() {
+    // A well-known native protocol (`Stringable`/`Hashable`) is conformance-checked too (M5.10):
+    // a method that isn't the member `to_string` is a static not-a-protocol-member, not a silent
+    // no-op to the native default.
+    let diags = resolve_diags(
+        "record Q with n end\n\
+         implement Stringable for Q\n    fn to_strong(self)\n        return \"x\"\n    end\nend\n",
+    );
+    assert!(
+        diags.iter().any(|(s, _)| s == "not-a-protocol-member"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn a_wrong_arity_well_known_method_is_a_static_error() {
+    let diags = resolve_diags(
+        "record Q with n end\n\
+         implement Hashable for Q\n    fn hash(self, salt)\n        return 1\n    end\nend\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|(s, _)| s == "protocol-signature-mismatch"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn an_empty_well_known_implement_is_valid() {
+    // A well-known member has a native default, so an empty `implement` is complete — no
+    // incomplete-implementation error.
+    let diags = resolve_diags("record Q with n end\nimplement Stringable for Q\nend\n");
+    assert!(diags.is_empty(), "{diags:?}");
+}

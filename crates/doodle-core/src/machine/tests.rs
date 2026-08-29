@@ -1123,6 +1123,17 @@ fn gc_stress_determinism_gate_over_the_corpus() {
          base(R(n: 0)) + ext(R(n: 0))\n",
         // A dispatch that raises (protocol-not-implemented) is GC-order-stable too.
         "record F with n end\nprotocol P\nfn v(self)\nend\nend\nv(F(n: 0))\n",
+        // The M5.7 DRIVEN paths must survive a collection at the driven-call window (the
+        // in-flight dict / the interpolation register): a dict keyed by an `implement
+        // Hashable` type (insert + lookup drive the user `hash`), and interpolation of an
+        // `implement Stringable` type (drives the user `to_string`). Native-hash keys and
+        // scalar interpolation take the synchronous seam and would miss these conts.
+        "record Point with x, y end\n\
+         implement Hashable for Point\nfn hash(self)\nreturn self.x\nend\nend\n\
+         let d = {}\nd[Point(x: 1, y: 2)] = 7\nd[Point(x: 1, y: 2)]\n",
+        "record P with n end\n\
+         implement Stringable for P\nfn to_string(self)\nreturn \"v!\"\nend\nend\n\
+         \"[{P(n: 1)}]\"\n",
     ];
     for src in corpus {
         let normal = drive_terminal(&mut load_source(src), false);
@@ -1342,6 +1353,16 @@ fn gc_stress_determinism_over_module_loading_and_dispatch() {
                 "record Square with side end\n\
                  protocol Shape\nfn area(self)\nend\nend\n\
                  implement Shape for Square\nfn area(s)\nreturn s.side * s.side\nend\nend\n",
+            )],
+        ),
+        // Cross-module `with` (S-39, M5.9): the user's `with` rebinds the wrapper's parameter
+        // cell (a live alias) and the wrapper reads it — the aliased cell and the `dyn_stack`
+        // saved value must stay rooted across a collection inside the block.
+        (
+            "import turtle.*\nwith pen_color = 5 do\nshow()\nend\n",
+            &[(
+                "turtle",
+                "parameter pen_color = 0\nto show()\nprint(pen_color)\nend\n",
             )],
         ),
     ];

@@ -139,6 +139,17 @@ impl Resolver<'_> {
                 // to runtime (`control::param_cell`, S-39, ratified 2026-08-28). Only when
                 // nothing could supply it (no wildcard, not a selective import) is a free
                 // `with` target a static "no such parameter" — the typo is caught.
+                //
+                // The implicit prelude wildcard (every module has one, M5.8) is intentionally
+                // NOT counted here: the prelude holds only `const` bindings (type values,
+                // `Error`, protocols, intrinsics) and never a `parameter` (D-M5-3 — a native
+                // module exports no `parameter` cells), so a `with` on a prelude name is always
+                // a non-parameter. Rejecting it statically therefore never rejects a *valid*
+                // `with` — at worst it phrases a `with` on, say, `print` as "none is declared"
+                // rather than the runtime "is a constant". Sharpening that message needs the
+                // resolver to know the prelude name set (the D-M5-6 territory); until then the
+                // static typo-catch is kept, as ratified. If the prelude ever gains a parameter,
+                // this must instead always defer (treat `could_import` as always true).
                 None => {
                     let could_import = self.has_wildcard_import
                         || self.selective_imports.iter().any(|(n, _)| **n == *name);

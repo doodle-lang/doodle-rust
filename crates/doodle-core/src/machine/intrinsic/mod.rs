@@ -115,6 +115,18 @@ pub struct Registry {
     modules: Vec<super::native::NativeModule>,
 }
 
+/// Whether `name` is a **reserved prelude name** a host intrinsic may not shadow: a built-in
+/// type value ([`types::BUILTINS`](super::types::BUILTINS)) or one of the fixed non-type prelude
+/// bindings the engine installs — `Error` (the built-in error record) and the well-known
+/// `Stringable`/`Hashable` protocols + the `to_string` dispatcher (`machine::load::build_prelude`
+/// / `protocol::seed_wellknown`). All share the one prelude module, and a module's namespace is
+/// a first-match linear scan, so a same-named intrinsic (appended last) would bind a second,
+/// permanently shadowed cell — rejected at registration rather than silently dead.
+fn reserved_prelude_name(name: &str) -> bool {
+    const FIXED: &[&str] = &["Error", "Stringable", "Hashable", "to_string"];
+    super::types::BUILTINS.iter().any(|(n, _)| *n == name) || FIXED.contains(&name)
+}
+
 impl Registry {
     /// An empty registry.
     pub fn new() -> Self {
@@ -125,13 +137,10 @@ impl Registry {
     }
 
     /// Registers `intrinsic`, or a [`HostError`] if its name duplicates a prior
-    /// registration or a built-in type value (S-43). The registry is consumed into
+    /// registration or a reserved prelude name (S-43). The registry is consumed into
     /// the instance at load, so there is no "after load" registration to reject here.
     pub fn register(&mut self, intrinsic: Intrinsic) -> Result<(), HostError> {
-        if super::types::BUILTINS
-            .iter()
-            .any(|(n, _)| *n == &*intrinsic.name)
-        {
+        if reserved_prelude_name(&intrinsic.name) {
             return Err(HostError::CollidesWithBuiltin(intrinsic.name.clone()));
         }
         if self.intrinsics.iter().any(|i| i.name == intrinsic.name) {

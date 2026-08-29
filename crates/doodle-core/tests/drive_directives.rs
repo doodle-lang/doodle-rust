@@ -166,7 +166,7 @@ fn re_driving_a_terminal_instance_is_a_contract_violation() {
 }
 
 #[test]
-#[should_panic(expected = "Suspended")]
+#[should_panic(expected = "suspended on a capability")]
 fn resolving_a_non_suspended_instance_is_a_contract_violation() {
     let mut inst = instance("1\n");
     // Nothing has suspended (capabilities are M2b.4), so resolve is misuse.
