@@ -74,6 +74,7 @@ pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };
 
+use crate::diag::Diagnostic;
 use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -253,6 +254,18 @@ pub(crate) struct Machine {
     /// handler) and **polled at each safe point** ([`poll_cancel`](Self::poll_cancel));
     /// once set, the drive arms the cancel unwind (§12) and faults `Cancelled`.
     cancel: Arc<AtomicBool>,
+    /// The instance-scoped **load-diagnostics record** (E§3.2/§8, S-63): every front-end
+    /// diagnostic the engine produces for every module the instance loads or attempts —
+    /// the entry module's prelude-shadowing at load, each imported module's front-end
+    /// diagnostics (parse + resolve, errors included) plus its prelude-shadowing as it
+    /// loads mid-drive. Monotonic (only appended), deterministically ordered (load order
+    /// across modules, then producer order — nondecreasing span start — within a module),
+    /// and a pure function of the run's inputs (sources + prelude exports), so it is
+    /// replay-stable. Engine-owned and **host-facing**, read by pull through
+    /// [`Instance::load_diagnostics`]: it is not program data (not heap-charged, not
+    /// visible to Doodle code). Errors here keep their control-flow channels (`LoadError`;
+    /// an imported module's `module-load-error`); the record is the one *display* surface.
+    load_diagnostics: Vec<Diagnostic>,
 }
 
 /// A loaded module (L§11.3, E§6, AD5): its resolved AST and its module-scope
@@ -399,14 +412,6 @@ impl Instance {
         self.machine.handles.release(handle)
     }
 
-    /// The value a handle names, generation-checked (E§4.2). The public typed
-    /// readers (`as_int`, `kind_of`, …) build on this at M2b; this crate-internal
-    /// form is what the M2a handle tests read with.
-    #[cfg(test)]
-    pub(crate) fn resolve(&self, handle: Handle) -> Result<Value, HandleError> {
-        self.machine.handles.resolve(handle)
-    }
-
     /// Sets the lifecycle state (the drive loop drives the transitions).
     pub(crate) fn set_state(&mut self, state: InstanceState) {
         self.state = state;
@@ -422,49 +427,6 @@ impl Instance {
     /// memory), which the PTC tests assert.
     pub(crate) fn frame_depth(&self) -> usize {
         self.machine.frames.len()
-    }
-
-    /// The top frame's tail-iteration counter (E§8.3), or `None` when halted.
-    #[cfg(test)]
-    pub(crate) fn top_frame_tail_count(&self) -> Option<u64> {
-        self.machine.frames.last().map(|f| f.tail_count)
-    }
-
-    /// Forces a collection now (machine-design §15), independent of the trigger
-    /// threshold — for tests that drive GC at chosen points to prove reachable state
-    /// survives and garbage is reclaimed.
-    #[cfg(test)]
-    pub(crate) fn force_collect(&mut self) {
-        // Every loaded module's namespace cells are permanent roots on the machine
-        // (`module_root_cells`), so a collection roots all modules' globals regardless of
-        // which module is executing (AD5).
-        gc::collect(&mut self.heap, &self.machine);
-    }
-
-    /// Makes every safe point collect (machine-design §15) — including those inside a
-    /// reentrant nested drive, which the between-`step` `force_collect` idiom cannot
-    /// reach — so a GC-stress test can collect at a transiently-rooted window.
-    #[cfg(test)]
-    pub(crate) fn collect_at_every_safe_point(&mut self) {
-        self.machine.gc_every_safe_point = true;
-    }
-
-    /// The number of live heap objects across all slabs (for GC tests).
-    #[cfg(test)]
-    pub(crate) fn live_object_count(&self) -> u32 {
-        self.heap.live_objects()
-    }
-
-    /// The described `kind` of the exception each `failed` module retains (S-8) — for
-    /// asserting a failed load retained the right value (the re-raise itself is latent
-    /// until a reload path exists, M9b).
-    #[cfg(test)]
-    pub(crate) fn failed_module_error_kinds(&self) -> Vec<String> {
-        self.machine
-            .load
-            .failed_values()
-            .map(|v| exception::describe(&self.heap, self.machine.error_type, v).0)
-            .collect()
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:

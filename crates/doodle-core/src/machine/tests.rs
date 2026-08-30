@@ -41,7 +41,60 @@ impl Machine {
             gc_every_safe_point: false,
             cancel: Arc::new(AtomicBool::new(false)),
             limits,
+            load_diagnostics: Vec::new(),
         }
+    }
+}
+
+/// Crate-internal, test-only accessors on [`Instance`] (they live here, in the
+/// length-exempt test module, rather than in `machine.rs`). Only reachable from the
+/// crate's own `#[cfg(test)]` code — an external integration test links the non-test
+/// build, so these are invisible there (which is why the GC-stress hooks below can only
+/// be driven from unit tests).
+impl Instance {
+    /// The value a handle names, generation-checked (E§4.2). The public typed readers
+    /// (`as_int`, `kind_of`, …) build on this; this crate-internal form is what the M2a
+    /// handle tests read with.
+    pub(crate) fn resolve(&self, handle: Handle) -> Result<Value, HandleError> {
+        self.machine.handles.resolve(handle)
+    }
+
+    /// The top frame's tail-iteration counter (E§8.3), or `None` when halted.
+    pub(crate) fn top_frame_tail_count(&self) -> Option<u64> {
+        self.machine.frames.last().map(|f| f.tail_count)
+    }
+
+    /// Forces a collection now (machine-design §15), independent of the trigger
+    /// threshold — for tests that drive GC at chosen points to prove reachable state
+    /// survives and garbage is reclaimed.
+    pub(crate) fn force_collect(&mut self) {
+        // Every loaded module's namespace cells are permanent roots on the machine
+        // (`module_root_cells`), so a collection roots all modules' globals regardless of
+        // which module is executing (AD5).
+        gc::collect(&mut self.heap, &self.machine);
+    }
+
+    /// Makes every safe point collect (machine-design §15) — including those inside a
+    /// reentrant nested drive, which the between-`step` `force_collect` idiom cannot
+    /// reach — so a GC-stress test can collect at a transiently-rooted window.
+    pub(crate) fn collect_at_every_safe_point(&mut self) {
+        self.machine.gc_every_safe_point = true;
+    }
+
+    /// The number of live heap objects across all slabs (for GC tests).
+    pub(crate) fn live_object_count(&self) -> u32 {
+        self.heap.live_objects()
+    }
+
+    /// The described `kind` of the exception each `failed` module retains (S-8) — for
+    /// asserting a failed load retained the right value (the re-raise itself is latent
+    /// until a reload path exists, M9b).
+    pub(crate) fn failed_module_error_kinds(&self) -> Vec<String> {
+        self.machine
+            .load
+            .failed_values()
+            .map(|v| exception::describe(&self.heap, self.machine.error_type, v).0)
+            .collect()
     }
 }
 

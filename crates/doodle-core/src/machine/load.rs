@@ -9,6 +9,7 @@ use super::{
     HandleTable, Heap, Instance, InstanceState, Limits, Machine, ModuleLoad, ResolvedModule,
     TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local, ring, types,
 };
+use crate::diag::{Diagnostic, DiagnosticCode};
 use crate::heap::CellKind;
 use crate::span::ModuleId;
 
@@ -180,6 +181,18 @@ impl Instance {
         // (`machine/import.rs`). Native/prelude modules never resolve free names, so they get
         // no wildcard.
         modules[0].wildcards.push(prelude);
+        // The entry module's load-diagnostics contribution (S-63): its prelude-shadowing
+        // warnings (a global that hides a prelude name, L§5.1), ordered by span. The entry
+        // module's *lexical* front-end diagnostics were produced by the host's own resolve
+        // (this constructor takes an already-resolved module); the host holds them and the
+        // facade seeds them into this record when it wires the display surface (M6.9). Each
+        // imported module's diagnostics append here as it loads (`machine/import.rs`).
+        let mut load_diagnostics = prelude_shadowing(
+            modules[0].resolved.as_ref(),
+            &modules[prelude.0 as usize].namespace,
+            canonical_id,
+        );
+        load_diagnostics.sort_by_key(|d| d.span.map_or(0, |s| s.start));
         Instance {
             modules,
             heap,
@@ -209,6 +222,7 @@ impl Instance {
                 gc_every_safe_point: false,
                 cancel: Arc::new(AtomicBool::new(false)),
                 limits,
+                load_diagnostics,
             },
             state: InstanceState::Ready,
         }
@@ -298,4 +312,40 @@ fn cell_kind_of(kind: crate::resolve::GlobalKind) -> CellKind {
         | GlobalKind::Protocol
         | GlobalKind::Module => CellKind::Const,
     }
+}
+
+/// The **prelude-shadowing** warnings for one module (L§5.1, D-M5-6/S-63): a module-level
+/// declaration whose name also names a **prelude** export hides that built-in (the module's
+/// own declaration beats the implicit prelude wildcard, S-60), which is allowed but worth
+/// flagging. `prelude_ns` is the prelude module's namespace (its export names); the lookup
+/// is a small linear scan (no hashing — determinism is by construction, and the sets are
+/// tiny). Returned unordered; the caller sorts each module's contribution by span (S-63).
+/// User-*wildcard* shadowing is not covered here — a wildcard's export names are known only
+/// when it loads, so that stays the linter's/import-time job.
+pub(super) fn prelude_shadowing(
+    module: &ResolvedModule,
+    prelude_ns: &[(Box<str>, CellIdx)],
+    id: ModuleId,
+) -> Vec<Diagnostic> {
+    module
+        .globals
+        .iter()
+        .filter(|g| {
+            prelude_ns
+                .iter()
+                .any(|(name, _)| name.as_ref() == g.name.as_ref())
+        })
+        .map(|g| {
+            Diagnostic::warning(
+                DiagnosticCode::Shadowing,
+                id,
+                module.ast.span(g.decl),
+                format!(
+                    "this `{name}` hides the built-in `{name}` from the prelude — that's \
+                     allowed, but check you meant to",
+                    name = g.name
+                ),
+            )
+        })
+        .collect()
 }

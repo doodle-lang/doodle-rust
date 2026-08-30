@@ -62,6 +62,22 @@ impl Instance {
         let out = crate::resolve::resolve(parsed.ast, parsed.root, id);
         let module = out.module;
         let static_error = parse_error.or_else(|| first_error(&out.diagnostics));
+        // Record this module's front-end diagnostics in the instance load-diagnostics
+        // record (S-63): its parse + resolve diagnostics (errors included — a failed
+        // import's diagnostics belong in the display surface, alongside its
+        // `module-load-error`) plus its prelude-shadowing (L§5.1), ordered by span. Errors
+        // still drive control flow through `static_error` below; this is the *display*
+        // surface, appended in module load order after the entry module's.
+        let prelude = self.machine.prelude;
+        let mut diags = parsed.diagnostics;
+        diags.extend(out.diagnostics);
+        diags.extend(super::load::prelude_shadowing(
+            &module,
+            &self.modules[prelude.0 as usize].namespace,
+            id,
+        ));
+        diags.sort_by_key(|d| d.span.map_or(0, |s| s.start));
+        self.machine.load_diagnostics.extend(diags);
         let namespace = super::load::seed_namespace(&module, &mut self.heap);
         // This module's namespace cells join the instance's permanent GC roots (AD5): its
         // globals live for the instance, so a later collection during any module's step

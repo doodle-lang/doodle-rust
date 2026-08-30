@@ -13,6 +13,7 @@ use super::error::{Trace, TraceFrame};
 use super::frame::FrameKind;
 use super::{Handle, Instance, Machine, Value};
 use crate::ast::Node;
+use crate::diag::Diagnostic;
 use crate::heap::Heap;
 use crate::machine::cont::Cont;
 use crate::resolve::ResolvedModule;
@@ -132,6 +133,23 @@ impl Instance {
                     .map(|node| self.current_resolved().ast.span(node))
             })
             .collect()
+    }
+
+    /// The instance **load-diagnostics record** (E§3.2/§8, S-63), read by pull: the
+    /// front-end diagnostics for every module the instance has loaded or attempted, from
+    /// `since` onward. The host tracks its cursor as `since + result.len()`, so polling at
+    /// successive safe points stays linear. Warnings on a successful load (prelude
+    /// shadowing, L§5.1) and every imported module's load-time diagnostics (parse +
+    /// resolve, **errors included**) accumulate here in deterministic order — load order
+    /// across modules, then producer order (nondecreasing span start) within a module. It
+    /// is the one *display* surface: errors still drive control flow through their own
+    /// channels (a `LoadError` for the entry module; a `module-load-error` raised in the
+    /// importer for a broken import). The record is engine-owned, not program data — not
+    /// heap-charged and not visible to Doodle code. Readable right after `load` (a `Ready`
+    /// instance) and at any stopped state; a host reads it when stopped, never mid-drive.
+    pub fn load_diagnostics(&self, since: usize) -> &[Diagnostic] {
+        let record = &self.machine.load_diagnostics;
+        &record[since.min(record.len())..]
     }
 
     /// The span the construct a continuation is at occupies (E§8.1, MD §17), or `None`
