@@ -1,0 +1,11 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: duplicate-argument
+#! expect-out: a
+fn f(a) a end
+try
+  f(1, a: 2)
+rescue e
+  print(e.kind)
+  print(e.details["parameter"])
+end

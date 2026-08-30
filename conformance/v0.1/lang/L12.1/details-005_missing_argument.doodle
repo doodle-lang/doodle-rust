@@ -1,0 +1,15 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: missing-argument
+#! expect-out: f
+#! expect-out: b
+# S-58: argument-error split into four flat kinds; missing-argument names the callee and
+# the unbound parameter.
+fn f(a, b) a end
+try
+  f(1)
+rescue e
+  print(e.kind)
+  print(e.details["callee"])
+  print(e.details["parameter"])
+end

@@ -1,0 +1,13 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: too-many-arguments
+#! expect-out: 1
+#! expect-out: 2
+fn f(a) a end
+try
+  f(1, 2)
+rescue e
+  print(e.kind)
+  print(e.details["expected"])
+  print(e.details["got"])
+end

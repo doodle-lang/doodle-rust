@@ -47,41 +47,62 @@ pub(crate) fn dispatch_call(
     let mut ordered: Vec<Option<Value>> = vec![None; ordinary.len()];
     let mut pos = 0usize;
     for (arg, &val) in args.iter().zip(arg_values.iter()) {
-        let p = match arg {
-            Arg::Positional(_) => {
-                if pos >= ordinary.len() {
-                    return Err(arg_err(span, "too many arguments for this call".into()));
-                }
-                let p = pos;
-                pos += 1;
-                p
-            }
-            Arg::Keyword { name, .. } => {
-                match ordinary.iter().position(|n| n.as_ref() == name.as_ref()) {
-                    Some(p) => p,
-                    None => {
-                        return Err(arg_err(
+        let p =
+            match arg {
+                Arg::Positional(_) => {
+                    if pos >= ordinary.len() {
+                        let got = args
+                            .iter()
+                            .filter(|a| matches!(a, Arg::Positional(_)))
+                            .count();
+                        return Err(Raise::new(
+                            ExceptionKind::TooManyArguments,
+                            "too many arguments for this call",
                             span,
-                            format!("`{name}` isn't a parameter of this protocol member"),
-                        ));
+                        )
+                        .with_details(exc::too_many_arguments_details(None, ordinary.len(), got)));
+                    }
+                    let p = pos;
+                    pos += 1;
+                    p
+                }
+                Arg::Keyword { name, .. } => {
+                    match ordinary.iter().position(|n| n.as_ref() == name.as_ref()) {
+                        Some(p) => p,
+                        None => {
+                            return Err(Raise::new(
+                                ExceptionKind::UnknownKeyword,
+                                format!("`{name}` isn't a parameter of this protocol member"),
+                                span,
+                            )
+                            .with_details(
+                                exc::unknown_keyword_details(None, name.as_ref(), &ordinary),
+                            ));
+                        }
                     }
                 }
-            }
-        };
+            };
         if ordered[p].is_some() {
-            return Err(arg_err(
-                span,
+            return Err(Raise::new(
+                ExceptionKind::DuplicateArgument,
                 format!("`{}` was given more than once", ordinary[p]),
-            ));
+                span,
+            )
+            .with_details(exc::parameter_details(None, ordinary[p].as_ref())));
         }
         ordered[p] = Some(val);
     }
     // The dispatch argument is the value bound to the first parameter (S-31).
     let Some(first) = ordered.first().copied().flatten() else {
-        return Err(arg_err(
+        let parameter = ordinary
+            .first()
+            .map_or("the first argument", |n| n.as_ref());
+        return Err(Raise::new(
+            ExceptionKind::MissingArgument,
+            "this protocol call is missing its first argument",
             span,
-            "this protocol call is missing its first argument".into(),
-        ));
+        )
+        .with_details(exc::parameter_details(None, parameter)));
     };
     let dt = dispatch_type_of(first, heap, modules, &machine.intrinsics);
     match machine.protocols.resolve(member, dt, protocol_filter, heap) {
@@ -93,10 +114,12 @@ pub(crate) fn dispatch_call(
                 match slot {
                     Some(v) => values.push(v),
                     None => {
-                        return Err(arg_err(
-                            span,
+                        return Err(Raise::new(
+                            ExceptionKind::MissingArgument,
                             format!("missing argument `{}` for this call", ordinary[i]),
-                        ));
+                            span,
+                        )
+                        .with_details(exc::parameter_details(None, ordinary[i].as_ref())));
                     }
                 }
             }
@@ -187,13 +210,23 @@ fn enter_dispatch_target(
             continue;
         }
         let Some(&value) = ordered.get(next) else {
-            return Err(arg_err(span, "this call is missing an argument".into()));
+            return Err(Raise::new(
+                ExceptionKind::MissingArgument,
+                "this call is missing an argument",
+                span,
+            )
+            .with_details(exc::parameter_details(None, pi.name.as_ref())));
         };
         slots[pi.slot as usize] = Some(crate::machine::record::copy_on_bind(value, heap));
         next += 1;
     }
     if next != ordered.len() {
-        return Err(arg_err(span, "too many arguments for this call".into()));
+        return Err(Raise::new(
+            ExceptionKind::TooManyArguments,
+            "too many arguments for this call",
+            span,
+        )
+        .with_details(exc::too_many_arguments_details(None, next, ordered.len())));
     }
     let block_param = block::bind_block_argument(resolved, machine, call, &info.params, span)?;
     let body = info.body;
@@ -238,10 +271,18 @@ pub(crate) fn enter_unary(
     let ordinary = info.params.iter().filter(|p| !p.is_block).count();
     let has_block = info.params.iter().any(|p| p.is_block);
     if ordinary != 1 || has_block {
-        return Err(arg_err(
-            span,
-            "this implementation must take exactly one input (the value) and no block".into(),
-        ));
+        // A malformed native-protocol implementation of a unary member: too few ordinary
+        // parameters (missing the value) or too many (extra parameter/block).
+        let message = "this implementation must take exactly one input (the value) and no block";
+        let raise = if ordinary == 0 {
+            Raise::new(ExceptionKind::MissingArgument, message, span)
+                .with_details(exc::parameter_details(None, "the value"))
+        } else {
+            let got = ordinary + usize::from(has_block);
+            Raise::new(ExceptionKind::TooManyArguments, message, span)
+                .with_details(exc::too_many_arguments_details(None, 1, got))
+        };
+        return Err(raise);
     }
     let pi = info
         .params
@@ -266,9 +307,4 @@ pub(crate) fn enter_unary(
         dyn_depth,
     ));
     Ok(())
-}
-
-/// An argument-shape raise during dispatch (L§8.3, L§10.3).
-fn arg_err(span: Span, message: String) -> Raise {
-    Raise::new(ExceptionKind::ArgumentError, message, span)
 }

@@ -184,17 +184,24 @@ fn a_procedure_result_used_as_a_value_raises() {
     );
 }
 
-/// Each L§8.3 argument-binding mismatch raises an argument error.
+/// Each L§8.3 argument-binding mismatch raises its own kind (the four that replaced
+/// `argument-error`, S-58): one fact per slug.
 #[test]
 fn argument_mismatches_raise() {
     // Missing a required argument.
-    assert_raises("fn f(a, b) a + b end\nf(1)\n", ExceptionKind::ArgumentError);
+    assert_raises(
+        "fn f(a, b) a + b end\nf(1)\n",
+        ExceptionKind::MissingArgument,
+    );
     // Too many positional arguments.
-    assert_raises("fn f(a) a end\nf(1, 2)\n", ExceptionKind::ArgumentError);
+    assert_raises("fn f(a) a end\nf(1, 2)\n", ExceptionKind::TooManyArguments);
     // An unknown keyword.
-    assert_raises("fn f(a) a end\nf(z: 1)\n", ExceptionKind::ArgumentError);
+    assert_raises("fn f(a) a end\nf(z: 1)\n", ExceptionKind::UnknownKeyword);
     // The same parameter bound twice (positional then keyword).
-    assert_raises("fn f(a) a end\nf(1, a: 2)\n", ExceptionKind::ArgumentError);
+    assert_raises(
+        "fn f(a) a end\nf(1, a: 2)\n",
+        ExceptionKind::DuplicateArgument,
+    );
 }
 
 /// Calling a `to`/`fn` before its declaration statement has executed raises —

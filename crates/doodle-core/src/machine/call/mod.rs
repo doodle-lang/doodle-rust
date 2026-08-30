@@ -18,13 +18,19 @@
 
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
-use super::frame::{Frame, FrameKind, Local};
+use super::frame::{Frame, FrameKind};
 use super::step::take_value;
-use super::{LoadedModule, Machine, Value, block, control, intrinsic, local};
+use super::{LoadedModule, Machine, Value, block, intrinsic, local};
 use crate::ast::{Arg, Node, NodeId, Param};
-use crate::heap::{CalObj, CallableTarget, Heap};
-use crate::resolve::{BodyKind, ParamInfo, Resolution, ResolvedModule};
+use crate::heap::{CallableTarget, Heap};
+use crate::resolve::{BodyKind, ParamInfo, ResolvedModule};
 use crate::span::Span;
+
+mod frame;
+
+// Callable-value construction + frame return live in `frame` (split for length); their
+// public paths stay `call::…` so callers are unchanged.
+pub(crate) use frame::{define_callable, make_callable, return_from_callable};
 
 /// Schedules a call (an expression). A `body(args)` invocation of the current
 /// callable's block parameter (§8.5) takes the block path (`block.rs`); every
@@ -178,6 +184,7 @@ fn apply(
     let info = &callee_resolved.callables[callable_id];
     let params = &info.params;
     let body = info.body;
+    let callee = callee_name(callee_resolved, info.decl);
     let (slots, filled) = bind_arguments(
         resolved,
         heap,
@@ -185,6 +192,7 @@ fn apply(
         params,
         info.slot_count,
         &arg_values,
+        callee,
         span,
     )?;
 
@@ -199,10 +207,15 @@ fn apply(
         if pi.has_default {
             defaults.push((pi.slot, default_expr(callee_resolved, info.decl, i)));
         } else {
-            return Err(arg_error(
-                span,
+            return Err(Raise::new(
+                ExceptionKind::MissingArgument,
                 format!("missing argument `{}` for this call", pi.name),
-            ));
+                span,
+            )
+            .with_details(super::exception::parameter_details(
+                callee,
+                pi.name.as_ref(),
+            )));
         }
     }
 
@@ -292,6 +305,7 @@ fn reuses_current_frame(
 /// (§8.5), so a positional or keyword argument targeting one raises. Too many
 /// arguments, an unknown keyword, and a duplicate binding each raise. Shared by
 /// callable [`apply`] and block invocation ([`block`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_arguments(
     resolved: &ResolvedModule,
     heap: &mut Heap,
@@ -299,6 +313,7 @@ pub(crate) fn bind_arguments(
     params: &[ParamInfo],
     slot_count: u16,
     arg_values: &[Value],
+    callee: Option<&str>,
     span: Span,
 ) -> Result<(Vec<Option<Value>>, Vec<bool>), Raise> {
     let mut slots: Vec<Option<Value>> = vec![None; slot_count as usize];
@@ -314,28 +329,64 @@ pub(crate) fn bind_arguments(
             // is last, so reaching it means there are too many positionals.
             Arg::Positional(_) => {
                 if pos >= params.len() || params[pos].is_block {
-                    return Err(arg_error(span, "too many arguments for this call"));
+                    let expected = params.iter().filter(|p| !p.is_block).count();
+                    let got = args
+                        .iter()
+                        .filter(|a| matches!(a, Arg::Positional(_)))
+                        .count();
+                    return Err(Raise::new(
+                        ExceptionKind::TooManyArguments,
+                        "too many arguments for this call",
+                        span,
+                    )
+                    .with_details(
+                        super::exception::too_many_arguments_details(callee, expected, got),
+                    ));
                 }
                 let p = pos;
                 pos += 1;
                 p
             }
             Arg::Keyword { name, .. } => match params.iter().position(|pi| *pi.name == **name) {
+                // The block parameter cannot be bound by keyword — from the caller's side
+                // that name is not a keyword-bindable parameter, so it reads as unknown.
                 Some(p) if params[p].is_block => {
-                    return Err(arg_error(
-                        span,
+                    return Err(Raise::new(
+                        ExceptionKind::UnknownKeyword,
                         format!("`{name}` takes a `do … end` block, not a keyword argument"),
-                    ));
+                        span,
+                    )
+                    .with_details(super::exception::unknown_keyword_details(
+                        callee,
+                        name.as_ref(),
+                        &keyword_parameters(params),
+                    )));
                 }
                 Some(p) => p,
-                None => return Err(arg_error(span, format!("`{name}` isn't a parameter here"))),
+                None => {
+                    return Err(Raise::new(
+                        ExceptionKind::UnknownKeyword,
+                        format!("`{name}` isn't a parameter here"),
+                        span,
+                    )
+                    .with_details(super::exception::unknown_keyword_details(
+                        callee,
+                        name.as_ref(),
+                        &keyword_parameters(params),
+                    )));
+                }
             },
         };
         if filled[p] {
-            return Err(arg_error(
-                span,
+            return Err(Raise::new(
+                ExceptionKind::DuplicateArgument,
                 format!("`{}` was given more than once", params[p].name),
-            ));
+                span,
+            )
+            .with_details(super::exception::parameter_details(
+                callee,
+                params[p].name.as_ref(),
+            )));
         }
         // Binding an argument to a parameter copies a value record (L§4.14).
         slots[params[p].slot as usize] = Some(super::record::copy_on_bind(val, heap));
@@ -358,116 +409,6 @@ pub(crate) fn bind_default(
     let value = super::record::copy_on_bind(take_value(machine, resolved.ast.span(default))?, heap);
     let top = machine.frames.len() - 1;
     local::write(heap, &mut machine.frames[top].locals[slot as usize], value);
-    Ok(())
-}
-
-/// Interns and binds a named `to`/`fn` declaration to its target (a module cell
-/// or a frame slot). Runs when the declaration statement executes, so a call
-/// before then reads an uninitialized binding — the temporal dead zone (M2a.4a).
-///
-/// A **cell-boxed local** declaration needs **letrec** order: the callable's body
-/// may reference its own name (a self-recursive helper — the reference crosses the
-/// callable's `fn` boundary, so it resolves as a capture, §7), so the callable must
-/// capture the **same** cell the binding fills. We therefore give the slot a fresh
-/// cell *before* interning the callable (so `make_callable`'s self-capture reads it,
-/// and each loop iteration's helper is a distinct binding, L§5.4), then fill it.
-pub(crate) fn define_callable(
-    resolved: &ResolvedModule,
-    heap: &mut Heap,
-    machine: &mut Machine,
-    namespace: &control::Namespace,
-    decl: NodeId,
-) {
-    if let Some(Resolution::LocalSlot(slot)) = resolved.resolutions[decl.0 as usize] {
-        let top = machine.frames.len() - 1;
-        if matches!(machine.frames[top].locals[slot as usize], Local::Boxed(_)) {
-            let cell = heap.alloc_cell(crate::heap::CellKind::Let, None);
-            machine.frames[top].locals[slot as usize] = Local::Boxed(cell);
-            let value = make_callable(resolved, heap, machine, decl);
-            heap.cell_mut(cell).value = Some(value);
-            return;
-        }
-    }
-    // A direct slot or a module global: intern the callable, then bind it.
-    let value = make_callable(resolved, heap, machine, decl);
-    control::bind_decl(resolved, heap, machine, namespace, decl, value);
-}
-
-/// Interns a callable value for the `Callable` node `decl`: one canonical
-/// [`CalObj`] naming its `CallableId` (machine-design §8), with its **captured
-/// cells** read from the creating environment (representation B, §7/§10). A plain
-/// `to`/`fn`'s declaration runs once, so this is its single canonical value; an
-/// anonymous `fn` (a closure) gets a fresh value — with fresh captures — per
-/// evaluation.
-pub(crate) fn make_callable(
-    resolved: &ResolvedModule,
-    heap: &mut Heap,
-    machine: &Machine,
-    decl: NodeId,
-) -> Value {
-    let callable_id = resolved
-        .callables
-        .iter()
-        .position(|c| c.decl == decl)
-        .expect("a Callable node has a resolved CallableInfo");
-    // Each capture reads a cell from the creating environment: chase the creating
-    // frame's defining chain `hops` (§7), then take the cell-boxed source slot's cell.
-    let captures: Vec<_> = resolved.callables[callable_id]
-        .captures
-        .iter()
-        .map(|cs| {
-            let owner = control::outer_frame(machine, cs.from.hops);
-            local::cell_of(machine.frames[owner].locals[cs.from.slot as usize])
-        })
-        .collect();
-    let cal = heap.alloc_callable(CalObj {
-        module: resolved.canonical_id,
-        target: CallableTarget::Source(callable_id as u32),
-        captures,
-    });
-    Value::Callable(cal)
-}
-
-/// Delivers a frame's result when its body drains to the [`Cont::ReturnBarrier`],
-/// then pops it. A `fn` leaves its value in the register; a `to` yields Void
-/// (L§8.4), so the register is cleared; a block yields its last expression's value
-/// to its invoker (§8.5), so the register is kept. A `fn` reaching the barrier with
-/// a Void register **fell off the end** (L§8.4) and raises — the runtime backstop
-/// for the fn-tail-`to` case the resolver cannot catch statically (S-55).
-pub(crate) fn return_from_callable(
-    resolved: &ResolvedModule,
-    heap: &Heap,
-    machine: &mut Machine,
-) -> Result<(), Raise> {
-    let frame = machine.frames.pop().expect("return with no frame");
-    match frame.kind {
-        FrameKind::Callable { cal } => {
-            let id = heap.callable(cal).source_id() as usize;
-            match resolved.callables[id].kind {
-                // A procedure yields no value; discard the body's final transient value.
-                BodyKind::Proc => machine.reg = None,
-                // A function's value is the register's current contents (its final
-                // expression, or an executed `return expr`) — Void means it fell off.
-                BodyKind::Func => {
-                    if machine.reg.is_none() {
-                        return Err(Raise::new(
-                            ExceptionKind::FunctionFellOffEnd,
-                            "this function reached its end without producing a value",
-                            resolved.ast.span(resolved.callables[id].decl),
-                        ));
-                    }
-                }
-                other => unreachable!("callable frame over a non-callable body: {other:?}"),
-            }
-        }
-        // A block delivers its last expression's value to its invoker; keep `reg`.
-        FrameKind::Block { .. } => {}
-        FrameKind::ModuleTopLevel => {
-            unreachable!(
-                "the module top level returns via the empty-cont path, not a ReturnBarrier"
-            )
-        }
-    }
     Ok(())
 }
 
@@ -494,6 +435,23 @@ fn default_expr(resolved: &ResolvedModule, decl: NodeId, index: usize) -> NodeId
     }
 }
 
-fn arg_error(span: Span, message: impl Into<String>) -> Raise {
-    Raise::new(ExceptionKind::ArgumentError, message, span)
+/// The callee's name for an argument-error's `details.callee` (S-58): a named `to`/`fn`'s
+/// declared name, or `None` for an anonymous `fn` (and for a block, whose caller passes
+/// `None` directly).
+fn callee_name(resolved: &ResolvedModule, decl: NodeId) -> Option<&str> {
+    match resolved.ast.node(decl) {
+        Node::Callable { name, .. } => name.as_deref(),
+        _ => None,
+    }
+}
+
+/// The keyword-bindable parameter names of a callable (its ordinary, non-block parameters)
+/// — the valid names an `unknown-keyword`'s `details.parameters` carries for a "did you
+/// mean?" hint.
+fn keyword_parameters(params: &[ParamInfo]) -> Vec<Box<str>> {
+    params
+        .iter()
+        .filter(|p| !p.is_block)
+        .map(|p| p.name.clone())
+        .collect()
 }

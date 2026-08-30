@@ -38,10 +38,22 @@ pub enum ExceptionKind {
     UsedBeforeDefined,
     /// A call whose callee is not a callable value (L§6.4/§8).
     NotCallable,
-    /// A call's arguments do not match the callee's parameters (L§8.3): a missing
-    /// required argument, an unknown keyword, a duplicate binding, or too many
-    /// positional arguments.
-    ArgumentError,
+    /// A call left a required parameter unbound (L§8.3): no positional or keyword
+    /// argument supplied it. Details `{callee, parameter}`. One of the four argument
+    /// kinds that replaced the retired `argument-error` (user, 2026-08-30, S-58) — one
+    /// fact per slug, `details` carrying data (never a `problem` sub-taxonomy).
+    MissingArgument,
+    /// A call named a keyword that is not one of the callee's parameters (L§8.3). Details
+    /// `{callee, keyword, parameters}` — the valid names ride along for a "did you mean?"
+    /// hint. (S-58, replacing `argument-error`.)
+    UnknownKeyword,
+    /// A call bound the same parameter more than once (L§8.3): a positional and a keyword
+    /// for one parameter, or a repeated keyword. Details `{callee, parameter}`. (S-58,
+    /// replacing `argument-error`.)
+    DuplicateArgument,
+    /// A call passed more positional arguments than the callee has parameters (L§8.3).
+    /// Details `{callee, expected, got}`. (S-58, replacing `argument-error`.)
+    TooManyArguments,
     /// A non-hashable value (e.g. a list) was used as a dict key (L§4.8). At M4.1
     /// the hashable kinds are the scalars; records join at M4.4.
     UnhashableKey,
@@ -148,7 +160,10 @@ impl ExceptionKind {
             ExceptionKind::NameNotDefined => "name-not-defined",
             ExceptionKind::UsedBeforeDefined => "used-before-defined",
             ExceptionKind::NotCallable => "not-callable",
-            ExceptionKind::ArgumentError => "argument-error",
+            ExceptionKind::MissingArgument => "missing-argument",
+            ExceptionKind::UnknownKeyword => "unknown-keyword",
+            ExceptionKind::DuplicateArgument => "duplicate-argument",
+            ExceptionKind::TooManyArguments => "too-many-arguments",
             ExceptionKind::UnhashableKey => "unhashable-key",
             ExceptionKind::KeyNotFound => "key-not-found",
             ExceptionKind::IndexOutOfRange => "index-out-of-range",

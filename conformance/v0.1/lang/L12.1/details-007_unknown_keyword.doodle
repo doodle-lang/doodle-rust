@@ -1,0 +1,11 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: unknown-keyword
+#! expect-out: z
+fn f(a) a end
+try
+  f(z: 1)
+rescue e
+  print(e.kind)
+  print(e.details["keyword"])
+end

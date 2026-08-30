@@ -127,9 +127,21 @@ fn match_fields(
         let f = match arg {
             Arg::Positional(_) => {
                 if pos >= field_names.len() {
-                    return Err(arg_err(
-                        span,
+                    let got = args
+                        .iter()
+                        .filter(|a| matches!(a, Arg::Positional(_)))
+                        .count();
+                    return Err(Raise::new(
+                        ExceptionKind::TooManyArguments,
                         format!("too many values for record `{rec_name}`"),
+                        span,
+                    )
+                    .with_details(
+                        super::exception::too_many_arguments_details(
+                            Some(rec_name),
+                            field_names.len(),
+                            got,
+                        ),
                     ));
                 }
                 let f = pos;
@@ -140,19 +152,32 @@ fn match_fields(
                 match field_names.iter().position(|f| f.as_ref() == name.as_ref()) {
                     Some(f) => f,
                     None => {
-                        return Err(arg_err(
-                            span,
+                        return Err(Raise::new(
+                            ExceptionKind::UnknownKeyword,
                             format!("record `{rec_name}` has no field `{name}`"),
+                            span,
+                        )
+                        .with_details(
+                            super::exception::unknown_keyword_details(
+                                Some(rec_name),
+                                name.as_ref(),
+                                field_names,
+                            ),
                         ));
                     }
                 }
             }
         };
         if slots[f].is_some() {
-            return Err(arg_err(
-                span,
+            return Err(Raise::new(
+                ExceptionKind::DuplicateArgument,
                 format!("field `{}` was given more than once", field_names[f]),
-            ));
+                span,
+            )
+            .with_details(super::exception::parameter_details(
+                Some(rec_name),
+                field_names[f].as_ref(),
+            )));
         }
         slots[f] = Some(val);
     }
@@ -162,10 +187,15 @@ fn match_fields(
         match slot {
             Some(v) => fields.push(v),
             None => {
-                return Err(arg_err(
-                    span,
+                return Err(Raise::new(
+                    ExceptionKind::MissingArgument,
                     format!("missing field `{}` for record `{rec_name}`", field_names[i]),
-                ));
+                    span,
+                )
+                .with_details(super::exception::parameter_details(
+                    Some(rec_name),
+                    field_names[i].as_ref(),
+                )));
             }
         }
     }
@@ -344,10 +374,6 @@ fn no_such_field_details(
             super::exception::DetailVal::str(super::exception::value_type_name(record, heap)),
         ),
     ]
-}
-
-fn arg_err(span: Span, message: String) -> Raise {
-    Raise::new(ExceptionKind::ArgumentError, message, span)
 }
 
 #[cfg(test)]

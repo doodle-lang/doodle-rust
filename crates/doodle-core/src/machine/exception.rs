@@ -122,6 +122,53 @@ pub(crate) fn value_type_name(value: Value, heap: &Heap) -> String {
     }
 }
 
+/// The leading `callee` detail shared by the four argument-binding kinds (S-58): the
+/// callable's name when known (a record type, a protocol member), omitted for a plain
+/// `fn` or block call whose name isn't available at the binding site.
+fn callee_detail(callee: Option<&str>) -> Vec<(&'static str, DetailVal)> {
+    callee.map_or_else(Vec::new, |c| vec![("callee", DetailVal::str(c))])
+}
+
+/// The `missing-argument` / `duplicate-argument` `details` (S-58 `{callee, parameter}`):
+/// the callable (when known) and the unbound-or-repeated parameter.
+pub(crate) fn parameter_details(
+    callee: Option<&str>,
+    parameter: &str,
+) -> Vec<(&'static str, DetailVal)> {
+    let mut details = callee_detail(callee);
+    details.push(("parameter", DetailVal::str(parameter)));
+    details
+}
+
+/// The `unknown-keyword` `details` (S-58 `{callee, keyword, parameters}`): the bad keyword
+/// and the callee's valid parameter names (for a host's "did you mean?").
+pub(crate) fn unknown_keyword_details(
+    callee: Option<&str>,
+    keyword: &str,
+    parameters: &[Box<str>],
+) -> Vec<(&'static str, DetailVal)> {
+    let mut details = callee_detail(callee);
+    details.push(("keyword", DetailVal::str(keyword)));
+    details.push((
+        "parameters",
+        DetailVal::strs(parameters.iter().map(|p| p.to_string())),
+    ));
+    details
+}
+
+/// The `too-many-arguments` `details` (S-58 `{callee, expected, got}`): the callee's
+/// parameter count and how many positionals it was given.
+pub(crate) fn too_many_arguments_details(
+    callee: Option<&str>,
+    expected: usize,
+    got: usize,
+) -> Vec<(&'static str, DetailVal)> {
+    let mut details = callee_detail(callee);
+    details.push(("expected", DetailVal::Int(expected as i64)));
+    details.push(("got", DetailVal::Int(got as i64)));
+    details
+}
+
 /// The `type-mismatch` `details` (S-58 `{operator, expected, got}`): the operation, the
 /// accepted type(s) (a list of display type names — an operator often accepts several), and
 /// the offending value's runtime type name (a display string, S-37). One shape for every

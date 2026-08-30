@@ -50,6 +50,7 @@ pub(super) fn bind_foreign_arguments(
         &param_infos,
         params.len() as u16,
         arg_values,
+        None, // the foreign function's name isn't threaded to the binding site
         span,
     )?;
     let mut args = Vec::with_capacity(params.len());
@@ -65,9 +66,12 @@ pub(super) fn bind_foreign_arguments(
                 (false, Some(d)) => d,
                 _ => {
                     return Err(Raise::new(
-                        ExceptionKind::ArgumentError,
+                        ExceptionKind::MissingArgument,
                         format!("missing argument `{}` for this call", p.name),
                         span,
+                    )
+                    .with_details(
+                        crate::machine::exception::parameter_details(None, p.name.as_ref()),
                     ));
                 }
             },

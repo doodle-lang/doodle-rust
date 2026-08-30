@@ -155,10 +155,11 @@ fn block_apply(
     let owner_serial = machine.frames[owner].serial;
     let Some(desc) = machine.frames[owner].block_param else {
         return Err(Raise::new(
-            ExceptionKind::ArgumentError,
+            ExceptionKind::MissingArgument,
             "no block was given to invoke here",
             span,
-        ));
+        )
+        .with_details(super::exception::parameter_details(None, "block")));
     };
     let block_id = desc.callable as usize;
     let block_info = &resolved.callables[block_id];
@@ -169,15 +170,17 @@ fn block_apply(
         &block_info.params,
         block_info.slot_count,
         &arg_values,
+        None, // a block is anonymous — no `callee` name for an argument-error's details
         span,
     )?;
     for (i, pi) in block_info.params.iter().enumerate() {
         if !filled[i] {
             return Err(Raise::new(
-                ExceptionKind::ArgumentError,
+                ExceptionKind::MissingArgument,
                 format!("missing argument `{}` for this block", pi.name),
                 span,
-            ));
+            )
+            .with_details(super::exception::parameter_details(None, pi.name.as_ref())));
         }
     }
     let body = block_info.body;
@@ -223,15 +226,21 @@ pub(crate) fn invoke_native(
     let block_id = desc.callable as usize;
     let block_info = &resolved.callables[block_id];
     if arg_values.len() != block_info.params.len() {
-        return Err(Raise::new(
-            ExceptionKind::ArgumentError,
-            format!(
-                "this block takes {} argument(s), but was invoked with {}",
-                block_info.params.len(),
-                arg_values.len()
-            ),
-            span,
-        ));
+        let (expected, got) = (block_info.params.len(), arg_values.len());
+        let message =
+            format!("this block takes {expected} argument(s), but was invoked with {got}");
+        // A native consumer over-invoked the block (too many) or under-invoked it (a
+        // required positional is missing); the count decides the kind.
+        let raise = if got > expected {
+            Raise::new(ExceptionKind::TooManyArguments, message, span).with_details(
+                super::exception::too_many_arguments_details(None, expected, got),
+            )
+        } else {
+            let missing = block_info.params[got].name.as_ref();
+            Raise::new(ExceptionKind::MissingArgument, message, span)
+                .with_details(super::exception::parameter_details(None, missing))
+        };
+        return Err(raise);
     }
     let mut slots = vec![None; block_info.slot_count as usize];
     for (pi, &val) in block_info.params.iter().zip(arg_values) {
@@ -297,16 +306,21 @@ pub(crate) fn bind_block_argument(
                 callable,
             }))
         }
+        // A `do … end` block was passed but the callee has no block parameter — an
+        // argument the callee can't take.
         (Some(_), false) => Err(Raise::new(
-            ExceptionKind::ArgumentError,
+            ExceptionKind::TooManyArguments,
             "this call passes a `do … end` block, but the callee takes no block",
             span,
-        )),
+        )
+        .with_details(super::exception::too_many_arguments_details(None, 0, 1))),
+        // The callee has a block parameter but no `do … end` block was passed.
         (None, true) => Err(Raise::new(
-            ExceptionKind::ArgumentError,
+            ExceptionKind::MissingArgument,
             "this callee needs a `do … end` block argument",
             span,
-        )),
+        )
+        .with_details(super::exception::parameter_details(None, "block"))),
         (None, false) => Ok(None),
     }
 }
