@@ -194,7 +194,13 @@ pub(crate) fn is_op(
             ExceptionKind::TypeMismatch,
             "the right side of `is` must be a type",
             span,
-        ));
+        )
+        .with_details(super::exception::type_mismatch_details(
+            "is",
+            &["Type"],
+            rhs,
+            heap,
+        )));
     };
     let matches = match &heap.type_value(idx).kind {
         TypeKind::Builtin(b) => value_is(

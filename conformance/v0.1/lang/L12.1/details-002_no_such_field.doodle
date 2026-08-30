@@ -1,0 +1,14 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: no-such-field
+#! expect-out: z
+#! expect-out: Point
+record Point with x, y end
+let p = Point(x: 1, y: 2)
+try
+  p.z
+rescue e
+  print(e.kind)
+  print(e.details["field"])
+  print(e.details["type"])
+end

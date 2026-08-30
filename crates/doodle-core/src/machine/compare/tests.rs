@@ -16,7 +16,7 @@ fn eq(a: Value, b: Value, heap: &Heap) -> bool {
 }
 
 fn ord(a: Value, b: Value, heap: &Heap) -> Ordering {
-    order(a, b, heap, S).expect("ordering should be defined")
+    order(BinaryOp::Lt, a, b, heap, S).expect("ordering should be defined")
 }
 
 #[test]
@@ -96,22 +96,22 @@ fn ordering_of_numbers_including_cross_kind() {
 fn ordering_a_nan_raises() {
     let h = Heap::new();
     let nan = Value::Float(f64::NAN);
-    let e = order(nan, Value::Int(1), &h, S).unwrap_err();
+    let e = order(BinaryOp::Lt, nan, Value::Int(1), &h, S).unwrap_err();
     assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
-    let e = order(Value::Float(1.0), nan, &h, S).unwrap_err();
+    let e = order(BinaryOp::Lt, Value::Float(1.0), nan, &h, S).unwrap_err();
     assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
 }
 
 #[test]
 fn ordering_non_numbers_raises() {
     let mut h = Heap::new();
-    let e = order(Value::Bool(true), Value::Bool(false), &h, S).unwrap_err();
+    let e = order(BinaryOp::Lt, Value::Bool(true), Value::Bool(false), &h, S).unwrap_err();
     assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
     let bytes = Value::Bytes(h.alloc_bytes(vec![1].into()));
-    let e = order(bytes, bytes, &h, S).unwrap_err();
+    let e = order(BinaryOp::Lt, bytes, bytes, &h, S).unwrap_err();
     assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
     // A number vs a non-number is also undefined.
-    let e = order(Value::Int(1), Value::Nil, &h, S).unwrap_err();
+    let e = order(BinaryOp::Lt, Value::Int(1), Value::Nil, &h, S).unwrap_err();
     assert_eq!(e.exception.kind, ExceptionKind::UndefinedOrdering);
 }
 

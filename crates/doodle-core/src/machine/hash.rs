@@ -37,7 +37,15 @@ use super::compare::{decompose, kind_name};
 /// This is the seam a dict key dispatches to when its type has no explicit `implement`.
 pub(super) fn native_key_hash(key: Value, heap: &Heap, span: Span) -> Result<u64, Raise> {
     if let Err(reason) = check_hashable(key, heap) {
-        return Err(Raise::new(ExceptionKind::UnhashableKey, reason, span));
+        // `details.field` (the offending field of a value record, S-29) is deferred: it needs
+        // `check_hashable` to return the field name structurally (it currently returns a
+        // formatted message). `type` (the key's runtime type) is carried now.
+        return Err(
+            Raise::new(ExceptionKind::UnhashableKey, reason, span).with_details(vec![(
+                "type",
+                super::exception::DetailVal::str(super::exception::value_type_name(key, heap)),
+            )]),
+        );
     }
     Ok(hash_value(key, heap))
 }

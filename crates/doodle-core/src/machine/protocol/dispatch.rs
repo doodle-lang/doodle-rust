@@ -9,6 +9,7 @@ use super::{Dispatch, NativeDefault, dispatch_type_of};
 use crate::ast::{Arg, Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::error::{ExceptionKind, Raise};
+use crate::machine::exception as exc;
 use crate::machine::frame::Frame;
 use crate::machine::value::CalIdx;
 use crate::machine::{LoadedModule, Machine, Value, block, local};
@@ -128,7 +129,12 @@ pub(crate) fn dispatch_call(
                  add `implement {protocol} for {type_name}`"
             ),
             span,
-        )),
+        )
+        .with_details(vec![
+            ("type", exc::DetailVal::str(type_name.to_string())),
+            ("protocol", exc::DetailVal::str(protocol.to_string())),
+            ("member", exc::DetailVal::str(member.to_string())),
+        ])),
         Dispatch::Ambiguous {
             member,
             protocols: (a, b),
@@ -140,7 +146,15 @@ pub(crate) fn dispatch_call(
                  call `{a}.{member}(…)` or `{b}.{member}(…)` to say which one you mean"
             ),
             span,
-        )),
+        )
+        .with_details(vec![
+            ("member", exc::DetailVal::str(member.to_string())),
+            (
+                "protocols",
+                exc::DetailVal::strs([a.to_string(), b.to_string()]),
+            ),
+            ("type", exc::DetailVal::str(type_name.to_string())),
+        ])),
     }
 }
 

@@ -1669,6 +1669,7 @@ fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
         inst.machine.error_type,
         "type-mismatch",
         "boom",
+        &[],
     );
     inst.machine.unwind = Some(super::unwind::Unwind::Raise {
         value: raised_value,

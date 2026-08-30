@@ -14,6 +14,7 @@
 
 use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
+use super::exception::{self, DetailVal};
 use super::frame::FrameKind;
 use super::intrinsic::PendingRequest;
 use super::{CellIdx, LoadedModule, Machine, Value};
@@ -222,7 +223,8 @@ pub(crate) fn step_import_targets(
                 ExceptionKind::ModuleNotFound,
                 format!("the module `{}` was not found", join_path(&path)),
                 span,
-            ));
+            )
+            .with_details(exception::module_ref_details(&path, cur)));
         }
         let prefix: Vec<Box<str>> = path[..path.len() - 1].to_vec();
         let member: Box<str> = path.last().expect("a multi-segment path").clone();
@@ -410,11 +412,13 @@ fn circular_import(machine: &Machine, target: ModuleId, span: Span) -> Raise {
         .map(|s| s.as_ref())
         .collect::<Vec<&str>>()
         .join(" imports ");
+    let cycle = DetailVal::strs(labels.iter().map(|s| s.to_string()));
     Raise::new(
         ExceptionKind::CircularImport,
         format!("circular import: {rendered}"),
         span,
     )
+    .with_details(vec![("cycle", cycle)])
 }
 
 /// A module's path for a diagnostic, or `(the main module)` for the entry module (which

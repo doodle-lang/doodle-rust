@@ -416,6 +416,7 @@ pub(crate) fn arm_raise(
         machine.error_type,
         raise.exception.kind.slug(),
         &raise.exception.message,
+        &raise.details,
     );
     machine.unwind = Some(unwind::Unwind::Raise { value, trace });
 }

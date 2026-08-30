@@ -220,7 +220,14 @@ pub(crate) fn field_read(
                 ExceptionKind::NoSuchField,
                 format!("protocol `{}` has no member `{name}`", pt.name),
                 span,
-            ));
+            )
+            .with_details(vec![
+                ("field", super::exception::DetailVal::str(name.to_string())),
+                (
+                    "type",
+                    super::exception::DetailVal::str(pt.name.to_string()),
+                ),
+            ]));
         };
         let module = resolved.canonical_id;
         let dcal = heap.alloc_callable(crate::heap::CalObj {
@@ -239,7 +246,13 @@ pub(crate) fn field_read(
             ExceptionKind::TypeMismatch,
             format!("you can't read a field of {}", kind_name(object)),
             span,
-        ));
+        )
+        .with_details(super::exception::type_mismatch_details(
+            "field-access",
+            &["Record"],
+            object,
+            heap,
+        )));
     };
     let type_idx = heap.record(r).type_idx;
     let pos = match &heap.type_value(type_idx).kind {
@@ -257,7 +270,8 @@ pub(crate) fn field_read(
             ExceptionKind::NoSuchField,
             format!("this record has no field `{name}`"),
             span,
-        )),
+        )
+        .with_details(no_such_field_details(name, object, heap))),
     }
 }
 
@@ -287,7 +301,13 @@ pub(crate) fn field_set(
             ExceptionKind::TypeMismatch,
             format!("you can't set a field of {}", kind_name(object)),
             span,
-        ));
+        )
+        .with_details(super::exception::type_mismatch_details(
+            "field-assignment",
+            &["Record"],
+            object,
+            heap,
+        )));
     };
     let type_idx = heap.record(r).type_idx;
     let pos = match &heap.type_value(type_idx).kind {
@@ -305,8 +325,25 @@ pub(crate) fn field_set(
             ExceptionKind::NoSuchField,
             format!("this record has no field `{name}`"),
             span,
-        )),
+        )
+        .with_details(no_such_field_details(name, object, heap))),
     }
+}
+
+/// The `no-such-field` `details` (S-58 `{field, type}`): the missing field name and the
+/// record value's own type name (a display string, its declared record type, S-37).
+fn no_such_field_details(
+    name: &str,
+    record: Value,
+    heap: &Heap,
+) -> Vec<(&'static str, super::exception::DetailVal)> {
+    vec![
+        ("field", super::exception::DetailVal::str(name.to_string())),
+        (
+            "type",
+            super::exception::DetailVal::str(super::exception::value_type_name(record, heap)),
+        ),
+    ]
 }
 
 fn arg_err(span: Span, message: String) -> Raise {

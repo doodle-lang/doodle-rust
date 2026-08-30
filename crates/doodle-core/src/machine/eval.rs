@@ -180,7 +180,13 @@ pub(super) fn str_interp_rendered(
             ExceptionKind::TypeMismatch,
             "a `to_string` implementation must return a String".to_string(),
             span,
-        ));
+        )
+        .with_details(super::exception::type_mismatch_details(
+            "to_string",
+            &["String"],
+            value,
+            heap,
+        )));
     };
     let rendered = heap.string(idx).utf8.to_string();
     let acc = crate::unicode::seam_concat(&acc, &rendered);

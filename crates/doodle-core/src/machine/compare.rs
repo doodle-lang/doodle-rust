@@ -55,7 +55,7 @@ pub(crate) fn binary(
         BinaryOp::Eq => equal(lhs, rhs, heap),
         BinaryOp::Ne => !equal(lhs, rhs, heap),
         BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge => {
-            let ord = order(lhs, rhs, heap, span)?;
+            let ord = order(op, lhs, rhs, heap, span)?;
             match op {
                 BinaryOp::Lt => ord == Ordering::Less,
                 BinaryOp::Gt => ord == Ordering::Greater,
@@ -79,11 +79,21 @@ pub(crate) fn not(v: Value, span: Span) -> Result<Value, Raise> {
 pub(crate) fn as_bool(v: Value, op: &str, span: Span) -> Result<bool, Raise> {
     match v {
         Value::Bool(b) => Ok(b),
-        other => Err(Raise::new(
+        // `details.got` (the operand's type) is deferred here: `as_bool` carries no `heap`
+        // (threading it cascades through `not` and the `if`/`while`/`and`/`or` sites), so this
+        // boolean-context `type-mismatch` carries `{operator, expected}` only for now.
+        _ => Err(Raise::new(
             ExceptionKind::TypeMismatch,
-            format!("`{op}` needs true or false, not {}", kind_name(other)),
+            format!("`{op}` needs true or false, not {}", kind_name(v)),
             span,
-        )),
+        )
+        .with_details(vec![
+            ("operator", super::exception::DetailVal::str(op)),
+            (
+                "expected",
+                super::exception::DetailVal::strs(["Bool".to_string()]),
+            ),
+        ])),
     }
 }
 
@@ -209,7 +219,8 @@ fn record_equal(x: RecIdx, y: RecIdx, heap: &Heap, in_progress: &mut Vec<(Agg, A
 
 /// Total order of two values where ordering is defined (numbers, strings);
 /// raises otherwise (L§6.6).
-fn order(a: Value, b: Value, heap: &Heap, span: Span) -> Result<Ordering, Raise> {
+fn order(op: BinaryOp, a: Value, b: Value, heap: &Heap, span: Span) -> Result<Ordering, Raise> {
+    let sym = comparison_symbol(op);
     if let (Some(na), Some(nb)) = (as_num(a, heap), as_num(b, heap)) {
         // `None` means a NaN operand — ordering is undefined for NaN (L§6.6).
         return numeric_cmp(&na, &nb).ok_or_else(|| {
@@ -218,6 +229,7 @@ fn order(a: Value, b: Value, heap: &Heap, span: Span) -> Result<Ordering, Raise>
                 "you can't compare with a NaN (it isn't a real number)",
                 span,
             )
+            .with_details(super::exception::ordering_details(sym, a, b, true, heap))
         });
     }
     if let (Value::Str(x), Value::Str(y)) = (a, b) {
@@ -236,7 +248,19 @@ fn order(a: Value, b: Value, heap: &Heap, span: Span) -> Result<Ordering, Raise>
             kind_name(b)
         ),
         span,
-    ))
+    )
+    .with_details(super::exception::ordering_details(sym, a, b, false, heap)))
+}
+
+/// The symbol of a comparison operator, for a diagnostic's `details.operator`.
+fn comparison_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Lt => "<",
+        BinaryOp::Gt => ">",
+        BinaryOp::Le => "<=",
+        BinaryOp::Ge => ">=",
+        _ => "compare",
+    }
 }
 
 fn numeric_equal(a: &Num, b: &Num) -> bool {

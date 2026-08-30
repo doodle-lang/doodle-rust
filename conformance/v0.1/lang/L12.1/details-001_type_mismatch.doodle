@@ -1,0 +1,14 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: type-mismatch
+#! expect-out: +
+#! expect-out: Bool
+# S-58: an engine Error carries structured `details` a host reads without parsing the
+# message. A type-mismatch names the operator and the offending operand's type.
+try
+  1 + true
+rescue e
+  print(e.kind)
+  print(e.details["operator"])
+  print(e.details["got"])
+end

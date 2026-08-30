@@ -225,10 +225,14 @@ impl Trace {
 pub(crate) struct Raise {
     pub(crate) exception: Exception,
     pub(crate) trace: Trace,
+    /// The kind's structured `details` (S-58, rubric App A), materialized into the `Error`
+    /// record's `details` dict when the raise arms its unwind (`step::arm_raise`). Empty for
+    /// a kind whose `details` schema is `{}` (kind + span + trace carry it).
+    pub(crate) details: Vec<(&'static str, super::exception::DetailVal)>,
 }
 
 impl Raise {
-    /// Builds a raise of `kind` with `message`, raised at `span`.
+    /// Builds a raise of `kind` with `message`, raised at `span`, with empty `details`.
     pub(crate) fn new(kind: ExceptionKind, message: impl Into<String>, span: Span) -> Self {
         Raise {
             exception: Exception {
@@ -236,7 +240,19 @@ impl Raise {
                 message: message.into(),
             },
             trace: Trace::at(Some(span)),
+            details: Vec::new(),
         }
+    }
+
+    /// Attaches the kind's structured `details` (builder style, S-58): the ordered
+    /// `(key, value)` entries the `Error`'s `details` dict is built from.
+    #[must_use]
+    pub(crate) fn with_details(
+        mut self,
+        details: Vec<(&'static str, super::exception::DetailVal)>,
+    ) -> Self {
+        self.details = details;
+        self
     }
 }
 

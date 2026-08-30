@@ -77,6 +77,14 @@ impl Instance {
             id,
         ));
         diags.sort_by_key(|d| d.span.map_or(0, |s| s.start));
+        // A broken import's `module-load-error` carries the *same* diagnostics as its
+        // `details.diagnostics` (S-58 `{path, canonical_id, diagnostics}`) — built from
+        // `diags` before it moves into the load-diagnostics record (only when failing).
+        let ml_details = if static_error.is_some() {
+            super::exception::module_load_details(&pending.path, canonical_id, &diags)
+        } else {
+            Vec::new()
+        };
         self.machine.load_diagnostics.extend(diags);
         let namespace = super::load::seed_namespace(&module, &mut self.heap);
         // This module's namespace cells join the instance's permanent GC roots (AD5): its
@@ -87,7 +95,15 @@ impl Instance {
             .module_root_cells
             .extend(namespace.iter().map(|(_, cell)| *cell));
         if let Some(diagnostic) = static_error {
-            self.enter_failed_module(&pending, module, namespace, id, canonical_id, diagnostic);
+            self.enter_failed_module(
+                &pending,
+                module,
+                namespace,
+                id,
+                canonical_id,
+                diagnostic,
+                ml_details,
+            );
             return;
         }
         // Clean load: build the top-level frame and push the module `Loading`.
@@ -125,6 +141,7 @@ impl Instance {
     /// **retained** in the `failed` state (so a re-import re-raises it unchanged, S-8) and
     /// armed as the raise now. The module is pushed but never executed — the table stays
     /// parallel to the load-state registry.
+    #[allow(clippy::too_many_arguments)]
     fn enter_failed_module(
         &mut self,
         pending: &PendingImport,
@@ -133,6 +150,7 @@ impl Instance {
         id: ModuleId,
         canonical_id: &str,
         diagnostic: String,
+        details: Vec<(&'static str, super::exception::DetailVal)>,
     ) {
         let message = format!(
             "the module `{}` could not be loaded: {diagnostic}",
@@ -143,6 +161,7 @@ impl Instance {
             self.machine.error_type,
             ExceptionKind::ModuleLoadError.slug(),
             &message,
+            &details,
         );
         self.machine.load.begin(&pending.path, canonical_id, id);
         self.machine.load.set_state(id, LoadState::Failed(value));
@@ -177,7 +196,13 @@ impl Instance {
             "the module `{}` was not found",
             super::modload::join_path(&pending.path)
         );
-        self.arm_import_raise(ExceptionKind::ModuleNotFound, &message, pending.span);
+        let details = super::exception::module_ref_details(&pending.path, self.current_module());
+        self.arm_import_raise(
+            ExceptionKind::ModuleNotFound,
+            &message,
+            pending.span,
+            details,
+        );
     }
 
     /// Resolves a parked import with a host `Raise` (E§6): raises the host-supplied value
@@ -198,7 +223,13 @@ impl Instance {
     /// Materializes an engine `Error` of `kind`/`message` and arms it as a raise at `span`
     /// in the importer (E§9): the trace is captured against the importer's resolved module
     /// (the top frame — no sub-module frame was pushed on this path).
-    fn arm_import_raise(&mut self, kind: ExceptionKind, message: &str, span: Span) {
+    fn arm_import_raise(
+        &mut self,
+        kind: ExceptionKind,
+        message: &str,
+        span: Span,
+        details: Vec<(&'static str, super::exception::DetailVal)>,
+    ) {
         let trace = super::observe::capture_trace(
             self.current_resolved(),
             &self.heap,
@@ -210,6 +241,7 @@ impl Instance {
             self.machine.error_type,
             kind.slug(),
             message,
+            &details,
         );
         self.machine.arm_raise_value(value, trace);
     }

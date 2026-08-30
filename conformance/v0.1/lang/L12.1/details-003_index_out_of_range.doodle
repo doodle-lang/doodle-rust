@@ -1,0 +1,12 @@
+#! clause: L12.1
+#! mode: run
+#! expect-out: index-out-of-range
+#! expect-out: 5
+#! expect-out: 2
+try
+  [10, 20][5]
+rescue e
+  print(e.kind)
+  print(e.details["index"])
+  print(e.details["length"])
+end

@@ -50,11 +50,24 @@ fn concat(lhs: Value, rhs: Value, heap: &mut Heap, span: Span) -> Result<Option<
             let joined = crate::unicode::seam_concat(&heap.string(a).utf8, &heap.string(b).utf8);
             Ok(Some(Value::Str(heap.alloc_string(joined.into_boxed_str()))))
         }
-        (Value::Str(_), _) | (_, Value::Str(_)) => Err(Raise::new(
-            ExceptionKind::TypeMismatch,
-            "`+` joins a string to a string — it won't add a string and a non-string",
-            span,
-        )),
+        (Value::Str(_), _) | (_, Value::Str(_)) => {
+            let got = if matches!(lhs, Value::Str(_)) {
+                rhs
+            } else {
+                lhs
+            };
+            Err(Raise::new(
+                ExceptionKind::TypeMismatch,
+                "`+` joins a string to a string — it won't add a string and a non-string",
+                span,
+            )
+            .with_details(super::exception::type_mismatch_details(
+                "+",
+                &["String"],
+                got,
+                heap,
+            )))
+        }
         _ => Ok(None),
     }
 }
@@ -77,20 +90,31 @@ fn repeat(
     let count = match count_val {
         Value::Int(n) => BigInt::from(n),
         Value::BigInt(idx) => heap.bigint(idx).value.clone(),
-        _ => {
+        other => {
             return Err(Raise::new(
                 ExceptionKind::TypeMismatch,
                 "`*` repeats a string a whole number of times — the count must be an Int",
                 span,
-            ));
+            )
+            .with_details(super::exception::type_mismatch_details(
+                "*",
+                &["Int"],
+                other,
+                heap,
+            )));
         }
     };
     if count.is_negative() {
+        let count_value = super::arith::int_value(count.clone(), heap);
         return Err(Raise::new(
             ExceptionKind::NegativeCount,
             "`*` can't repeat a string a negative number of times",
             span,
-        ));
+        )
+        .with_details(vec![(
+            "count",
+            super::exception::DetailVal::Value(count_value),
+        )]));
     }
     let len = heap.string(s_idx).utf8.len();
     // Zero copies, or repeating the empty string, is `""` — regardless of the count's

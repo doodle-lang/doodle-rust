@@ -233,13 +233,19 @@ pub(crate) fn define_implement(
         _ => return Err(not_a_protocol(&protocol, span)),
     };
     // Resolve `T` to its runtime-type key(s) — a built-in type value is a prelude name.
-    let Value::Type(tidx) = control::lookup_free(modules, cur, machine, heap, &type_name, span)?
-    else {
+    let target = control::lookup_free(modules, cur, machine, heap, &type_name, span)?;
+    let Value::Type(tidx) = target else {
         return Err(Raise::new(
             ExceptionKind::TypeMismatch,
             format!("`{type_name}` is not a type, so you can't `implement … for` it"),
             span,
-        ));
+        )
+        .with_details(crate::machine::exception::type_mismatch_details(
+            "implement",
+            &["Type"],
+            target,
+            heap,
+        )));
     };
     let keys = super::dtype::type_keys(tidx, heap);
     if keys.is_empty() {
@@ -247,7 +253,17 @@ pub(crate) fn define_implement(
             ExceptionKind::TypeMismatch,
             format!("you can't implement a protocol for `{type_name}`"),
             span,
-        ));
+        )
+        .with_details(vec![
+            (
+                "operator",
+                crate::machine::exception::DetailVal::str("implement"),
+            ),
+            (
+                "got",
+                crate::machine::exception::DetailVal::str(type_name.to_string()),
+            ),
+        ]));
     }
     // Intern each method's callable, keyed by its member name.
     let mut resolved_methods: Vec<(u32, CalIdx)> = Vec::with_capacity(methods.len());
@@ -272,11 +288,23 @@ pub(crate) fn define_implement(
     Ok(())
 }
 
-/// The load-time raise for `implement P …` where `P` is not a protocol value.
+/// The load-time raise for `implement P …` where `P` is not a protocol value. `details.got`
+/// (the runtime type of `P`'s value) is omitted: the value is discarded at the match above and
+/// this helper carries only the name; `operator` + `expected` are the structured parts.
 fn not_a_protocol(name: &str, span: crate::span::Span) -> Raise {
     Raise::new(
         ExceptionKind::TypeMismatch,
         format!("`{name}` is not a protocol"),
         span,
     )
+    .with_details(vec![
+        (
+            "operator",
+            crate::machine::exception::DetailVal::str("implement"),
+        ),
+        (
+            "expected",
+            crate::machine::exception::DetailVal::strs(["Protocol".to_string()]),
+        ),
+    ])
 }

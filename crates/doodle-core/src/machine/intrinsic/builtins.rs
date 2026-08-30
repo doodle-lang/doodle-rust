@@ -8,6 +8,7 @@ use super::{BlockResult, ForeignBody, ForeignParam, Intrinsic};
 use crate::heap::Heap;
 use crate::machine::Value;
 use crate::machine::error::{ExceptionKind, Raise};
+use crate::machine::exception::{self, DetailVal};
 use crate::resolve::BodyKind;
 use crate::span::Span;
 use num_traits::ToPrimitive;
@@ -91,7 +92,13 @@ pub fn each() -> Intrinsic {
                         ExceptionKind::TypeMismatch,
                         "`each` needs a list or a string to iterate",
                         ctx.span(),
-                    ));
+                    )
+                    .with_details(exception::type_mismatch_details(
+                        "each",
+                        &["List", "String"],
+                        ctx.args()[0],
+                        ctx.heap(),
+                    )));
                 }
             }
             Ok(None)
@@ -142,7 +149,13 @@ pub fn length() -> Intrinsic {
                         ExceptionKind::TypeMismatch,
                         "`length` needs a string, list, dict, or bytes",
                         ctx.span(),
-                    ));
+                    )
+                    .with_details(exception::type_mismatch_details(
+                        "length",
+                        &["String", "List", "Dict", "Bytes"],
+                        ctx.args()[0],
+                        ctx.heap(),
+                    )));
                 }
             };
             Ok(Some(Value::Int(n as i64)))
@@ -165,7 +178,13 @@ pub fn encode() -> Intrinsic {
                     ExceptionKind::TypeMismatch,
                     "`encode` needs a string",
                     ctx.span(),
-                ));
+                )
+                .with_details(exception::type_mismatch_details(
+                    "encode",
+                    &["String"],
+                    ctx.args()[0],
+                    ctx.heap(),
+                )));
             };
             let bytes: Box<[u8]> = ctx.heap().string(s).utf8.as_bytes().into();
             Ok(Some(ctx.alloc_bytes(bytes)))
@@ -189,19 +208,28 @@ pub fn decode() -> Intrinsic {
                     ExceptionKind::TypeMismatch,
                     "`decode` needs bytes",
                     ctx.span(),
-                ));
+                )
+                .with_details(exception::type_mismatch_details(
+                    "decode",
+                    &["Bytes"],
+                    ctx.args()[0],
+                    ctx.heap(),
+                )));
             };
             let text = match std::str::from_utf8(&ctx.heap().byte_string(b).bytes) {
                 Ok(text) => text,
                 Err(e) => {
+                    let position = e.valid_up_to();
+                    let byte = i64::from(ctx.heap().byte_string(b).bytes[position]);
                     return Err(Raise::new(
                         ExceptionKind::InvalidUtf8,
-                        format!(
-                            "these bytes aren't valid UTF-8 text (problem at byte {})",
-                            e.valid_up_to()
-                        ),
+                        format!("these bytes aren't valid UTF-8 text (problem at byte {position})"),
                         ctx.span(),
-                    ));
+                    )
+                    .with_details(vec![
+                        ("position", DetailVal::Int(position as i64)),
+                        ("byte", DetailVal::Int(byte)),
+                    ]));
                 }
             };
             let nfc = crate::unicode::nfc(text).into_owned().into_boxed_str();

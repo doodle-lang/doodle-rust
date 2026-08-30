@@ -147,7 +147,11 @@ fn apply(
             ExceptionKind::NotCallable,
             "this isn't something you can call",
             span,
-        ));
+        )
+        .with_details(vec![(
+            "type",
+            super::exception::DetailVal::str(super::exception::value_type_name(callee, heap)),
+        )]));
     };
     // A host intrinsic foreign function runs its callback **inline** (E§5.2) — it
     // never becomes a callable frame — so it dispatches here, before any frame or

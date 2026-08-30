@@ -38,8 +38,8 @@ pub(crate) fn binary(
     machine: &mut Machine,
     span: Span,
 ) -> Result<Value, Raise> {
-    let a = as_num(lhs, heap).ok_or_else(|| type_error(op, span))?;
-    let b = as_num(rhs, heap).ok_or_else(|| type_error(op, span))?;
+    let a = as_num(lhs, heap).ok_or_else(|| type_error(op, lhs, heap, span))?;
+    let b = as_num(rhs, heap).ok_or_else(|| type_error(op, rhs, heap, span))?;
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => add_sub_mul(op, a, b, heap, machine, span),
         BinaryOp::Div => divide(a, b, span),
@@ -52,17 +52,19 @@ pub(crate) fn binary(
 /// Applies a **numeric** unary operator (`-`/`+`). `not` is M2a.3b.
 pub(crate) fn unary(op: UnaryOp, v: Value, heap: &mut Heap, span: Span) -> Result<Value, Raise> {
     match op {
-        UnaryOp::Neg => match as_num(v, heap).ok_or_else(|| unary_type_error("-", span))? {
-            Num::Int(i) => Ok(int_value(-i, heap)),
-            Num::Float(x) => finite(-x, span),
-        },
+        UnaryOp::Neg => {
+            match as_num(v, heap).ok_or_else(|| unary_type_error("-", v, heap, span))? {
+                Num::Int(i) => Ok(int_value(-i, heap)),
+                Num::Float(x) => finite(-x, span),
+            }
+        }
         // `+` is identity on a number, but its float result still obeys the
         // finite-float invariant (S-56), matching `-`: Int/BigInt pass through
         // (already canonical), a float is finiteness-checked, non-numbers raise.
         UnaryOp::Pos => match v {
             Value::Int(_) | Value::BigInt(_) => Ok(v),
             Value::Float(x) => finite(x, span),
-            _ => Err(unary_type_error("+", span)),
+            _ => Err(unary_type_error("+", v, heap, span)),
         },
         UnaryOp::Not => unreachable!("`not` reaches arith::unary; it is handled in M2a.3b"),
     }
@@ -310,20 +312,33 @@ fn nonfinite(span: Span) -> Raise {
     )
 }
 
-fn type_error(op: BinaryOp, span: Span) -> Raise {
+fn type_error(op: BinaryOp, got: Value, heap: &Heap, span: Span) -> Raise {
+    let sym = binary_symbol(op);
     Raise::new(
         ExceptionKind::TypeMismatch,
-        format!("`{}` needs two numbers", binary_symbol(op)),
+        format!("`{sym}` needs two numbers"),
         span,
     )
+    .with_details(super::exception::type_mismatch_details(
+        sym,
+        &["Number"],
+        got,
+        heap,
+    ))
 }
 
-fn unary_type_error(sym: &str, span: Span) -> Raise {
+fn unary_type_error(sym: &str, got: Value, heap: &Heap, span: Span) -> Raise {
     Raise::new(
         ExceptionKind::TypeMismatch,
         format!("`{sym}` needs a number"),
         span,
     )
+    .with_details(super::exception::type_mismatch_details(
+        sym,
+        &["Number"],
+        got,
+        heap,
+    ))
 }
 
 fn binary_symbol(op: BinaryOp) -> &'static str {

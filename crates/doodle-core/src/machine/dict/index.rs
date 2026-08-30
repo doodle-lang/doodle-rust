@@ -10,6 +10,7 @@ use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
 use crate::machine::cont::Cont;
 use crate::machine::error::{ExceptionKind, Raise};
+use crate::machine::exception::{self, DetailVal};
 use crate::machine::hash::user_hash_to_bucket;
 use crate::machine::step::take_value;
 use crate::machine::value::DictIdx;
@@ -59,7 +60,10 @@ pub(crate) fn index_apply(
                     .push(Cont::IndexReadHashed { dict: d, key, span });
                 protocol::enter_unary(modules, heap, machine, cal, key, key_node, span)
             }
-            HashPlan::Native => index_read_result(machine, get(heap, d, key, span)?, span),
+            HashPlan::Native => {
+                let found = get(heap, d, key, span)?;
+                index_read_result(machine, found, key, span)
+            }
         },
         Value::List(l) => {
             let i = sequence_index(heap, key, heap.list(l).items.len(), span)?;
@@ -91,13 +95,25 @@ pub(crate) fn index_apply(
             ExceptionKind::TypeMismatch,
             format!("you can't index {} with `[…]`", compare::kind_name(other)),
             span,
-        )),
+        )
+        .with_details(exception::type_mismatch_details(
+            "index",
+            &["List", "Dict", "String", "Bytes"],
+            other,
+            heap,
+        ))),
     }
 }
 
 /// Places a dict lookup's outcome (L§4.8): the found value into the register, or the
-/// `KeyNotFound` raise. Shared by the native and driven-hash read paths.
-fn index_read_result(machine: &mut Machine, found: Option<Value>, span: Span) -> Result<(), Raise> {
+/// `KeyNotFound` raise (naming the missing `key` in `details`). Shared by the native and
+/// driven-hash read paths.
+fn index_read_result(
+    machine: &mut Machine,
+    found: Option<Value>,
+    key: Value,
+    span: Span,
+) -> Result<(), Raise> {
     match found {
         Some(value) => {
             machine.reg = Some(value);
@@ -107,7 +123,8 @@ fn index_read_result(machine: &mut Machine, found: Option<Value>, span: Span) ->
             ExceptionKind::KeyNotFound,
             "that key isn't in the dict",
             span,
-        )),
+        )
+        .with_details(vec![("key", DetailVal::Value(key))])),
     }
 }
 
@@ -121,7 +138,8 @@ pub(crate) fn index_read_hashed(
     span: Span,
 ) -> Result<(), Raise> {
     let bucket = user_hash_to_bucket(take_value(machine, span)?, heap, span)?;
-    index_read_result(machine, get_with_hash(heap, dict, key, bucket), span)
+    let found = get_with_hash(heap, dict, key, bucket);
+    index_read_result(machine, found, key, span)
 }
 
 /// Resolves a sequence index `key` against a container of `length` positions (L§6.3): a
@@ -132,11 +150,26 @@ pub(crate) fn index_read_hashed(
 fn sequence_index(heap: &Heap, key: Value, length: usize, span: Span) -> Result<usize, Raise> {
     match key {
         Value::Int(n) if n >= 0 && (n as u128) < length as u128 => Ok(n as usize),
-        Value::Int(n) => Err(out_of_range(&n.to_string(), n < 0, length, span)),
+        Value::Int(n) => Err(out_of_range(
+            &n.to_string(),
+            DetailVal::Int(n),
+            n < 0,
+            length,
+            span,
+        )),
         Value::BigInt(idx) => {
             let value = &heap.bigint(idx).value;
             let negative = value.sign() == num_bigint::Sign::Minus;
-            Err(out_of_range(&value.to_string(), negative, length, span))
+            // A bignum index is always out of range by magnitude; it does not fit an `Int`
+            // detail, so `index` carries its decimal as a string (small indices are `Int`).
+            let detail = DetailVal::str(value.to_string());
+            Err(out_of_range(
+                &value.to_string(),
+                detail,
+                negative,
+                length,
+                span,
+            ))
         }
         other => Err(Raise::new(
             ExceptionKind::TypeMismatch,
@@ -145,13 +178,25 @@ fn sequence_index(heap: &Heap, key: Value, length: usize, span: Span) -> Result<
                 compare::kind_name(other)
             ),
             span,
-        )),
+        )
+        .with_details(exception::type_mismatch_details(
+            "index",
+            &["Int"],
+            other,
+            heap,
+        ))),
     }
 }
 
 /// The `IndexOutOfRange` raise (L§6.3, S-58), its message branching on sign: a negative
 /// index carries the no-negative-positions hint; a too-large one names the length.
-fn out_of_range(index: &str, negative: bool, length: usize, span: Span) -> Raise {
+fn out_of_range(
+    index: &str,
+    index_detail: DetailVal,
+    negative: bool,
+    length: usize,
+    span: Span,
+) -> Raise {
     let message = if negative {
         format!(
             "there's no position {index} — Doodle has no negative positions; to reach the \
@@ -160,7 +205,10 @@ fn out_of_range(index: &str, negative: bool, length: usize, span: Span) -> Raise
     } else {
         format!("there's no position {index} — the length is {length}")
     };
-    Raise::new(ExceptionKind::IndexOutOfRange, message, span)
+    Raise::new(ExceptionKind::IndexOutOfRange, message, span).with_details(vec![
+        ("index", index_detail),
+        ("length", DetailVal::Int(length as i64)),
+    ])
 }
 
 /// Completes an index place assignment `object[key] = rhs` (L§5.3): `object` (the
