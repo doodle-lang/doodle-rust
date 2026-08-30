@@ -33,6 +33,7 @@ mod gc;
 mod handle;
 mod hash;
 mod import;
+mod inspect;
 mod intrinsic;
 mod lifecycle;
 mod limits;

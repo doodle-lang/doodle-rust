@@ -316,8 +316,8 @@ impl Instance {
     }
 
     /// Builds a [`ValueError::WrongKind`] naming a handle's actual kind. Used where a
-    /// let-else has already consumed the resolved value.
-    fn wrong_kind(&self, handle: Handle, expected: Kind) -> ValueError {
+    /// let-else has already consumed the resolved value (also by `inspect`).
+    pub(super) fn wrong_kind(&self, handle: Handle, expected: Kind) -> ValueError {
         match self.value_of(handle) {
             Ok(value) => wrong_kind(value, expected),
             Err(e) => e,

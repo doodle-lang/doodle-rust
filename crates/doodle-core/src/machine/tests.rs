@@ -162,6 +162,63 @@ fn drive_capturing_last_value(inst: &mut Instance) -> Option<Value> {
     last
 }
 
+/// Interns a fresh host handle to the value bound to module global `name` (a driven
+/// program's declaration) — how M6.1's inspection tests obtain a value handle.
+fn global_handle(inst: &mut Instance, name: &str) -> Handle {
+    let cell = control::find_cell(&inst.modules[0].namespace, name).expect("a bound global");
+    let value = inst.heap.cell(cell).value.expect("an initialized global");
+    inst.intern(value)
+}
+
+#[test]
+fn structural_inspection_reads_records_dicts_callables_types() {
+    let mut inst = load_source(
+        "record Point with x, y end\n\
+         let p = Point(x: 1, y: 2)\n\
+         let d = {a: 10, b: 20}\n\
+         fn greet(who) who end\n",
+    );
+    drive_capturing_last_value(&mut inst);
+
+    // A record (E§4.4): type name, field count, field names in declaration order, values.
+    let p = global_handle(&mut inst, "p");
+    assert_eq!(inst.record_type_name(p).unwrap(), "Point");
+    assert_eq!(inst.record_length(p).unwrap(), 2);
+    assert_eq!(inst.record_field_name(p, 0).unwrap(), "x");
+    assert_eq!(inst.record_field_name(p, 1).unwrap(), "y");
+    let fy = inst.record_field(p, 1).unwrap();
+    assert_eq!(inst.as_int(fy).unwrap(), 2);
+    assert!(matches!(
+        inst.record_field_name(p, 2),
+        Err(ValueError::IndexOutOfBounds)
+    ));
+
+    // A dict (E§4.4, L§4.7): entries in insertion order.
+    let d = global_handle(&mut inst, "d");
+    assert_eq!(inst.dict_length(d).unwrap(), 2);
+    let k0 = inst.dict_key(d, 0).unwrap();
+    assert_eq!(inst.string_bytes(k0).unwrap(), b"a");
+    let v1 = inst.dict_value(d, 1).unwrap();
+    assert_eq!(inst.as_int(v1).unwrap(), 20);
+
+    // A callable (E§8.2, D-M6-4): name, fn-vs-to kind, a source declaration position.
+    let g = global_handle(&mut inst, "greet");
+    assert_eq!(inst.callable_name(g).unwrap().as_deref(), Some("greet"));
+    assert_eq!(inst.callable_is_function(g).unwrap(), Some(true));
+    assert!(inst.callable_position(g).unwrap().is_some());
+    assert!(inst.callable_docstring(g).unwrap().is_none());
+
+    // A type value (E§4.4): its declared name.
+    let point = global_handle(&mut inst, "Point");
+    assert_eq!(inst.type_name(point).unwrap(), "Point");
+
+    // A wrong-kind inspection reports, never panics.
+    assert!(matches!(
+        inst.dict_length(p),
+        Err(ValueError::WrongKind { .. })
+    ));
+}
+
 #[test]
 fn value_readers_match_only_their_own_variant() {
     assert_eq!(Value::Int(7).as_int(), Some(7));
