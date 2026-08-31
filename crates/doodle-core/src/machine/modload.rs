@@ -89,14 +89,16 @@ pub(crate) struct ModuleLoad {
 impl ModuleLoad {
     /// The bookkeeping for a fresh instance whose only module is the main module
     /// (`ModuleId(0)`): its top-level runs from the start, so it is `Loading` until the
-    /// program completes. It has no host path/canonical id, so the caches start empty —
-    /// a sub-module importing the entry module by path is an obscure corner deferred
-    /// past M5.1.
-    pub(crate) fn new() -> Self {
+    /// program completes. `entry_canonical` is the host-owned canonical id the entry module
+    /// was loaded under (E§3.2) — seeded into `by_canonical` so it is addressable like any
+    /// other module (breakpoints by canonical id, E§8.6; a sub-module importing the entry by
+    /// that canonical dedupes to it, L§11.3). `by_path` stays empty: the entry has no
+    /// requested import path.
+    pub(crate) fn new(entry_canonical: &str) -> Self {
         ModuleLoad {
             states: vec![LoadState::Loading],
             by_path: Vec::new(),
-            by_canonical: Vec::new(),
+            by_canonical: vec![(entry_canonical.into(), ModuleId(0))],
             not_modules: Vec::new(),
         }
     }

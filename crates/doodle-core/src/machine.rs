@@ -17,6 +17,7 @@ mod arith;
 mod assign;
 mod block;
 mod boundary;
+mod breakpoint;
 mod call;
 mod cancel;
 mod compare;
@@ -58,6 +59,7 @@ mod value;
 
 pub use crate::heap::Finalizer;
 pub use boundary::{Kind, ValueError};
+pub use breakpoint::BreakpointInfo;
 pub use cancel::CancelToken;
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace, TraceFrame};
@@ -77,6 +79,7 @@ pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
 };
 
+use crate::ast::NodeId;
 use crate::diag::Diagnostic;
 use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits};
 use crate::heap::Heap;
@@ -264,6 +267,18 @@ pub(crate) struct Machine {
     /// directive**, a host control like [`cancel`](Self::cancel) but resumable, not a fault
     /// and not gated by `Step*`. One-shot: cleared when it fires, so a re-drive continues.
     host_pause: Arc<AtomicBool>,
+    /// The host's installed breakpoints (E§8.6, S-21): set/cleared by canonical id + line,
+    /// resolved to statement safe points, and tested at each safe point under a
+    /// `Continue`/`Step*` directive ([`Instance::breakpoint_hit`]). Host directives, outside
+    /// replay identity (E§7.7).
+    breakpoints: breakpoint::Breakpoints,
+    /// The statement node the machine is about to run at the current **statement** safe point
+    /// (E§8.6), recorded by `step` for breakpoint matching (its module is the active frame's).
+    /// `None` at a call-entry/return safe point (no statement) and while inside a reentrant
+    /// native-consumer drive (whose safe points are not the outer drive's — recording is
+    /// suppressed so they cannot clobber this). The drive loop reads it right after the step
+    /// that set it.
+    safe_point_stmt: Option<NodeId>,
     /// The instance-scoped **load-diagnostics record** (E§3.2/§8, S-63): every front-end
     /// diagnostic the engine produces for every module the instance loads or attempts —
     /// the entry module's prelude-shadowing at load, each imported module's front-end

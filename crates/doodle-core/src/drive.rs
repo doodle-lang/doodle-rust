@@ -388,6 +388,19 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
                     instance.set_state(InstanceState::Paused);
                     return Outcome::Paused(PauseReason::HostPause);
                 }
+                // A breakpoint at this safe point (E§8.6): stop under `Continue` or a `Step*`
+                // directive, never under `RunToCompletion` (which ignores breakpoints).
+                // `breakpoint_hit` matches the statement about to run, so a loop-body
+                // breakpoint re-fires each iteration. Checked before the `Step*` decision so a
+                // breakpoint that coincides with a step reports `Breakpoint`, the specific
+                // reason.
+                if safe_point.is_some()
+                    && directive != Directive::RunToCompletion
+                    && let Some(id) = instance.breakpoint_hit()
+                {
+                    instance.set_state(InstanceState::Paused);
+                    return Outcome::Paused(PauseReason::Breakpoint(id));
+                }
                 if let Some(depth) = safe_point
                     && should_pause(directive, anchor_depth, depth)
                 {

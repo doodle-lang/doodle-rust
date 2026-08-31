@@ -21,6 +21,23 @@ impl Instance {
     /// rather than diverge silently on grapheme/normalization behavior (E§11). `None`
     /// uses the pinned version.
     pub fn create(module: ResolvedModule, config: Config) -> Result<Self, ConfigError> {
+        Self::create_with_module_path(module, config, Self::DEFAULT_MODULE_PATH)
+    }
+
+    /// The default canonical id for the entry module (E§3.2) when a host loads through an
+    /// entry point that does not name one. A host that shows filenames (the IDE) passes its
+    /// own path via [`create_with_module_path`](Self::create_with_module_path) so breakpoints
+    /// (E§8.6) and load diagnostics (S-63) address the entry module by that name.
+    pub const DEFAULT_MODULE_PATH: &str = "main";
+
+    /// Like [`create`](Self::create) but names the entry module's canonical id (E§3.2): the
+    /// host-owned identity the entry module is addressed by — for breakpoints (E§8.6), the
+    /// load-diagnostics schema (S-63), and singleton dedupe against a self-import (L§11.3).
+    pub fn create_with_module_path(
+        module: ResolvedModule,
+        config: Config,
+        module_path: &str,
+    ) -> Result<Self, ConfigError> {
         if let Some(requested) = config.unicode_version
             && requested != UNICODE_VERSION
         {
@@ -29,7 +46,12 @@ impl Instance {
                 pinned: UNICODE_VERSION,
             });
         }
-        Ok(Self::load_with_limits(module, config.limits))
+        Ok(Self::load_full(
+            module,
+            config.limits,
+            intrinsic::Registry::new(),
+            module_path,
+        ))
     }
 
     /// The Unicode/UCD version this engine is pinned to (L§4.4; the config's
@@ -41,13 +63,23 @@ impl Instance {
     /// Loads a resolved module into a fresh `Ready` instance with the
     /// [`Default`](Limits) resource limits and no intrinsics. See [`load_full`](Self::load_full).
     pub fn load(module: ResolvedModule) -> Self {
-        Self::load_full(module, Limits::default(), intrinsic::Registry::new())
+        Self::load_full(
+            module,
+            Limits::default(),
+            intrinsic::Registry::new(),
+            Self::DEFAULT_MODULE_PATH,
+        )
     }
 
     /// Loads a resolved module under the given resource limits (E§10.2), no
     /// intrinsics. See [`load_full`](Self::load_full).
     pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
-        Self::load_full(module, limits, intrinsic::Registry::new())
+        Self::load_full(
+            module,
+            limits,
+            intrinsic::Registry::new(),
+            Self::DEFAULT_MODULE_PATH,
+        )
     }
 
     /// Loads a resolved module with host-registered intrinsic foreign functions
@@ -56,7 +88,12 @@ impl Instance {
     /// read-only global names after the program's declarations and the built-in
     /// type values, so a program's own declaration of the same name shadows one.
     pub fn load_with_intrinsics(module: ResolvedModule, registry: intrinsic::Registry) -> Self {
-        Self::load_full(module, Limits::default(), registry)
+        Self::load_full(
+            module,
+            Limits::default(),
+            registry,
+            Self::DEFAULT_MODULE_PATH,
+        )
     }
 
     /// Loads a resolved module with host-registered intrinsics (S-43) under the given
@@ -67,7 +104,7 @@ impl Instance {
         limits: Limits,
         registry: intrinsic::Registry,
     ) -> Self {
-        Self::load_full(module, limits, registry)
+        Self::load_full(module, limits, registry, Self::DEFAULT_MODULE_PATH)
     }
 
     /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
@@ -76,7 +113,12 @@ impl Instance {
     /// fills it when it executes; a read before then is a use-before-defined error).
     /// The module top level becomes an ordinary, drivable `ModuleTopLevel` frame
     /// whose pending work sequences its statements.
-    fn load_full(module: ResolvedModule, limits: Limits, intrinsics: intrinsic::Registry) -> Self {
+    fn load_full(
+        module: ResolvedModule,
+        limits: Limits,
+        intrinsics: intrinsic::Registry,
+        module_path: &str,
+    ) -> Self {
         debug_assert!(
             matches!(
                 module.ast.node(module.root),
@@ -140,7 +182,7 @@ impl Instance {
             namespace,
             wildcards: Vec::new(),
         }];
-        let mut load = ModuleLoad::new();
+        let mut load = ModuleLoad::new(module_path);
         for module in native_modules {
             let id = ModuleId(modules.len() as u32);
             let path: Box<str> = module.name.clone();
@@ -222,6 +264,8 @@ impl Instance {
                 gc_every_safe_point: false,
                 cancel: Arc::new(AtomicBool::new(false)),
                 host_pause: Arc::new(AtomicBool::new(false)),
+                breakpoints: super::breakpoint::Breakpoints::new(),
+                safe_point_stmt: None,
                 limits,
                 load_diagnostics,
             },

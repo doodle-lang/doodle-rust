@@ -26,7 +26,7 @@ impl Machine {
             intrinsics: intrinsic::Registry::new(),
             output: Vec::new(),
             pending: None,
-            load: modload::ModuleLoad::new(),
+            load: modload::ModuleLoad::new(Instance::DEFAULT_MODULE_PATH),
             protocols: super::protocol::Registry::default(),
             // No modules in this bare machine; the prelude id is a placeholder never resolved.
             prelude: crate::span::ModuleId(0),
@@ -41,6 +41,8 @@ impl Machine {
             gc_every_safe_point: false,
             cancel: Arc::new(AtomicBool::new(false)),
             host_pause: Arc::new(AtomicBool::new(false)),
+            breakpoints: super::breakpoint::Breakpoints::new(),
+            safe_point_stmt: None,
             limits,
             load_diagnostics: Vec::new(),
         }
@@ -312,6 +314,166 @@ fn a_pause_requested_mid_drive_fires_on_the_next_drive() {
         ),
         "the one-shot pause is spent; the drive completes"
     );
+}
+
+// --- M6.4: breakpoints (E§8.6, S-21) ---
+
+#[test]
+fn continue_stops_at_a_breakpoint_before_the_line_runs_run_to_completion_ignores_it() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // `print` output is the observable "which lines ran" — module-level `let`s bind global
+    // cells, not frame locals, so output is the clean witness of the stop point.
+    let src = "print(1)\nprint(2)\nprint(3)\n";
+
+    // Under `Continue`, the breakpoint on line 2 stops *before* `print(2)` runs — line 1 has
+    // printed, line 2 has not. Resuming completes the run.
+    let mut inst = load_source_with_print(src);
+    let id = inst.set_breakpoint("main", 2);
+    assert!(
+        inst.breakpoints()[0].resolved,
+        "resolved against the loaded entry module"
+    );
+    let out = run(&mut inst, Directive::Continue);
+    assert!(
+        matches!(out, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
+        "{out:?}"
+    );
+    assert_eq!(
+        inst.output(),
+        b"1\n",
+        "stopped before line 2 ran, after line 1"
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.output(), b"1\n2\n3\n");
+
+    // The same breakpoint under `RunToCompletion` is ignored.
+    let mut inst2 = load_source_with_print(src);
+    inst2.set_breakpoint("main", 2);
+    assert!(matches!(
+        run(&mut inst2, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst2.output(), b"1\n2\n3\n");
+}
+
+#[test]
+fn a_breakpoint_snaps_forward_past_a_code_less_line() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // Line 2 is blank; a breakpoint on it snaps forward to line 3's statement (S-21).
+    let mut inst = load_source_with_print("print(1)\n\nprint(2)\n");
+    let id = inst.set_breakpoint("main", 2);
+    assert!(
+        inst.breakpoints()[0].resolved,
+        "snapped to the next statement"
+    );
+    let out = run(&mut inst, Directive::Continue);
+    assert!(
+        matches!(out, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
+        "{out:?}"
+    );
+    // Snapped to line 3 (`print(2)`) and stopped before it — only line 1 has printed.
+    assert_eq!(inst.output(), b"1\n");
+}
+
+#[test]
+fn a_breakpoint_in_a_loop_body_refires_each_iteration() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // `n = n + 1` (line 3) runs three times; the breakpoint fires each iteration (per-
+    // iteration refire falls out of matching the statement about to run, not a one-shot flag).
+    let mut inst = load_source("let n = 0\nwhile n < 3 do\n  n = n + 1\nend\n");
+    let id = inst.set_breakpoint("main", 3);
+    let mut hits = 0;
+    loop {
+        match run(&mut inst, Directive::Continue) {
+            Outcome::Paused(PauseReason::Breakpoint(b)) => {
+                assert_eq!(b, id);
+                hits += 1;
+                assert!(hits <= 5, "refire runaway");
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+    assert_eq!(hits, 3, "one hit per loop iteration");
+}
+
+#[test]
+fn a_cleared_breakpoint_does_not_fire() {
+    use crate::drive::{Directive, Outcome, run};
+    let mut inst = load_source("let a = 1\nlet b = 2\n");
+    let id = inst.set_breakpoint("main", 2);
+    inst.clear_breakpoint(id);
+    assert!(
+        inst.breakpoints().is_empty(),
+        "the listing drops a cleared breakpoint"
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Completed(None)
+    ));
+}
+
+#[test]
+fn an_unknown_canonical_or_a_past_eof_line_is_pending_not_an_error() {
+    use crate::drive::{Directive, Outcome, run};
+    let mut inst = load_source("let a = 1\n");
+    // A file never imported: pending, never an error, never fires.
+    let unknown = inst.set_breakpoint("never-imported", 1);
+    // A line past the last statement: no safe point at/after it, so pending and unhittable.
+    let past_eof = inst.set_breakpoint("main", 99);
+    let list = inst.breakpoints();
+    assert!(
+        !list.iter().find(|e| e.id == unknown).unwrap().resolved,
+        "unknown canonical is pending"
+    );
+    assert!(
+        !list.iter().find(|e| e.id == past_eof).unwrap().resolved,
+        "past-EOF line is pending"
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Completed(None)
+    ));
+}
+
+#[test]
+fn a_pending_breakpoint_resolves_when_its_module_loads_then_fires() {
+    use crate::drive::{Directive, ImportResolution, Outcome, PauseReason, resolve_import, run};
+    // Set-then-run across a mid-drive import (S-21): the breakpoint on `lib` is pending until
+    // `lib` loads, then fires inside its top level — before its line 2 runs.
+    let mut inst = load_source_with_print("import lib\nprint(99)\n");
+    let id = inst.set_breakpoint("lib", 2);
+    assert!(!inst.breakpoints()[0].resolved, "pending before lib loads");
+
+    let mut outcome = run(&mut inst, Directive::Continue);
+    if let Outcome::SuspendedImport(_) = &outcome {
+        outcome = resolve_import(
+            &mut inst,
+            ImportResolution::Source {
+                text: "print(1)\nprint(2)\n".to_string(),
+                canonical_id: "lib".to_string(),
+            },
+        );
+    }
+    assert!(
+        matches!(outcome, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
+        "{outcome:?}"
+    );
+    assert!(inst.breakpoints()[0].resolved, "resolved after lib loaded");
+    assert_eq!(
+        inst.output(),
+        b"1\n",
+        "stopped before lib line 2, after line 1"
+    );
+
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(inst.output(), b"1\n2\n99\n");
 }
 
 #[test]

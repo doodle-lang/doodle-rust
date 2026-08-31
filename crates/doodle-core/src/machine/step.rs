@@ -91,6 +91,19 @@ pub(crate) fn step(
         cont,
         Some(Cont::Seq { .. }) | Some(Cont::ReturnBarrier) | None
     );
+    // Record the statement about to run for breakpoint matching (E§8.6): the `Seq` case is
+    // about to dispatch `stmts[next]`. Only at the outer drive — a reentrant native-consumer
+    // drive's steps are not the outer drive's safe points, so `reentry_depth > 0` records
+    // `None` rather than clobbering the outer statement with an inner one. A return safe point
+    // (`ReturnBarrier`/`None`) or a call-entry safe point (a non-`Seq` cont) has no statement.
+    machine.safe_point_stmt = match &cont {
+        Some(Cont::Seq { block, next }) if machine.reentry_depth == 0 => {
+            stmt_list(resolved.ast.node(*block))
+                .get(*next as usize)
+                .copied()
+        }
+        _ => None,
+    };
     let depth_before = machine.frames.len();
     let dispatched = dispatch(resolved, modules, heap, machine, cont);
     // A reentrant nested drive (a native block-consumer running its block) faulted —

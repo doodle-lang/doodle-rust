@@ -73,6 +73,9 @@ pub fn parse_program(source: &str, module: ModuleId) -> Parsed {
     } = lex(source, module);
     let mut p = Parser::new(source, &tokens, diagnostics, module);
     let root = p.program();
+    // Record the line index for the breakpoint line↔byte mapping (E§8.6): only whole
+    // programs load as modules, so only this entry needs it.
+    p.ast.set_line_starts(source);
     Parsed {
         ast: p.ast,
         root,

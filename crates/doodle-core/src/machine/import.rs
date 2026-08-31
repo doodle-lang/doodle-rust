@@ -134,6 +134,9 @@ impl Instance {
             wildcards: vec![self.machine.prelude],
         });
         self.machine.frames.push(frame);
+        // A set-then-run breakpoint on this canonical (E§8.6, S-21) was pending until now:
+        // resolve it against the freshly loaded source (also the reload/reuse re-snap rule).
+        self.reresolve_breakpoints(canonical_id);
     }
 
     /// Registers a statically-broken fetched module (E§3.2 `LoadError`) as `failed` and
