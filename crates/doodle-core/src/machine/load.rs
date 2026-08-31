@@ -221,6 +221,7 @@ impl Instance {
                 reentry_depth: 0,
                 gc_every_safe_point: false,
                 cancel: Arc::new(AtomicBool::new(false)),
+                host_pause: Arc::new(AtomicBool::new(false)),
                 limits,
                 load_diagnostics,
             },

@@ -40,6 +40,7 @@ impl Machine {
             reentry_depth: 0,
             gc_every_safe_point: false,
             cancel: Arc::new(AtomicBool::new(false)),
+            host_pause: Arc::new(AtomicBool::new(false)),
             limits,
             load_diagnostics: Vec::new(),
         }
@@ -247,6 +248,70 @@ fn frame_observation_reads_a_function_frames_locals() {
         guard += 1;
         assert!(guard < 100, "never stepped inside `f`");
     }
+}
+
+// --- M6.3: host-requested pause (E§8.8) ---
+
+#[test]
+fn a_host_pause_stops_at_the_next_safe_point_regardless_of_directive() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // A host pause stops the drive at its next safe point **regardless of directive**
+    // (E§8.8) — a host control like cancel, not a `Step*` decision — with state intact and
+    // resumable. The request is one-shot: a re-drive runs to completion without re-pausing.
+    // `Continue` has no breakpoints/raise-trap yet (M6.4/M6.5), so it runs like
+    // `RunToCompletion` here; both are the non-`Step*` directives the pause must still stop.
+    for directive in [Directive::RunToCompletion, Directive::Continue] {
+        let mut inst = load_source("let a = 1\nlet b = 2\nlet c = 3\n");
+        // Press the pause button before driving; the drive stops at its first safe point.
+        inst.pause_token().pause();
+        let out = run(&mut inst, directive);
+        assert!(
+            matches!(out, Outcome::Paused(PauseReason::HostPause)),
+            "{directive:?} honors a host pause: {out:?}"
+        );
+        assert_eq!(
+            inst.state(),
+            InstanceState::Paused,
+            "a pause is resumable, not a fault"
+        );
+        // The request was consumed (one-shot): re-driving completes, no second pause.
+        let out = run(&mut inst, directive);
+        assert!(
+            matches!(out, Outcome::Completed(None)),
+            "the re-drive runs to completion: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pause_requested_mid_drive_fires_on_the_next_drive() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // A pause is not consumed while the drive is between safe points or not running: a
+    // request made after one drive completes a slice fires at the first safe point of the
+    // next drive. Here a `Step` advances one safe point, then the button is pressed; the
+    // following `Step` reports the host pause (it wins over the `Step*` decision), and the
+    // run then finishes.
+    let mut inst = load_source("let a = 1\nlet b = 2\nlet c = 3\n");
+    assert!(matches!(
+        run(&mut inst, Directive::Step),
+        Outcome::Paused(PauseReason::Step)
+    ));
+    inst.pause_token().pause();
+    assert!(
+        matches!(
+            run(&mut inst, Directive::Step),
+            Outcome::Paused(PauseReason::HostPause)
+        ),
+        "the host pause preempts the Step pause reason"
+    );
+    // Drive to completion; the one-shot request is spent, so no further host pause.
+    assert!(
+        matches!(
+            run(&mut inst, Directive::RunToCompletion),
+            Outcome::Completed(None)
+        ),
+        "the one-shot pause is spent; the drive completes"
+    );
 }
 
 #[test]

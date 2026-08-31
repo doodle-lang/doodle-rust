@@ -43,6 +43,7 @@ mod modload;
 mod native;
 mod observe;
 mod ops;
+mod pause;
 mod protect;
 mod protocol;
 mod record;
@@ -70,6 +71,7 @@ pub use intrinsic::{
 };
 pub use native::{ConstValue, NativeMember, NativeModule};
 pub use observe::{Binding, ElidedFrameObservation, FrameObservation, Position};
+pub use pause::PauseToken;
 pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,
@@ -255,6 +257,13 @@ pub(crate) struct Machine {
     /// handler) and **polled at each safe point** ([`poll_cancel`](Self::poll_cancel));
     /// once set, the drive arms the cancel unwind (§12) and faults `Cancelled`.
     cancel: Arc<AtomicBool>,
+    /// The host's pause flag (E§8.8): the "pause button", shared with the
+    /// [`PauseToken`]s the host holds. Set from anywhere (another thread, a UI event) and
+    /// consumed by the drive loop at the next safe point ([`Instance::take_host_pause`]),
+    /// which stops `Paused(HostPause)` with state intact and resumable — **regardless of
+    /// directive**, a host control like [`cancel`](Self::cancel) but resumable, not a fault
+    /// and not gated by `Step*`. One-shot: cleared when it fires, so a re-drive continues.
+    host_pause: Arc<AtomicBool>,
     /// The instance-scoped **load-diagnostics record** (E§3.2/§8, S-63): every front-end
     /// diagnostic the engine produces for every module the instance loads or attempts —
     /// the entry module's prelude-shadowing at load, each imported module's front-end
@@ -360,6 +369,24 @@ impl Instance {
     /// was suspended, so a host raise racing the stop button does not escape it (S-23).
     pub(crate) fn cancel_requested(&self) -> bool {
         self.machine.cancel.load(Ordering::Relaxed)
+    }
+
+    /// A [`PauseToken`] for this instance (E§8.8): the host's pause button. The token is
+    /// cloneable and thread-safe, so a host may hold it (or a clone) elsewhere — e.g. on a
+    /// UI thread — and request a pause while a drive is running. All tokens for one instance
+    /// share its pause flag.
+    pub fn pause_token(&self) -> PauseToken {
+        PauseToken::new(Arc::clone(&self.machine.host_pause))
+    }
+
+    /// Consumes a pending host-pause request (E§8.8): atomically reads **and clears** the
+    /// pause flag, returning whether one was set. The drive loop calls this at each safe
+    /// point; a `true` stops the drive `Paused(HostPause)` with state intact and resumable.
+    /// Clearing here makes the request one-shot, so the re-drive continues rather than
+    /// pausing again on the same request. Distinct from cancel's [`poll_cancel`]: no unwind
+    /// is armed and no fault is raised — the pause is a resumable stop, not a teardown.
+    pub(crate) fn take_host_pause(&mut self) -> bool {
+        self.machine.host_pause.swap(false, Ordering::Relaxed)
     }
 
     /// Discards a parked capability request and arms the cancel unwind (E§10.1, S-23):

@@ -165,10 +165,13 @@ pub enum ImportResolution {
 /// Starts (from `Ready`) or continues (after a `Paused`) driving `instance` under
 /// `directive`, returning an [`Outcome`] (E§7.3).
 ///
-/// `RunToCompletion` and `Continue` run without pausing (breakpoints and the
-/// raise-trap that make `Continue` distinct are M6); a `Step*` directive pauses at
-/// the next statement-level safe point selected by frame depth (E§8.5) →
-/// [`Paused`](Outcome::Paused)`(`[`PauseReason::Step`]`)`. An uncaught raise leaves
+/// `RunToCompletion` and `Continue` run without a `Step*` pause (the breakpoints and
+/// raise-trap that make `Continue` distinct are M6); a `Step*` directive pauses at the
+/// next statement-level safe point selected by frame depth (E§8.5) →
+/// [`Paused`](Outcome::Paused)`(`[`PauseReason::Step`]`)`. A host pause requested through a
+/// [`PauseToken`](crate::machine::PauseToken) stops **any** directive at the next safe point
+/// → [`Paused`](Outcome::Paused)`(`[`PauseReason::HostPause`]`)`, with state resumable
+/// (E§8.8) — re-drive to continue. An uncaught raise leaves
 /// the instance `Raised`, an engine fault leaves it `Faulted`, and completion leaves
 /// it `Completed` (E§3.3 outcome↔state correspondence). Re-driving a terminal
 /// instance, or `run`-ing a `Suspended` one (use [`resolve`]), is a host-contract
@@ -373,6 +376,17 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
                     } else {
                         Outcome::Suspended(instance.capability_request())
                     };
+                }
+                // A host-requested pause (E§8.8): stops at the next safe point **regardless
+                // of directive** — a host control like cancel, not a `Step*` decision — so it
+                // is checked before `should_pause` and wins over it. Only at an actual safe
+                // point (`safe_point.is_some()`), never mid-expression; consumed here
+                // (`take_host_pause` reads-and-clears) so the request is one-shot and the
+                // re-drive continues. State stays intact and resumable — a pause is not a
+                // fault, so no unwind is armed.
+                if safe_point.is_some() && instance.take_host_pause() {
+                    instance.set_state(InstanceState::Paused);
+                    return Outcome::Paused(PauseReason::HostPause);
                 }
                 if let Some(depth) = safe_point
                     && should_pause(directive, anchor_depth, depth)
