@@ -6,8 +6,9 @@
 
 use super::{
     Arc, AtomicBool, CellIdx, Config, ConfigError, Cont, Directive, Frame, FusedCounter,
-    HandleTable, Heap, Instance, InstanceState, Limits, Machine, ModuleLoad, ResolvedModule,
-    TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local, ring, types,
+    HandleTable, Heap, Instance, InstanceState, Limits, Machine, ModuleLoad, ObservationMode,
+    ResolvedModule, TypeIdx, UNICODE_VERSION, UnicodeVersion, Value, intrinsic, limits, local,
+    ring, types,
 };
 use crate::diag::{Diagnostic, DiagnosticCode};
 use crate::heap::CellKind;
@@ -46,12 +47,14 @@ impl Instance {
                 pinned: UNICODE_VERSION,
             });
         }
-        Ok(Self::load_full(
+        let mut instance = Self::load_full(
             module,
             config.limits,
             intrinsic::Registry::new(),
             module_path,
-        ))
+        );
+        instance.set_observation_mode(config.observation_mode);
+        Ok(instance)
     }
 
     /// The Unicode/UCD version this engine is pinned to (L§4.4; the config's
@@ -267,6 +270,8 @@ impl Instance {
                 breakpoints: super::breakpoint::Breakpoints::new(),
                 safe_point_stmt: None,
                 raise_trap_enabled: false,
+                observation_mode: ObservationMode::Statement,
+                fine_span: None,
                 limits,
                 load_diagnostics,
             },

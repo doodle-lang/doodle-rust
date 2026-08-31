@@ -59,13 +59,37 @@ impl Default for Limits {
     }
 }
 
+/// The observation-mode granularity (engine spec E§8.8, S-62): where the engine may
+/// place safe points a `Step*`/host-pause can stop at. The single observation axis —
+/// there is no eager/lazy local-capture axis, since inspection is pull-based (§8): the
+/// host reads live frame state on demand when stopped (E§8.8, ratified `aac6766`).
+/// Switching mode changes only *where stepping may stop* (§7.4); it never changes what
+/// the program computes or when a limit trips — resource accounting stays at statement
+/// safe points in every mode (S-20/S-62), so a fault lands at the same instant either way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ObservationMode {
+    /// Per-statement safe points only (the default): between statements, at call entry, and
+    /// at return. The coarse mode a host runs when nobody is watching — it pays nothing extra.
+    #[default]
+    Statement,
+    /// Adds **observation-only** fine safe points at the completion of every non-leaf
+    /// subexpression (E§7.4, S-62) — operator applications, field access, index steps,
+    /// interpolation pieces — the "watch your expression evaluate" primitive. Paid only while
+    /// this mode is on.
+    Subexpression,
+}
+
 /// Instance configuration (engine spec E§3.1). The resource-limits subset landed at
-/// M2a.9; this adds the target Unicode version (S-41). The module-resolver hook,
-/// observation mode, and opaque host-data value join with their features (M2b/M5).
+/// M2a.9; the target Unicode version (S-41) and observation mode (S-62) followed. The
+/// module-resolver hook and opaque host-data value join with their features.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Config {
     /// Resource limits (E§10.2).
     pub limits: Limits,
+    /// The observation-mode granularity (E§8.8, S-62): per-statement (default) or
+    /// per-subexpression safe points. Adjustable at run time via
+    /// [`set_observation_mode`](crate::machine::Instance::set_observation_mode).
+    pub observation_mode: ObservationMode,
     /// The requested target Unicode version (E§3.1, L§4.4). `None` uses the engine's
     /// build-pinned version ([`crate::unicode::UNICODE_VERSION`]); `Some(v)` that is
     /// not that pinned version fails [`create`](crate::machine::Instance::create)

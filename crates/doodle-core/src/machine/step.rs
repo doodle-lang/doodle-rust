@@ -13,14 +13,15 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise, Trace};
 use super::frame::FrameKind;
 use super::modload::LoadState;
-use super::{
-    Halt, LoadedModule, Machine, Value, arith, assign, block, call, compare, control, dict,
-    dynamic, eval, limits, modload, protect, protocol, record, stmt, strop, types, unwind,
-};
-use crate::ast::{BinaryOp, Node, NodeId, UnaryOp};
+use super::{Halt, LoadedModule, Machine, ObservationMode, Value, limits, stmt, unwind};
+use crate::ast::{BinaryOp, Node, NodeId};
 use crate::drive::EngineFault;
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
+use crate::span::Span;
+
+mod dispatch;
+use dispatch::dispatch;
 
 /// Performs one machine transition (machine-design §8), evaluating resource limits
 /// at each statement-level safe point (E§7.4, §10.2). Precondition: `machine` has at
@@ -33,6 +34,10 @@ pub(crate) fn step(
     heap: &mut Heap,
     machine: &mut Machine,
 ) -> Result<Option<usize>, Halt> {
+    // Fresh each transition (E§7.4/§8.4): only a fine safe point below sets it, so it reflects
+    // whether *this* step completed a non-leaf subexpression — `None` during an unwind, at a
+    // statement/call-entry safe point, and in coarse mode.
+    machine.fine_span = None;
     // A non-local transfer in flight takes over the transition (§12): unwind toward
     // the exit's target instead of running continuations normally. Intervening cleanup
     // steps hit no safe point, but the **settling** transition — where the exit pops
@@ -104,6 +109,15 @@ pub(crate) fn step(
         }
         _ => None,
     };
+    // In fine mode (E§7.4, S-62), classify the popped cont: does executing it *complete* a
+    // non-leaf subexpression? Computed before `dispatch` consumes `cont`. `and`/`or` that
+    // short-circuits completes inside `dispatch` instead and sets `fine_span` there.
+    let fine_completion = if machine.observation_mode == ObservationMode::Subexpression {
+        cont.as_ref()
+            .and_then(|c| fine_completion_span(c, resolved))
+    } else {
+        None
+    };
     let depth_before = machine.frames.len();
     let dispatched = dispatch(resolved, modules, heap, machine, cont);
     // A reentrant nested drive (a native block-consumer running its block) faulted —
@@ -148,216 +162,22 @@ pub(crate) fn step(
         }
         safe_point_depth = Some(depth);
     }
-    Ok(safe_point_depth)
-}
-
-/// Executes one popped continuation — or, when `None`, returns from a drained
-/// frame. This is the transition proper; `step` wraps it with the safe-point limit
-/// checks. Its error is a plain [`Raise`]; `step`'s `?` lifts it into [`Halt`].
-fn dispatch(
-    resolved: &ResolvedModule,
-    modules: &mut [LoadedModule],
-    heap: &mut Heap,
-    machine: &mut Machine,
-    cont: Option<Cont>,
-) -> Result<(), Raise> {
-    // The executing module is the one whose resolved AST we hold (AD5); its namespace is
-    // `modules[cur].namespace`. Read arms borrow it inline (a short-lived shared reborrow);
-    // the call, field-read, and import arms take `modules` so they can reach another
-    // module's AST/namespace (cross-module call, `m.x`) or bind into the importer's.
-    let cur = resolved.canonical_id.0 as usize;
-    match cont {
-        Some(Cont::Seq { block, next }) => {
-            seq_step(resolved, machine, block, next);
-            Ok(())
-        }
-        Some(Cont::Eval { node }) => eval::eval(resolved, modules, heap, machine, node),
-        Some(Cont::BinRhs { op, rhs, span }) => eval::bin_rhs(machine, op, rhs, span),
-        Some(Cont::BinApply { op, lhs, span }) => {
-            let rhs = take_value(machine, span)?;
-            let result = match op {
-                // `x is T`: the right operand is a type value (L§6.5). The callable
-                // trio (`Procedure`/`Function`/`Callable`) needs the resolver and the
-                // intrinsic registry to read a callable's `to`/`fn` kind (S-37).
-                BinaryOp::Is => types::is_op(
-                    lhs,
-                    rhs,
-                    heap,
-                    resolved,
-                    modules,
-                    &machine.protocols,
-                    &machine.intrinsics,
-                    span,
-                )?,
-                // String `+`/`*` branch off the numeric path (L§4.4, S-59); a pair with no
-                // string operand falls through to numeric arithmetic.
-                _ if is_arithmetic(op) => {
-                    match strop::try_binary(op, lhs, rhs, heap, machine, span)? {
-                        Some(v) => v,
-                        None => arith::binary(op, lhs, rhs, heap, machine, span)?,
-                    }
-                }
-                // A comparison or equality operator (`== != < > <= >=`).
-                _ => compare::binary(op, lhs, rhs, heap, span)?,
-            };
-            machine.reg = Some(result);
-            Ok(())
-        }
-        Some(Cont::UnaryApply { op, span }) => {
-            let operand = take_value(machine, span)?;
-            let result = match op {
-                UnaryOp::Not => compare::not(operand, span)?,
-                UnaryOp::Neg | UnaryOp::Pos => arith::unary(op, operand, heap, span)?,
-            };
-            machine.reg = Some(result);
-            Ok(())
-        }
-        Some(Cont::AndRhs { rhs, span }) => eval::logical_rhs(machine, rhs, span, true),
-        Some(Cont::OrRhs { rhs, span }) => eval::logical_rhs(machine, rhs, span, false),
-        Some(Cont::AssertBool { span }) => {
-            let v = take_value(machine, span)?;
-            machine.reg = Some(Value::Bool(compare::as_bool(v, "and/or", span)?));
-            Ok(())
-        }
-        Some(Cont::BindLet { decl }) => {
-            control::bind_let(resolved, heap, machine, &modules[cur].namespace, decl)
-        }
-        Some(Cont::AssignTo { assign }) => {
-            assign::assign_to(resolved, heap, machine, &modules[cur].namespace, assign)
-        }
-        Some(Cont::AssignPlaceObj { assign }) => {
-            assign::assign_place_obj(resolved, machine, assign)
-        }
-        Some(Cont::AssignFieldVal { assign, object }) => {
-            record::field_set(resolved, heap, machine, assign, object)
-        }
-        Some(Cont::AssignIndexKey { assign, object }) => {
-            assign::assign_index_key(resolved, machine, assign, object)
-        }
-        Some(Cont::AssignIndexVal {
-            assign,
-            object,
-            key,
-        }) => dict::index_set(resolved, modules, heap, machine, assign, object, key),
-        Some(Cont::IfChoose { node, index }) => control::if_choose(resolved, machine, node, index),
-        Some(Cont::WhileCheck { node }) => control::while_check(resolved, machine, node),
-        Some(Cont::LoopReloop { node }) => {
-            control::loop_reloop(resolved, machine, node);
-            Ok(())
-        }
-        Some(Cont::CallGotCallee { call }) => {
-            call::got_callee(resolved, modules, heap, machine, call)
-        }
-        Some(Cont::CallGotArg {
-            call,
-            callee,
-            values,
-            index,
-        }) => call::got_arg(
-            resolved, modules, heap, machine, call, callee, values, index,
-        ),
-        Some(Cont::BlockGotArg {
-            call,
-            values,
-            index,
-        }) => block::got_block_arg(resolved, heap, machine, call, values, index),
-        Some(Cont::ListGotElem {
-            list,
-            values,
-            index,
-        }) => eval::list_got_elem(resolved, heap, machine, list, values, index),
-        Some(Cont::StrInterp { node, acc, index }) => {
-            eval::str_interp(resolved, modules, heap, machine, node, acc, index)
-        }
-        Some(Cont::StrInterpRendered { node, acc, index }) => {
-            eval::str_interp_rendered(resolved, heap, machine, node, acc, index)
-        }
-        Some(Cont::DictGotKey {
-            dict,
-            entries,
-            index,
-        }) => dict::dict_got_key(resolved, machine, dict, entries, index),
-        Some(Cont::DictGotValue {
-            dict,
-            entries,
-            index,
-            key,
-        }) => dict::dict_got_value(resolved, modules, heap, machine, dict, entries, index, key),
-        Some(Cont::DictBuildHashed {
-            node,
-            dict,
-            entries,
-            index,
-        }) => dict::dict_build_hashed(resolved, modules, heap, machine, node, dict, entries, index),
-        Some(Cont::IndexGotObject { index, span }) => dict::index_got_object(machine, index, span),
-        Some(Cont::IndexApply {
-            object,
-            span,
-            key_node,
-        }) => dict::index_apply(modules, heap, machine, object, key_node, span),
-        Some(Cont::IndexReadHashed { dict, key, span }) => {
-            dict::index_read_hashed(heap, machine, dict, key, span)
-        }
-        Some(Cont::IndexAssignHashed {
-            dict,
-            key,
-            value,
-            span,
-        }) => dict::index_assign_hashed(heap, machine, dict, key, value, span),
-        Some(Cont::BindDefault { slot, default }) => {
-            call::bind_default(resolved, heap, machine, slot, default)
-        }
-        Some(Cont::DefineCallable { decl }) => {
-            call::define_callable(resolved, heap, machine, &modules[cur].namespace, decl);
-            Ok(())
-        }
-        Some(Cont::DefineRecord { decl }) => {
-            record::define(resolved, heap, machine, &modules[cur].namespace, decl);
-            Ok(())
-        }
-        Some(Cont::DefineProtocol { decl }) => {
-            protocol::define_protocol(resolved, modules, heap, machine, cur, decl)
-        }
-        Some(Cont::DefineImplement { decl }) => {
-            protocol::define_implement(resolved, modules, heap, machine, cur, decl)
-        }
-        Some(Cont::FieldRead { field }) => {
-            record::field_read(resolved, modules, heap, machine, field)
-        }
-        // A `with`'s value is now in the register: open its dynamic binding and run the
-        // body under a `WithRestore` (dynamic.rs).
-        Some(Cont::WithBind { with }) => dynamic::with_bind(resolved, modules, heap, machine, with),
-        // A `with` body completed normally: restore its dynamic binding (machine-design
-        // §13). The body's value stays in the register as the `with`'s value.
-        Some(Cont::WithRestore { dyn_mark }) => {
-            unwind::restore(machine, heap, dyn_mark);
-            Ok(())
-        }
-        // A `try` body completed normally: its handler is not run, and the body's value
-        // is the `try`'s value (already in the register). Discard the handler cont.
-        Some(Cont::TryHandler { .. }) => Ok(()),
-        // A `raise` throws its operand (or re-raises the handled exception), arming the
-        // Raise unwind (protect.rs).
-        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, heap, machine, raise),
-        // A rescue body finished normally: pop the exception it was handling (L§12.2).
-        Some(Cont::PopHandler) => {
-            machine.pop_handling();
-            Ok(())
-        }
-        Some(Cont::ReturnBarrier) => call::return_from_callable(resolved, heap, machine),
-        Some(Cont::ExitApply { exit }) => unwind::exit_apply(resolved, heap, machine, exit),
-        // Process one target of an `import` (E§6): bind a loaded module, park an import
-        // suspension for an unloaded one, or raise a circular/failed import. Binds into the
-        // importer's namespace, so it takes `modules` mutably.
-        Some(Cont::ImportTargets { import, next }) => {
-            modload::step_import_targets(resolved, modules, heap, machine, import, next)
-        }
-        // The frame's work is drained: return from it.
-        None => {
-            return_from_top_frame(machine);
-            Ok(())
-        }
+    // A **fine** (per-subexpression) safe point (E§7.4, S-62), only when no statement/call-entry
+    // safe point already fired this step: the popped cont completed a non-leaf subexpression
+    // (`fine_completion`), or an `and`/`or` short-circuited (`fine_span` set in `dispatch`).
+    // **Observation-only** — no `limits::safe_point`/`poll_cancel` runs here, so the step budget,
+    // slice fuel, GC, and cancellation observation stay at statement safe points and a fault
+    // lands at the same instant in either mode. `fine_span` carries the completed span to
+    // `completed_position`; cleared when this is not a fine stop.
+    if safe_point_depth.is_none()
+        && let Some(span) = fine_completion.or(machine.fine_span)
+    {
+        machine.fine_span = Some(span);
+        safe_point_depth = Some(machine.frames.len());
+    } else {
+        machine.fine_span = None;
     }
+    Ok(safe_point_depth)
 }
 
 /// Runs the statement at `next` in `block`, and re-arms the sequence for the
@@ -472,6 +292,32 @@ fn is_arithmetic(op: BinaryOp) -> bool {
             | BinaryOp::Rem
             | BinaryOp::Pow
     )
+}
+
+/// The span of the non-leaf subexpression a cont **completes** (E§7.4, S-62), for a fine
+/// safe point, or `None` if executing it does not complete one. The completing conts are
+/// the syntactic forms E§7.4 enumerates: operator applications (`BinApply`/`UnaryApply`, and
+/// an `and`/`or`'s full-eval result at `AssertBool`), field access (`FieldRead`), and index
+/// steps (`IndexApply`/`IndexReadHashed`), plus each interpolation piece (`StrInterp`/
+/// `StrInterpRendered`). Leaves (literals, name reads) and mid-evaluation plumbing
+/// (`BinRhs`, `CallGotArg`, list/dict building — deliberately not in the set) return `None`.
+/// A short-circuited `and`/`or` completes inside `dispatch` and records its span there. An
+/// `if`-expression branch result completes at the branch's final statement safe point (its
+/// arms are blocks), so it needs no entry here. The span is what the cont carries: the whole
+/// construct for index/field/interpolation, the operator for the arithmetic/boolean ops.
+fn fine_completion_span(cont: &Cont, resolved: &ResolvedModule) -> Option<Span> {
+    match cont {
+        Cont::BinApply { span, .. }
+        | Cont::UnaryApply { span, .. }
+        | Cont::AssertBool { span }
+        | Cont::IndexApply { span, .. }
+        | Cont::IndexReadHashed { span, .. } => Some(*span),
+        Cont::FieldRead { field } => Some(resolved.ast.span(*field)),
+        Cont::StrInterp { node, .. } | Cont::StrInterpRendered { node, .. } => {
+            Some(resolved.ast.span(*node))
+        }
+        _ => None,
+    }
 }
 
 /// The statement list of a body node (`Module` or `Block`).

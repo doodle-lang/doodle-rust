@@ -9,7 +9,7 @@
 use crate::machine::{Halt, Handle, Instance, InstanceState, Trace, Value};
 
 mod config;
-pub use config::{Config, ConfigError, LimitKind, Limits};
+pub use config::{Config, ConfigError, LimitKind, Limits, ObservationMode};
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

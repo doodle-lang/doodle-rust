@@ -44,6 +44,8 @@ impl Machine {
             breakpoints: super::breakpoint::Breakpoints::new(),
             safe_point_stmt: None,
             raise_trap_enabled: false,
+            observation_mode: super::ObservationMode::Statement,
+            fine_span: None,
             limits,
             load_diagnostics: Vec::new(),
         }
@@ -574,6 +576,230 @@ fn without_raise_trapping_a_raise_is_not_trapped() {
         inst.trapped_raise().is_none(),
         "no in-flight raise once it has surfaced"
     );
+}
+
+// --- M6.6: stepping refinement + observation mode (E§7.4/§8.8, S-62) ---
+
+/// The int-valued fine (subexpression-completion) stops of `src` under `Step` in
+/// `Subexpression` mode, in order: each `Step` pause where `completed_position()` is set is a
+/// fine stop, and its just-produced value (the result register) is recorded when it is an int.
+/// Non-int fine stops (a Bool from a comparison, a string from interpolation) are skipped.
+fn fine_int_trace(src: &str) -> Vec<i64> {
+    use crate::drive::{Directive, ObservationMode, Outcome, PauseReason, run};
+    let mut inst = load_source(src);
+    inst.set_observation_mode(ObservationMode::Subexpression);
+    let mut trace = Vec::new();
+    let mut guard = 0;
+    loop {
+        match run(&mut inst, Directive::Step) {
+            Outcome::Paused(PauseReason::Step) => {
+                if inst.completed_position().is_some()
+                    && let Some(value) = inst.result()
+                    && let Some(n) = value.as_int()
+                {
+                    trace.push(n);
+                }
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        guard += 1;
+        assert!(guard < 500, "fine step trace runaway");
+    }
+    trace
+}
+
+#[test]
+fn fine_mode_stops_at_operator_completions_not_at_leaves() {
+    // `2 * 3` = 6 completes first, then `1 + 6` = 7. The leaves (1, 2, 3) are not stopped at,
+    // and `let`/statement boundaries are statement stops (no `completed_position`), so the
+    // fine trace is exactly the two operator results.
+    assert_eq!(fine_int_trace("let n = 1 + 2 * 3\n"), vec![6, 7]);
+}
+
+#[test]
+fn fine_mode_stops_at_field_and_index_completions() {
+    // Field access (`p.x`) and index steps (`xs[1]`) are fine safe points; the constructor
+    // call and the list literal are not (calls' entry/return are statement points, list/dict
+    // literals are deliberately outside the fine set), and their operands are leaves.
+    let src = "record Point with x, y end\n\
+               let p = Point(3, 4)\n\
+               let xs = [10, 20]\n\
+               let s = p.x + xs[1]\n";
+    assert_eq!(fine_int_trace(src), vec![3, 20, 23]);
+}
+
+#[test]
+fn fine_mode_covers_an_if_expression_branch_and_short_circuit() {
+    // The chosen branch's arithmetic (`10 + 5` = 15) completes as a fine stop; the branch
+    // result itself lands at a statement safe point (arms are blocks). A short-circuited
+    // `or` (`true or …`) completes as an operator application without evaluating its rhs.
+    let trace = fine_int_trace("let x = if 2 > 1 then\n10 + 5\nelse\n0\nend\n");
+    assert!(
+        trace.contains(&15),
+        "the taken branch's operator completes: {trace:?}"
+    );
+}
+
+#[test]
+fn interpolation_pieces_are_fine_stops() {
+    use crate::drive::{Directive, ObservationMode, Outcome, PauseReason, run};
+    // An interpolated string renders each `{expr}` piece; in fine mode those are safe points.
+    let mut inst = load_source("let who = \"world\"\nlet g = \"hi {who}!\"\n");
+    inst.set_observation_mode(ObservationMode::Subexpression);
+    let mut fine_stops = 0;
+    let mut guard = 0;
+    loop {
+        match run(&mut inst, Directive::Step) {
+            Outcome::Paused(PauseReason::Step) => {
+                if inst.completed_position().is_some() {
+                    fine_stops += 1;
+                }
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("{other:?}"),
+        }
+        guard += 1;
+        assert!(guard < 200);
+    }
+    assert!(fine_stops >= 1, "the interpolation piece is a fine stop");
+}
+
+#[test]
+fn coarse_mode_has_no_fine_stops_and_the_mode_is_switchable() {
+    use crate::drive::{Directive, ObservationMode, Outcome, PauseReason, run};
+    let mut inst = load_source("let n = 1 + 2 * 3\n");
+    assert_eq!(
+        inst.observation_mode(),
+        ObservationMode::Statement,
+        "per-statement is the default"
+    );
+    let mut fine_stops = 0;
+    loop {
+        match run(&mut inst, Directive::Step) {
+            Outcome::Paused(PauseReason::Step) => {
+                if inst.completed_position().is_some() {
+                    fine_stops += 1;
+                }
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(fine_stops, 0, "coarse mode never lands at a fine stop");
+    // The mode is adjustable at run time.
+    inst.set_observation_mode(ObservationMode::Subexpression);
+    assert_eq!(inst.observation_mode(), ObservationMode::Subexpression);
+}
+
+#[test]
+fn accounting_is_mode_independent_so_a_budget_faults_at_the_same_instant() {
+    use crate::drive::{Directive, Limits, ObservationMode, Outcome, run};
+    // The step budget counts statement safe points only (S-62); fine safe points do no
+    // accounting. So a budget-limited run faults after the same statements in either mode —
+    // identical output up to the fault, identical `LimitExceeded` outcome.
+    let src = "let i = 0\nwhile i < 100 do\nprint(i)\ni = i + 1\nend\n";
+    let limits = Limits {
+        step_budget: 30,
+        ..Limits::default()
+    };
+    let outputs: Vec<(bool, Vec<u8>)> =
+        [ObservationMode::Statement, ObservationMode::Subexpression]
+            .into_iter()
+            .map(|mode| {
+                let mut inst = load_source_with_print_and_limits(src, limits);
+                inst.set_observation_mode(mode);
+                let faulted = matches!(
+                    run(&mut inst, Directive::RunToCompletion),
+                    Outcome::Faulted(_)
+                );
+                (faulted, inst.output().to_vec())
+            })
+            .collect();
+    assert!(outputs[0].0 && outputs[1].0, "both modes hit the budget");
+    assert_eq!(
+        outputs[0].1, outputs[1].1,
+        "both modes printed the same prefix before faulting"
+    );
+}
+
+#[test]
+fn a_fine_mode_step_trace_is_deterministic_across_runs() {
+    // The fine safe-point set is part of replay identity (S-62): the same program stops at
+    // the same subexpression completions every run.
+    let src = "let a = 1 + 2\nlet b = a * 3 + 4\n";
+    assert_eq!(fine_int_trace(src), fine_int_trace(src));
+    // `1 + 2` = 3; then `a * 3` = 9 and `9 + 4` = 13 (`a` is a leaf name read, not a stop).
+    assert_eq!(fine_int_trace(src), vec![3, 9, 13]);
+}
+
+#[test]
+fn step_over_a_tail_recursive_loop_stays_at_constant_depth() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // A tail call reuses the frame (§11), preserving its depth AND its serial (identity). So
+    // `StepOver` through a tail-recursive loop stops each iteration at the same depth in the
+    // same frame — the depth-anchored model already handles it; this verifies it.
+    let mut inst = load_source("to go(n)\nif n <= 1 then\nreturn\nend\ngo(n - 1)\nend\ngo(4)\n");
+    // Step in until inside `go` (module top level is depth 1; `go`'s frame is depth 2).
+    let mut guard = 0;
+    while inst.frame_depth() < 2 {
+        assert!(matches!(
+            run(&mut inst, Directive::StepInto),
+            Outcome::Paused(_)
+        ));
+        guard += 1;
+        assert!(guard < 50, "never entered go");
+    }
+    let go_serial = inst.machine.frames.last().unwrap().serial;
+    // Now StepOver through the loop: the tail call is one step and never grows the stack.
+    guard = 0;
+    loop {
+        match run(&mut inst, Directive::StepOver) {
+            Outcome::Paused(PauseReason::Step) => {
+                if inst.frame_depth() == 2 {
+                    assert_eq!(
+                        inst.machine.frames.last().unwrap().serial,
+                        go_serial,
+                        "the tail loop reuses one frame (constant identity)"
+                    );
+                }
+                assert!(
+                    inst.frame_depth() <= 2,
+                    "the tail loop never accumulates frames"
+                );
+            }
+            Outcome::Completed(None) => break,
+            other => panic!("{other:?}"),
+        }
+        guard += 1;
+        assert!(guard < 100, "step-over runaway");
+    }
+}
+
+/// Builds an instance with the `print` intrinsic and custom limits (the fault-instant test
+/// needs both — `load_source_with_print` uses default limits).
+fn load_source_with_print_and_limits(src: &str, limits: Limits) -> Instance {
+    use crate::diag::Severity;
+    let nfc = crate::source::normalize(src);
+    let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let mut registry = Registry::new();
+    registry.register(print_intrinsic()).unwrap();
+    registry.register(each_intrinsic()).unwrap();
+    Instance::load_with_intrinsics_and_limits(resolved.module, limits, registry)
 }
 
 #[test]

@@ -83,10 +83,10 @@ pub use value::{
 
 use crate::ast::NodeId;
 use crate::diag::Diagnostic;
-use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits};
+use crate::drive::{Config, ConfigError, Directive, EngineFault, Limits, ObservationMode};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
-use crate::span::ModuleId;
+use crate::span::{ModuleId, Span};
 use crate::unicode::{UNICODE_VERSION, UnicodeVersion};
 use cont::Cont;
 use frame::Frame;
@@ -287,6 +287,16 @@ pub(crate) struct Machine {
     /// frame intact; resuming continues the unwind. A host directive, outside replay identity
     /// (E§7.7). Set between drives via [`Instance::set_raise_trapping`].
     raise_trap_enabled: bool,
+    /// The observation-mode granularity (E§8.8, S-62): in `Subexpression` mode `step` emits
+    /// **observation-only** fine safe points at each non-leaf subexpression completion (no
+    /// accounting there, so faults land at the same instant as in `Statement` mode). Set from
+    /// `config` at load, adjustable via [`Instance::set_observation_mode`].
+    observation_mode: ObservationMode,
+    /// The span of the subexpression completed at the current fine safe point (E§7.4/§8.4),
+    /// for [`Instance::completed_position`]; `None` at any non-fine stop. Cleared at the top
+    /// of every `step` and set only when a fine safe point fires, so it reflects whether the
+    /// last transition completed a non-leaf subexpression.
+    fine_span: Option<Span>,
     /// The instance-scoped **load-diagnostics record** (E§3.2/§8, S-63): every front-end
     /// diagnostic the engine produces for every module the instance loads or attempts —
     /// the entry module's prelude-shadowing at load, each imported module's front-end

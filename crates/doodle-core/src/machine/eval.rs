@@ -9,7 +9,9 @@ use super::control;
 use super::error::{ExceptionKind, Raise};
 use super::protocol::{self, Dispatch};
 use super::step::take_value;
-use super::{LoadedModule, Machine, Value, arith, call, compare, dict, protect, record};
+use super::{
+    LoadedModule, Machine, ObservationMode, Value, arith, call, compare, dict, protect, record,
+};
 use crate::ast::{BinaryOp, Node, NodeId, StrPart};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
@@ -38,6 +40,12 @@ pub(super) fn logical_rhs(
     } else {
         // Short-circuit: `and` false → false; `or` true → true.
         machine.reg = Some(Value::Bool(!is_and));
+        // The operator application completed here, without evaluating the rhs (E§7.4, S-62):
+        // record it as a fine safe point in subexpression mode (the full-eval path completes
+        // at `AssertBool`, detected from the popped cont instead).
+        if machine.observation_mode == ObservationMode::Subexpression {
+            machine.fine_span = Some(span);
+        }
     }
     Ok(())
 }

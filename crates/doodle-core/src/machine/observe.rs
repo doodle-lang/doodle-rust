@@ -10,7 +10,7 @@
 
 use super::error::{Trace, TraceFrame};
 use super::frame::FrameKind;
-use super::{CalIdx, CellIdx, Handle, Instance, Machine, Value, local};
+use super::{CalIdx, CellIdx, Handle, Instance, Machine, ObservationMode, Value, local};
 use crate::ast::Node;
 use crate::diag::Diagnostic;
 use crate::heap::Heap;
@@ -106,6 +106,32 @@ impl Instance {
             module: self.current_resolved().canonical_id,
             span,
         })
+    }
+
+    /// Sets the observation-mode granularity (E§8.8, S-62): `Subexpression` turns on
+    /// fine safe points (a `Step*`/host-pause may then stop at each non-leaf subexpression
+    /// completion); `Statement` (the default) turns them off. Adjustable between drives, so a
+    /// host runs coarse when nobody is watching and switches to fine when the debugger opens.
+    /// Changes only *where* stepping may stop — never what the program computes or when a
+    /// limit trips (accounting stays at statement safe points, §7.4).
+    pub fn set_observation_mode(&mut self, mode: ObservationMode) {
+        self.machine.observation_mode = mode;
+    }
+
+    /// The current observation-mode granularity (E§8.8).
+    pub fn observation_mode(&self) -> ObservationMode {
+        self.machine.observation_mode
+    }
+
+    /// The position of the non-leaf subexpression just completed at a **fine** safe point
+    /// (E§7.4/§8.4): `Some` only at a fine stop (`Subexpression` mode), where the value it
+    /// produced is in the result register ([`result`](Self::result)) — together the
+    /// "watch your expression evaluate" primitive. `None` at a statement stop (use
+    /// [`current_position`](Self::current_position)) or when not stopped at a fine point.
+    pub fn completed_position(&self) -> Option<Position> {
+        let span = self.machine.fine_span?;
+        let module = self.machine.frames.last()?.module;
+        Some(Position { module, span })
     }
 
     /// The current call stack (E§8.2), innermost frame first: each frame's callable (a
