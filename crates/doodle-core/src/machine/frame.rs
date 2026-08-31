@@ -135,8 +135,7 @@ pub(crate) struct Frame {
     /// dynamic bindings this frame established are the entries above it, so E§8.2 can
     /// report per frame which `with`s it opened. Preserved across tail reuse — a tail
     /// call is never inside a `with` body (a barrier, L§8.7), so the stack is back at
-    /// this depth when the reuse happens. Not yet read (the E§8.2 surface is later).
-    #[allow(dead_code)]
+    /// this depth when the reuse happens. Read by `frame_dynamic_bindings` (E§8.2).
     pub(crate) dyn_depth: u32,
 }
 

@@ -69,7 +69,7 @@ pub use intrinsic::{
     sin as sin_intrinsic,
 };
 pub use native::{ConstValue, NativeMember, NativeModule};
-pub use observe::{FrameObservation, Position};
+pub use observe::{Binding, ElidedFrameObservation, FrameObservation, Position};
 pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{
     BigIntIdx, BytesIdx, CalIdx, CellIdx, DictIdx, FrnIdx, ListIdx, RecIdx, StrIdx, TypeIdx, Value,

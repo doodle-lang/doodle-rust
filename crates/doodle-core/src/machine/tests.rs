@@ -220,6 +220,36 @@ fn structural_inspection_reads_records_dicts_callables_types() {
 }
 
 #[test]
+fn frame_observation_reads_a_function_frames_locals() {
+    use crate::drive::{Directive, Outcome, run};
+    let mut inst = load_source("fn f(a)\n  let b = a + 1\n  b\nend\nf(10)\n");
+    // StepInto until paused at a point inside `f` where `b` is bound, then inspect frame 0.
+    let mut guard = 0;
+    loop {
+        let out = run(&mut inst, Directive::StepInto);
+        assert!(
+            matches!(out, Outcome::Paused(_)),
+            "stepping pauses: {out:?}"
+        );
+        let locals = inst.frame_locals(0);
+        if let Some(b) = locals.iter().find(|x| x.name == "b" && x.value.is_some()) {
+            assert!(
+                locals.iter().any(|x| x.name == "a"),
+                "the parameter `a` is in scope: {locals:?}"
+            );
+            assert_eq!(inst.as_int(b.value.unwrap()).unwrap(), 11);
+            // The tail-elided history and dynamic bindings read without panic; `f` opened
+            // no `with`, so it has no dynamic bindings.
+            let _ = inst.tail_elided_history();
+            assert!(inst.frame_dynamic_bindings(0).is_empty());
+            return;
+        }
+        guard += 1;
+        assert!(guard < 100, "never stepped inside `f`");
+    }
+}
+
+#[test]
 fn value_readers_match_only_their_own_variant() {
     assert_eq!(Value::Int(7).as_int(), Some(7));
     assert_eq!(Value::Float(1.5).as_int(), None);

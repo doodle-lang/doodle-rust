@@ -1,23 +1,47 @@
-//! The minimal observation surface (engine spec E§8.1/§8.2, MD §17): the current
-//! source position and a call-stack walk, for a paused (or otherwise stopped) instance.
-//!
-//! **Scope (M2b.7 minimum).** [`Instance::current_position`] and
-//! [`Instance::stack_walk`] — enough to show "where am I" and "how did I get here". The
-//! richer per-frame surface of E§8.2 (named local bindings, dynamic-parameter bindings)
-//! and the value-inspection / breakpoint facilities (E§8.4/§8.6) join with dynamic
-//! parameters and the debugger at M4/M6. The engine exposes **positions, not source
-//! text** (E§8.1): a [`Position`] is a module id + byte [`Span`], and the host renders
-//! line/column from the source it holds (as diagnostics do).
+//! The observation surface (engine spec E§8.1/§8.2/§8.3, MD §17), for a paused or
+//! otherwise stopped instance: the current source position ([`Instance::current_position`]),
+//! the call-stack walk ([`Instance::stack_walk`]), and — the M6.2 rich per-frame surface —
+//! a frame's named **local bindings** ([`Instance::frame_locals`]) and `with`
+//! **dynamic-parameter bindings** ([`Instance::frame_dynamic_bindings`]), plus the bounded
+//! **tail-elided history** ([`Instance::tail_elided_history`], E§8.3). The engine exposes
+//! **positions, not source text** (E§8.1): a [`Position`] is a module id + byte [`Span`],
+//! and the host renders line/column from the source it holds (as diagnostics do). Value
+//! inspection of the handles these mint is `machine/inspect.rs` (E§8.4).
 
 use super::error::{Trace, TraceFrame};
 use super::frame::FrameKind;
-use super::{Handle, Instance, Machine, Value};
+use super::{CalIdx, CellIdx, Handle, Instance, Machine, Value, local};
 use crate::ast::Node;
 use crate::diag::Diagnostic;
 use crate::heap::Heap;
 use crate::machine::cont::Cont;
-use crate::resolve::ResolvedModule;
+use crate::resolve::{BodyKind, ResolvedModule};
 use crate::span::{ModuleId, Span};
+use std::sync::Arc;
+
+/// A name→value binding the debugger shows for a frame (E§8.2): a **local** (a parameter or
+/// a `let`/`const` in scope) or a **dynamic parameter** bound by `with`. `value` is `None`
+/// for a local whose declaration has not executed yet (the temporal dead zone) — the name is
+/// in scope but unbound. A `Some` handle is a fresh **host-owned** handle (release it).
+#[derive(Clone, Debug)]
+pub struct Binding {
+    /// The bound name.
+    pub name: String,
+    /// The current value, or `None` if the slot is not yet initialized.
+    pub value: Option<Handle>,
+}
+
+/// One **tail-elided** frame in the bounded history (E§8.3): a caller a proper tail call
+/// overwrote, kept so a visualizer can show recursion depth. Distinct from the live frames
+/// of [`stack_walk`](Instance::stack_walk) — a host must **not** present these as live
+/// activations, only as evidence that tail recursion occurred.
+#[derive(Clone, Debug)]
+pub struct ElidedFrameObservation {
+    /// The elided callable, as a fresh host-owned handle (release it).
+    pub callable: Handle,
+    /// The elided callable's declaration span (its source location).
+    pub decl_span: Span,
+}
 
 /// A source position the engine exposes (E§8.1): which module, and a byte [`Span`] into
 /// its NFC-normalized source. The host maps the span to 1-based line/column (columns in
@@ -150,6 +174,135 @@ impl Instance {
     pub fn load_diagnostics(&self, since: usize) -> &[Diagnostic] {
         let record = &self.machine.load_diagnostics;
         &record[since.min(record.len())..]
+    }
+
+    /// The **local bindings** in scope in frame `index` (innermost = 0, matching
+    /// [`stack_walk`](Self::stack_walk)) — its parameters and `let`/`const` names, as
+    /// name→value (E§8.2). A `None` value is a not-yet-initialized slot (the temporal dead
+    /// zone). A block frame reports no own locals (it reads its enclosing frame's, §7); an
+    /// out-of-range `index` returns empty. Mints a host-owned handle per bound value.
+    pub fn frame_locals(&mut self, index: usize) -> Vec<Binding> {
+        let Some(actual) = self.frame_at(index) else {
+            return Vec::new();
+        };
+        let Some((module, info_id)) = self.frame_body(actual) else {
+            return Vec::new();
+        };
+        // Clone the module's `resolved` Arc (cheap) so the slot-name table can be read while
+        // the frame's locals (on `self.machine`) are borrowed alongside.
+        let resolved = Arc::clone(&self.modules[module].resolved);
+        let frame = &self.machine.frames[actual];
+        let raw: Vec<(String, Option<Value>)> = resolved.callables[info_id]
+            .slot_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let value = frame
+                    .locals
+                    .get(i)
+                    .and_then(|&l| local::read(&self.heap, l));
+                (name.to_string(), value)
+            })
+            .collect();
+        raw.into_iter()
+            .map(|(name, v)| Binding {
+                name,
+                value: v.map(|v| self.intern(v)),
+            })
+            .collect()
+    }
+
+    /// The **dynamic-parameter bindings** established by `with` within frame `index` (E§8.2,
+    /// L§5.5), as name→current-value. The frame's `with`s are the `dyn_stack` entries it
+    /// pushed (those between its `dyn_depth` and the next inner frame's); each names a module
+    /// dynamic-parameter cell, whose live value is reported. Mints a host-owned handle each.
+    pub fn frame_dynamic_bindings(&mut self, index: usize) -> Vec<Binding> {
+        let Some(actual) = self.frame_at(index) else {
+            return Vec::new();
+        };
+        let start = self.machine.frames[actual].dyn_depth as usize;
+        let end = self
+            .machine
+            .frames
+            .get(actual + 1)
+            .map_or(self.machine.dyn_stack.len(), |f| f.dyn_depth as usize);
+        let cells: Vec<CellIdx> = self.machine.dyn_stack[start..end]
+            .iter()
+            .map(|(cell, _)| *cell)
+            .collect();
+        let raw: Vec<(String, Option<Value>)> = cells
+            .iter()
+            .map(|&cell| (self.cell_name(cell), self.heap.cell(cell).value))
+            .collect();
+        raw.into_iter()
+            .map(|(name, v)| Binding {
+                name,
+                value: v.map(|v| self.intern(v)),
+            })
+            .collect()
+    }
+
+    /// The **tail-elided history** (E§8.3): the callers proper tail calls overwrote, most
+    /// recent first, each a callable handle + its declaration span. Bounded by the ring
+    /// capacity (`config`); distinct from the live [`stack_walk`](Self::stack_walk) frames.
+    pub fn tail_elided_history(&mut self) -> Vec<ElidedFrameObservation> {
+        let ordered: Vec<CalIdx> = self.machine.ring.most_recent_first().collect();
+        let raw: Vec<(CalIdx, Span)> = ordered
+            .into_iter()
+            .map(|cal| {
+                let obj = self.heap.callable(cal);
+                let resolved = &self.modules[obj.module.0 as usize].resolved;
+                let decl = resolved.callables[obj.source_id() as usize].decl;
+                (cal, resolved.ast.span(decl))
+            })
+            .collect();
+        raw.into_iter()
+            .map(|(cal, decl_span)| ElidedFrameObservation {
+                callable: self.intern(Value::Callable(cal)),
+                decl_span,
+            })
+            .collect()
+    }
+
+    /// Maps an innermost-first frame `index` (as [`stack_walk`](Self::stack_walk) yields) to
+    /// its index in the bottom-up `frames` stack, or `None` if out of range.
+    fn frame_at(&self, index: usize) -> Option<usize> {
+        self.machine.frames.len().checked_sub(index + 1)
+    }
+
+    /// The `(module index, CallableInfo index)` whose `slot_names` name frame `actual`'s
+    /// locals: a callable frame's invoked callable, or the top-level body. `None` for a
+    /// block (no own named-local surface — it reads its enclosing frame's, §7).
+    fn frame_body(&self, actual: usize) -> Option<(usize, usize)> {
+        match self.machine.frames[actual].kind {
+            FrameKind::Callable { cal } => {
+                let obj = self.heap.callable(cal);
+                Some((obj.module.0 as usize, obj.source_id() as usize))
+            }
+            FrameKind::ModuleTopLevel => {
+                let m = self.machine.frames[actual].module.0 as usize;
+                let id = self.modules[m]
+                    .resolved
+                    .callables
+                    .iter()
+                    .position(|c| matches!(c.kind, BodyKind::ModuleTopLevel))?;
+                Some((m, id))
+            }
+            FrameKind::Block { .. } => None,
+        }
+    }
+
+    /// The name a module dynamic-parameter `cell` is bound to (E§8.2): a reverse scan of the
+    /// loaded modules' namespaces (small, deterministic), or `"?"` if none names it.
+    fn cell_name(&self, cell: CellIdx) -> String {
+        for m in &self.modules {
+            for (name, c) in &m.namespace {
+                if *c == cell {
+                    return name.to_string();
+                }
+            }
+        }
+        "?".to_string()
     }
 
     /// The span the construct a continuation is at occupies (E§8.1, MD §17), or `None`
