@@ -43,6 +43,7 @@ impl Machine {
             host_pause: Arc::new(AtomicBool::new(false)),
             breakpoints: super::breakpoint::Breakpoints::new(),
             safe_point_stmt: None,
+            raise_trap_enabled: false,
             limits,
             load_diagnostics: Vec::new(),
         }
@@ -474,6 +475,105 @@ fn a_pending_breakpoint_resolves_when_its_module_loads_then_fires() {
         Outcome::Completed(None)
     ));
     assert_eq!(inst.output(), b"1\n2\n99\n");
+}
+
+// --- M6.5: raise-trap (E§8.7, S-18) ---
+
+#[test]
+fn raise_trapping_pauses_before_unwind_and_run_to_completion_ignores_it() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // The raise is inside a `with` body; the trap must fire *before* the unwind restores the
+    // dynamic binding — the strongest "stack intact" witness.
+    let src = "parameter p = 1\nwith p = 2 do\nraise \"boom\"\nend\n";
+
+    let mut inst = load_source(src);
+    inst.set_raise_trapping(true);
+    assert!(inst.raise_trapping());
+    let out = run(&mut inst, Directive::Continue);
+    assert!(
+        matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
+        "{out:?}"
+    );
+    // Pre-unwind: the `with` binding is still live (the WithRestore has not run).
+    assert_eq!(
+        inst.machine.dyn_stack.len(),
+        1,
+        "stack intact, not yet unwound"
+    );
+    // The trapped value is the raise's value.
+    let handle = inst.trapped_raise().expect("a trapped value");
+    let value = inst.resolve(handle).unwrap();
+    let (kind, message) = inst.describe_raised(value);
+    assert_eq!((kind.as_str(), message.as_str()), ("raised", "boom"));
+    // Resuming continues the unwind: the binding is restored and the raise reaches the boundary.
+    let out = run(&mut inst, Directive::Continue);
+    assert!(matches!(out, Outcome::Raised(..)), "{out:?}");
+    assert!(inst.machine.dyn_stack.is_empty(), "unwound after resume");
+
+    // Trapping enabled but `RunToCompletion`: ignored — straight to the terminal raise.
+    let mut inst2 = load_source(src);
+    inst2.set_raise_trapping(true);
+    assert!(matches!(
+        run(&mut inst2, Directive::RunToCompletion),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn a_raise_trap_fires_even_when_the_raise_is_caught() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // The trap fires at the raise, before the handler search — independent of the `try` catch.
+    let mut inst = load_source_with_print("try\nraise \"x\"\nrescue e\nprint(1)\nend\n");
+    inst.set_raise_trapping(true);
+    let out = run(&mut inst, Directive::Continue);
+    assert!(
+        matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
+        "{out:?}"
+    );
+    assert_eq!(
+        inst.output(),
+        b"",
+        "the rescue body has not run yet (pre-unwind)"
+    );
+    // Resuming continues the unwind: the `try` catches it and the rescue runs to completion.
+    let out = run(&mut inst, Directive::Continue);
+    assert!(matches!(out, Outcome::Completed(None)), "{out:?}");
+    assert_eq!(inst.output(), b"1\n");
+}
+
+#[test]
+fn an_engine_raise_traps_like_a_program_raise() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // Unified across sources (S-18): an engine-generated raise (division by zero) traps too.
+    let mut inst = load_source("let x = 1 / 0\n");
+    inst.set_raise_trapping(true);
+    let out = run(&mut inst, Directive::Continue);
+    assert!(
+        matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
+        "{out:?}"
+    );
+    let handle = inst.trapped_raise().unwrap();
+    let value = inst.resolve(handle).unwrap();
+    assert_eq!(inst.describe_raised(value).0.as_str(), "division-by-zero");
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn without_raise_trapping_a_raise_is_not_trapped() {
+    use crate::drive::{Directive, Outcome, run};
+    let mut inst = load_source("raise \"boom\"\n");
+    assert!(!inst.raise_trapping(), "off by default");
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Raised(..)
+    ));
+    assert!(
+        inst.trapped_raise().is_none(),
+        "no in-flight raise once it has surfaced"
+    );
 }
 
 #[test]
@@ -1988,6 +2088,7 @@ fn a_raise_runs_withrestore_as_it_unwinds_to_the_boundary() {
     inst.machine.unwind = Some(super::unwind::Unwind::Raise {
         value: raised_value,
         trace: Trace::at(None),
+        trapped: false,
     });
     let mut raised = None;
     for _ in 0..100 {

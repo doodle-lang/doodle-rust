@@ -22,7 +22,11 @@ impl Machine {
     /// value — a program `raise value` or a host raise (E§7.5). The unwinder then runs
     /// `WithRestore` cleanup and seeks a `TryHandler`, or drains to the terminal `Raised`.
     pub(crate) fn arm_raise_value(&mut self, value: Value, trace: Trace) {
-        self.unwind = Some(unwind::Unwind::Raise { value, trace });
+        self.unwind = Some(unwind::Unwind::Raise {
+            value,
+            trace,
+            trapped: false,
+        });
     }
 
     /// Pushes the exception a rescue body is now handling (L§12.2), for a bare re-raise.

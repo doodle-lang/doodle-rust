@@ -107,6 +107,12 @@ pub(crate) enum Unwind {
         value: Value,
         /// The trace captured at the raise site (E§8.2).
         trace: Trace,
+        /// Whether a **raise-trap** (E§8.7) has already paused on this armed raise: `false`
+        /// when a raise is freshly armed, set `true` when the drive pauses `Paused(RaiseTrap)`
+        /// on it, so the resumed drive enters the unwind instead of re-trapping the same
+        /// raise. A raise raised during another raise's cleanup arms a fresh `Raise` (again
+        /// `false`), so it traps in turn.
+        trapped: bool,
     },
 }
 

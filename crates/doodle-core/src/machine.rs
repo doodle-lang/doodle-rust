@@ -23,6 +23,7 @@ mod cancel;
 mod compare;
 mod cont;
 mod control;
+mod controls;
 mod dict;
 mod dynamic;
 mod error;
@@ -47,6 +48,7 @@ mod ops;
 mod pause;
 mod protect;
 mod protocol;
+mod raise_trap;
 mod record;
 mod ring;
 mod step;
@@ -92,7 +94,7 @@ use handle::HandleTable;
 use limits::FusedCounter;
 use modload::{ModuleLoad, Suspension};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// The maximum **reentrant-drive nesting depth** (MD §14). Each level runs a nested
 /// drive on the host's Rust stack (~10 KB/level), so this caps native recursion well
@@ -279,6 +281,12 @@ pub(crate) struct Machine {
     /// suppressed so they cannot clobber this). The drive loop reads it right after the step
     /// that set it.
     safe_point_stmt: Option<NodeId>,
+    /// Whether **raise-trapping** is enabled (E§8.7): a host debug toggle, off by default.
+    /// When on, the drive pauses `Paused(RaiseTrap)` at each raise **before the stack
+    /// unwinds** (under a `Continue`/`Step*` directive), so the debugger inspects the raising
+    /// frame intact; resuming continues the unwind. A host directive, outside replay identity
+    /// (E§7.7). Set between drives via [`Instance::set_raise_trapping`].
+    raise_trap_enabled: bool,
     /// The instance-scoped **load-diagnostics record** (E§3.2/§8, S-63): every front-end
     /// diagnostic the engine produces for every module the instance loads or attempts —
     /// the entry module's prelude-shadowing at load, each imported module's front-end
@@ -368,56 +376,6 @@ impl Instance {
     /// The current lifecycle state (E§3.3).
     pub fn state(&self) -> InstanceState {
         self.state
-    }
-
-    /// A [`CancelToken`] for this instance (E§10.1): the host's stop button. The token
-    /// is cloneable and thread-safe, so a host may hold it (or a clone) elsewhere — e.g.
-    /// on another thread — and request cancellation while a drive is running. All tokens
-    /// for one instance share its cancel flag.
-    pub fn cancel_token(&self) -> CancelToken {
-        CancelToken::new(Arc::clone(&self.machine.cancel))
-    }
-
-    /// Whether host cancellation has been requested (E§10.1) — a plain read of the cancel
-    /// flag, distinct from the safe-point poll ([`Machine::poll_cancel`]) that *arms* the
-    /// unwind. Lets `resolve` (E§7.5) reap a cancellation that arrived while the instance
-    /// was suspended, so a host raise racing the stop button does not escape it (S-23).
-    pub(crate) fn cancel_requested(&self) -> bool {
-        self.machine.cancel.load(Ordering::Relaxed)
-    }
-
-    /// A [`PauseToken`] for this instance (E§8.8): the host's pause button. The token is
-    /// cloneable and thread-safe, so a host may hold it (or a clone) elsewhere — e.g. on a
-    /// UI thread — and request a pause while a drive is running. All tokens for one instance
-    /// share its pause flag.
-    pub fn pause_token(&self) -> PauseToken {
-        PauseToken::new(Arc::clone(&self.machine.host_pause))
-    }
-
-    /// Consumes a pending host-pause request (E§8.8): atomically reads **and clears** the
-    /// pause flag, returning whether one was set. The drive loop calls this at each safe
-    /// point; a `true` stops the drive `Paused(HostPause)` with state intact and resumable.
-    /// Clearing here makes the request one-shot, so the re-drive continues rather than
-    /// pausing again on the same request. Distinct from cancel's [`poll_cancel`]: no unwind
-    /// is armed and no fault is raised — the pause is a resumable stop, not a teardown.
-    pub(crate) fn take_host_pause(&mut self) -> bool {
-        self.machine.host_pause.swap(false, Ordering::Relaxed)
-    }
-
-    /// Discards a parked capability request and arms the cancel unwind (E§10.1, S-23):
-    /// resuming the drive then tears the stack down to `Faulted(Cancelled)` **without**
-    /// running the parked call's continuation, so a host resolution that lost to a pending
-    /// cancellation has no program-visible effect. Only valid while suspended — a request is
-    /// parked and the frame stack is non-empty (a suspend never empties it), which the
-    /// caller establishes by checking [`cancel_requested`](Self::cancel_requested) at a
-    /// `Suspended` instance.
-    pub(crate) fn discard_pending_and_cancel(&mut self) {
-        self.machine.pending = None;
-        debug_assert!(
-            self.machine.unwind.is_none() && !self.machine.frames.is_empty(),
-            "cancel-reap requires a parked suspension with an intact stack"
-        );
-        self.machine.unwind = Some(unwind::Unwind::Cancel);
     }
 
     /// The result register: the last value produced, or `None` for Void

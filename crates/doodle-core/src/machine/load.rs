@@ -266,6 +266,7 @@ impl Instance {
                 host_pause: Arc::new(AtomicBool::new(false)),
                 breakpoints: super::breakpoint::Breakpoints::new(),
                 safe_point_stmt: None,
+                raise_trap_enabled: false,
                 limits,
                 load_diagnostics,
             },

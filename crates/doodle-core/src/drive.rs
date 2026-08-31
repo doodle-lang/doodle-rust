@@ -359,6 +359,16 @@ fn drive(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Ou
             instance.set_state(InstanceState::Paused);
             return Outcome::Paused(PauseReason::SliceEnd);
         }
+        // Raise-trap (E§8.7, S-18): a freshly-armed raise pauses here — **before** the next
+        // `step` runs any unwind — so the debugger sees the raising frame with the stack
+        // intact. Checked before `step` because a raise armed by the previous step (or by a
+        // host `resolve(Raise)` before this drive) unwinds inside `step`; `take_raise_trap`
+        // marks it one-shot so the resumed drive steps into the unwind instead of re-trapping.
+        // Ignored under `RunToCompletion` (a host directive, like breakpoints — the M6 matrix).
+        if directive != Directive::RunToCompletion && instance.take_raise_trap() {
+            instance.set_state(InstanceState::Paused);
+            return Outcome::Paused(PauseReason::RaiseTrap);
+        }
         match instance.step() {
             Ok(safe_point) => {
                 // A capability call parked a request (E§7.5, MD §14): suspend, no state

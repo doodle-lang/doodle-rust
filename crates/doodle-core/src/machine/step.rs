@@ -431,14 +431,18 @@ pub(crate) fn arm_raise(
         &raise.exception.message,
         &raise.details,
     );
-    machine.unwind = Some(unwind::Unwind::Raise { value, trace });
+    machine.unwind = Some(unwind::Unwind::Raise {
+        value,
+        trace,
+        trapped: false,
+    });
 }
 
 /// Takes the in-flight Raise unwind's value + trace and clears the transfer — for the
 /// drained, uncaught raise reaching the boundary.
 fn take_raise(machine: &mut Machine) -> (Value, Trace) {
     match machine.unwind.take() {
-        Some(unwind::Unwind::Raise { value, trace }) => (value, trace),
+        Some(unwind::Unwind::Raise { value, trace, .. }) => (value, trace),
         _ => unreachable!("take_raise with no in-flight raise"),
     }
 }

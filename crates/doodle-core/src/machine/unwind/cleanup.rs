@@ -116,7 +116,7 @@ pub(super) fn raise_unwind(resolved: &ResolvedModule, heap: &mut Heap, machine: 
 /// here), and hands them to [`protect::catch`](super::super::protect::catch), which binds
 /// the rescue variable and schedules the rescue body.
 fn try_catch(resolved: &ResolvedModule, heap: &mut Heap, machine: &mut Machine, try_node: NodeId) {
-    let Some(super::Unwind::Raise { value, trace }) = machine.unwind.take() else {
+    let Some(super::Unwind::Raise { value, trace, .. }) = machine.unwind.take() else {
         unreachable!("a TryHandler is reached only while a raise is in flight");
     };
     super::super::protect::catch(resolved, heap, machine, try_node, value, trace);
