@@ -27,6 +27,15 @@ use doodle_core::resolve::resolve as resolve_module;
 use doodle_core::source::normalize;
 use doodle_core::span::{ModuleId, Span};
 
+/// The debug observation surface (E§8) on the session — breakpoints, raise-trap, observation
+/// mode, the stack walk + lazy bindings, the trapped raise, and auxiliary evaluation.
+mod debug;
+/// The structural value-inspection surface (E§4.4/§8.4) on the session — record/dict/list
+/// fields and callable/type/module reflection, mirroring the native `Instance` API 1:1.
+mod inspect;
+
+pub use debug::{AuxOutcomeData, CallableInfo, FrameData, StaleGeneration};
+
 /// The M3 turtle library, prepended to a turtle program as one module (the real module
 /// system is M5). Lives in `doodle-rust`; `doodle-web` reaches it only through the wasm
 /// facade's `turtle` constructor.
@@ -53,6 +62,18 @@ pub struct Session {
     /// Byte length of the prepended prelude, so a position can be reported relative to the
     /// user's program (0 when nothing was prepended).
     prelude_bytes: u32,
+    /// The **pause generation** (E§8, debug surface): bumped on every [`drive`](Self::drive)/
+    /// [`resolve`](Self::resolve) so a [`stack_walk`](Self::stack_walk)'s frame indices are only
+    /// valid until the next state advance. A lazy [`frame_local`](Self::frame_local)/
+    /// [`frame_dynamic`](Self::frame_dynamic) read carrying a stale generation is a clean error,
+    /// never a wrong answer read against a different stack. Auxiliary evaluation
+    /// ([`eval_to_string`](Self::eval_to_string)) does **not** bump it — it restores the pause,
+    /// leaving the walk valid.
+    pause_gen: u32,
+    /// The entry module's canonical id (E§3.2) — how the host addresses it for breakpoints
+    /// (E§8.6). A single editor buffer has no filename, so this is the engine default (`main`);
+    /// a host that loads named files would thread the name through here.
+    module_path: String,
 }
 
 /// Why loading a program failed before it could run (a front-end error, E§3.1). Carries
@@ -171,21 +192,43 @@ impl Session {
             ),
             source,
             prelude_bytes,
+            pause_gen: 0,
+            module_path: Instance::DEFAULT_MODULE_PATH.to_string(),
         })
     }
 
-    /// Drives the session at most `fuel` statement safe points (`None` = unbounded, S-40),
-    /// starting or resuming from a `Paused`; the pump's slice step.
-    pub fn drive(&mut self, fuel: Option<u64>) -> DriveOutcome {
-        let outcome = run_slice(&mut self.instance, Directive::RunToCompletion, fuel);
+    /// The entry module's canonical id (E§3.2): the string a host passes to
+    /// [`set_breakpoint`](Self::set_breakpoint) to address the program the user is editing.
+    pub fn entry_module(&self) -> &str {
+        &self.module_path
+    }
+
+    /// The current pause generation (see [`pause_gen`](Session::pause_gen)) — stamped into a
+    /// [`stack_walk`](Self::stack_walk) so a later [`frame_local`](Self::frame_local)/
+    /// [`frame_dynamic`](Self::frame_dynamic) can prove it reads the same stopped state.
+    pub fn pause_generation(&self) -> u32 {
+        self.pause_gen
+    }
+
+    /// Drives the session under `directive` (E§7.3) for at most `fuel` statement safe points
+    /// (`None` = unbounded, S-40), starting or resuming from a `Ready`/`Paused` state. The
+    /// pump passes [`RunToCompletion`](Directive::RunToCompletion) and slices on fuel; the
+    /// debugger passes `Continue`/`Step*` and stops at breakpoints/raise-traps/steps. Bumps the
+    /// pause generation, invalidating any prior [`stack_walk`](Self::stack_walk)'s frame indices.
+    pub fn drive(&mut self, directive: Directive, fuel: Option<u64>) -> DriveOutcome {
+        self.pause_gen = self.pause_gen.wrapping_add(1);
+        let outcome = run_slice(&mut self.instance, directive, fuel);
         to_drive_outcome(&self.instance, outcome)
     }
 
-    /// Resolves a pending capability with a host value (or a raise), then resumes the
-    /// drive for at most `fuel` safe points (E§7.5). The handle is the host's resolution
-    /// value; `raise` chooses whether it surfaces as the call's result or is raised at
-    /// the call site.
+    /// Resolves a pending capability with a host value (or a raise), then resumes the drive for
+    /// at most `fuel` safe points (E§7.5). The handle is the host's resolution value; `raise`
+    /// chooses whether it surfaces as the call's result or is raised at the call site. The
+    /// resume runs under the **directive in force** when the instance suspended (E§7.3) — so a
+    /// step across a suspending capability keeps stepping — not a fresh one. Bumps the pause
+    /// generation like [`drive`](Self::drive).
     pub fn resolve(&mut self, value: Handle, raise: bool, fuel: Option<u64>) -> DriveOutcome {
+        self.pause_gen = self.pause_gen.wrapping_add(1);
         let resolution = if raise {
             Resolution::Raise(value)
         } else {

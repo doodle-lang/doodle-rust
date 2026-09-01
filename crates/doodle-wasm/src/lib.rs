@@ -17,9 +17,11 @@
 
 use wasm_bindgen::prelude::*;
 
+use doodle_core::drive::Directive;
 use doodle_core::machine::Handle;
 use facade::{DriveOutcome, Session};
 
+mod debug;
 mod facade;
 
 /// Returns the version of the underlying doodle-core engine.
@@ -56,17 +58,21 @@ impl DoodleInstance {
             .map_err(|e| JsError::new(&e.message))
     }
 
-    /// Drives at most `fuel` statement safe points (`undefined` = unbounded, S-40),
-    /// starting or resuming from a `Paused`. Returns the [`DriveResult`].
-    pub fn drive(&mut self, fuel: Option<u64>) -> DriveResult {
-        DriveResult {
-            outcome: self.session.drive(fuel),
-        }
+    /// Drives under `directive` (`"run"`, `"continue"`, `"step"`, `"into"`, `"over"`, `"out"`
+    /// — E§7.3) for at most `fuel` statement safe points (`undefined` = unbounded, S-40),
+    /// starting or resuming from a `Ready`/`Paused` state. The pump passes `"run"`; the
+    /// debugger passes the others. Throws on an unknown directive tag. Returns the
+    /// [`DriveResult`].
+    pub fn drive(&mut self, directive: &str, fuel: Option<u64>) -> Result<DriveResult, JsError> {
+        Ok(DriveResult {
+            outcome: self.session.drive(directive_of(directive)?, fuel),
+        })
     }
 
     /// Resolves a pending capability with the value named by handle `value` (or raises it
-    /// at the call site when `raise` is true), then resumes for at most `fuel` safe
-    /// points (E§7.5).
+    /// at the call site when `raise` is true), then resumes for at most `fuel` safe points
+    /// (E§7.5). The resume runs under the directive in force at the suspend (so a step across
+    /// a capability keeps stepping), not a fresh one.
     pub fn resolve(&mut self, value: u64, raise: bool, fuel: Option<u64>) -> DriveResult {
         DriveResult {
             outcome: self.session.resolve(Handle::from_bits(value), raise, fuel),
@@ -316,6 +322,20 @@ impl DriveResult {
             _ => None,
         }
     }
+}
+
+/// Parses a drive-directive tag (E§7.3) — the drive-script `do:` vocabulary — to a
+/// [`Directive`], or a thrown `JsError` for an unknown tag (never silently defaulted).
+fn directive_of(tag: &str) -> Result<Directive, JsError> {
+    Ok(match tag {
+        "run" => Directive::RunToCompletion,
+        "continue" => Directive::Continue,
+        "step" => Directive::Step,
+        "into" => Directive::StepInto,
+        "over" => Directive::StepOver,
+        "out" => Directive::StepOut,
+        other => return Err(JsError::new(&format!("unknown drive directive: {other:?}"))),
+    })
 }
 
 /// Maps a [`ValueError`](doodle_core::machine::ValueError) to a thrown `JsError`.

@@ -9,7 +9,10 @@ use super::*;
 fn demo_runs_print_to_completion() {
     // The demo config (print-only, no prelude) matches the native conformance runner.
     let mut session = Session::demo("print(1 + 2)\n").unwrap();
-    assert_eq!(session.drive(None), DriveOutcome::Completed);
+    assert_eq!(
+        session.drive(Directive::RunToCompletion, None),
+        DriveOutcome::Completed
+    );
     assert_eq!(session.output(), b"3\n");
     assert_eq!(session.prelude_bytes(), 0);
 }
@@ -25,7 +28,7 @@ fn a_parse_error_fails_to_load_with_diagnostics() {
 #[test]
 fn division_by_zero_surfaces_a_tagged_raise() {
     let mut session = Session::demo("1 / 0\n").unwrap();
-    let outcome = session.drive(None);
+    let outcome = session.drive(Directive::RunToCompletion, None);
     let DriveOutcome::Raised {
         kind,
         message,
@@ -50,7 +53,7 @@ fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
         "the turtle library was prepended"
     );
 
-    let outcome = session.drive(None);
+    let outcome = session.drive(Directive::RunToCompletion, None);
     let DriveOutcome::Suspended { capability, args } = outcome else {
         panic!("expected Suspended, got {outcome:?}");
     };
@@ -78,7 +81,8 @@ fn current_user_position_tracks_the_user_line_not_the_library() {
     // live line highlight of the user's program (M3.7).
     let mut session = Session::turtle("forward(10)\n").unwrap();
     let prelude = session.prelude_bytes();
-    let DriveOutcome::Suspended { args, .. } = session.drive(None) else {
+    let DriveOutcome::Suspended { args, .. } = session.drive(Directive::RunToCompletion, None)
+    else {
         panic!("expected Suspended");
     };
     let top = session.current_position().expect("a top-frame position");
@@ -135,7 +139,9 @@ fn the_int_boundary_carries_a_bignum_capability_argument() {
     // decode (the failure mode the M3.9 review found in the pump).
     let huge = "1000000000000000000000000000000"; // 10^30, past i64
     let mut session = Session::turtle(&format!("pencolor({huge}, 0, 0)\nforward(1)\n")).unwrap();
-    let DriveOutcome::Suspended { capability, args } = session.drive(None) else {
+    let DriveOutcome::Suspended { capability, args } =
+        session.drive(Directive::RunToCompletion, None)
+    else {
         panic!("expected a draw_line suspend");
     };
     assert_eq!(capability, 3, "draw_line");
@@ -170,19 +176,170 @@ fn make_int_decimal_round_trips_any_magnitude() {
 fn a_stepped_and_a_fast_demo_reach_the_same_output() {
     // Determinism through the facade (E§7.7): fuel-slicing does not change the result.
     let mut fast = Session::demo("print(6 * 7)\n").unwrap();
-    assert_eq!(fast.drive(None), DriveOutcome::Completed);
+    assert_eq!(
+        fast.drive(Directive::RunToCompletion, None),
+        DriveOutcome::Completed
+    );
 
     let mut sliced = Session::demo("print(6 * 7)\n").unwrap();
-    let mut outcome = sliced.drive(Some(1));
+    let mut outcome = sliced.drive(Directive::RunToCompletion, Some(1));
     for _ in 0..10_000 {
         if outcome != DriveOutcome::Paused("slice-end") {
             break;
         }
-        outcome = sliced.drive(Some(1));
+        outcome = sliced.drive(Directive::RunToCompletion, Some(1));
     }
     assert_eq!(outcome, DriveOutcome::Completed);
     assert_eq!(fast.output(), sliced.output());
     assert_eq!(sliced.output(), b"42\n");
+}
+
+// --- the M6.9 debug + inspection surface (E§8) through the facade ---
+
+#[test]
+fn entry_module_is_the_default_canonical_id() {
+    let session = Session::demo("print(1)\n").unwrap();
+    assert_eq!(session.entry_module(), "main");
+}
+
+#[test]
+fn a_breakpoint_pauses_continue_and_exposes_locals_and_inspection() {
+    // A record + list are function locals bound before line 5, where a breakpoint stops
+    // `Continue`; the stack walk then shows the `describe` frame over the module top level,
+    // lists its locals by name, a lazy `frame_local` mints one value, and the structural
+    // inspection reads a record's fields and a list's elements without driving. (Module-level
+    // `let`s are globals, not frame locals, so the locals live inside a `fn`.)
+    let source = "record Point with x, y end\n\
+        fn describe()\n\
+        \x20 let p = Point(x: 1, y: 2)\n\
+        \x20 let xs = [10, 20]\n\
+        \x20 print(1)\n\
+        \x20 p\n\
+        end\n\
+        describe()\n";
+    let mut session = Session::demo(source).unwrap();
+    let bp = session.set_breakpoint("main", 5);
+    assert!(
+        session
+            .breakpoints()
+            .iter()
+            .any(|b| b.id.0 == bp && b.resolved),
+        "the breakpoint resolves against the loaded entry module"
+    );
+
+    assert_eq!(
+        session.drive(Directive::Continue, None),
+        DriveOutcome::Paused("breakpoint")
+    );
+
+    let generation = session.pause_generation();
+    let frames = session.stack_walk();
+    assert_eq!(
+        frames.len(),
+        2,
+        "the `describe` frame over the module top level"
+    );
+    let callable = frames[0]
+        .callable
+        .as_ref()
+        .expect("frame 0 is the `describe` callable");
+    assert_eq!(callable.name.as_deref(), Some("describe"));
+    assert_eq!(callable.is_function, Some(true));
+    assert!(
+        frames[1].callable.is_none(),
+        "the outer module top level is not a callable value"
+    );
+    let p_slot = frames[0]
+        .locals
+        .iter()
+        .position(|n| n == "p")
+        .expect("local `p` is in scope at the breakpoint");
+    let xs_slot = frames[0]
+        .locals
+        .iter()
+        .position(|n| n == "xs")
+        .expect("local `xs` is in scope");
+
+    // Lazy value: mint exactly the one binding, then inspect it purely (no drive).
+    let p = session
+        .frame_local(generation, 0, p_slot)
+        .unwrap()
+        .expect("`p` is bound");
+    assert_eq!(session.record_type_name(p).unwrap(), "Point");
+    assert_eq!(session.record_length(p).unwrap(), 2);
+    assert_eq!(session.record_field_name(p, 0).unwrap(), "x");
+    let x = session.record_field(p, 0).unwrap();
+    assert_eq!(session.as_int(x).unwrap(), 1);
+    session.release(x).unwrap();
+    session.release(p).unwrap();
+
+    let xs = session
+        .frame_local(generation, 0, xs_slot)
+        .unwrap()
+        .expect("`xs` is bound");
+    assert_eq!(session.list_length(xs).unwrap(), 2);
+    let first = session.list_get(xs, 0).unwrap();
+    assert_eq!(session.as_int(first).unwrap(), 10);
+    session.release(first).unwrap();
+    session.release(xs).unwrap();
+
+    // The generation is invalidated by the next drive, so a stale frame read is a clean error.
+    assert_eq!(
+        session.drive(Directive::Continue, None),
+        DriveOutcome::Completed
+    );
+    assert!(matches!(
+        session.frame_local(generation, 0, p_slot),
+        Err(super::StaleGeneration)
+    ));
+}
+
+#[test]
+fn step_stops_at_the_next_safe_point() {
+    let mut session = Session::demo("print(1)\nprint(2)\n").unwrap();
+    assert_eq!(
+        session.drive(Directive::Step, None),
+        DriveOutcome::Paused("step")
+    );
+}
+
+#[test]
+fn raise_trap_pauses_before_unwinding_then_resumes_to_the_raise() {
+    let mut session = Session::demo("let x = 1\nraise \"boom\"\n").unwrap();
+    session.set_raise_trapping(true);
+
+    assert_eq!(
+        session.drive(Directive::Continue, None),
+        DriveOutcome::Paused("raise-trap")
+    );
+    let raised = session.trapped_raise().expect("the trapped raise value");
+    assert_eq!(session.string_bytes(raised).unwrap(), b"boom");
+    session.release(raised).unwrap();
+    assert!(
+        session.trapped_raise_position().is_some(),
+        "the raise site span is exposed pre-unwind"
+    );
+
+    // Resuming continues the unwind to the uncaught raise (E§8.7).
+    let after = session.drive(Directive::Continue, None);
+    let DriveOutcome::Raised { message, .. } = after else {
+        panic!("expected Raised, got {after:?}");
+    };
+    assert!(message.contains("boom"));
+}
+
+#[test]
+fn eval_to_string_renders_a_scalar() {
+    let mut session = Session::demo("print(1)\n").unwrap();
+    let n = session.make_int(42);
+    match session.eval_to_string(n, 100_000) {
+        AuxOutcomeData::Rendered(s) => {
+            assert_eq!(session.string_bytes(s).unwrap(), b"42");
+            session.release(s).unwrap();
+        }
+        other => panic!("expected Rendered, got {other:?}"),
+    }
+    session.release(n).unwrap();
 }
 
 #[test]
