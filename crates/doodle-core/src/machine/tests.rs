@@ -802,6 +802,192 @@ fn load_source_with_print_and_limits(src: &str, limits: Limits) -> Instance {
     Instance::load_with_intrinsics_and_limits(resolved.module, limits, registry)
 }
 
+// --- M6.7: auxiliary evaluation — host-driven `to_string` (E§8.4, S-22) ---
+
+/// The UTF-8 contents of a String value behind `handle` (an `eval_to_string` result).
+fn aux_string(inst: &Instance, handle: Handle) -> String {
+    match inst.resolve(handle).unwrap() {
+        Value::Str(idx) => inst.heap.string(idx).utf8.to_string(),
+        other => panic!("expected a String, got {other:?}"),
+    }
+}
+
+#[test]
+fn eval_to_string_renders_a_scalar_natively() {
+    use crate::drive::{Directive, Outcome, run};
+    let mut inst = load_source("let n = 42\n");
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    let h = global_handle(&mut inst, "n");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Rendered(s) => assert_eq!(aux_string(&inst, s), "42"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn eval_to_string_drives_an_explicit_stringable() {
+    use crate::drive::{Directive, Outcome, run};
+    // A type with `implement Stringable` renders through its own `to_string` — a real
+    // nested drive of Doodle code, the same dispatch interpolation uses.
+    let mut inst = load_source(
+        "record P with n end\n\
+         implement Stringable for P\nfn to_string(self)\nreturn \"v!\"\nend\nend\n\
+         let p = P(n: 1)\n",
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    let h = global_handle(&mut inst, "p");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Rendered(s) => assert_eq!(aux_string(&inst, s), "v!"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn eval_to_string_leaves_the_pause_intact() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // Aux eval at a breakpoint pause must not disturb the pause: position/depth unchanged,
+    // and resuming completes the program normally (the debug context was restored).
+    let mut inst = load_source_with_print("let x = 7\nprint(x)\nprint(x)\n");
+    inst.set_breakpoint("main", 2);
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::Breakpoint(_))
+    ));
+    let position_before = inst.current_position();
+    let depth_before = inst.frame_depth();
+    let h = global_handle(&mut inst, "x");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Rendered(s) => assert_eq!(aux_string(&inst, s), "7"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        inst.current_position(),
+        position_before,
+        "position unchanged"
+    );
+    assert_eq!(inst.frame_depth(), depth_before, "depth unchanged");
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Completed(None)
+    ));
+    assert_eq!(
+        inst.output(),
+        b"7\n7\n",
+        "the program ran to completion after the aux eval"
+    );
+}
+
+#[test]
+fn eval_to_string_reports_a_raising_to_string() {
+    use crate::drive::{Directive, Outcome, run};
+    // A `to_string` that raises surfaces as `Raised` (a fresh handle to the value), and the
+    // instance is untouched — its own armed unwind, if any, is unaffected.
+    let mut inst = load_source(
+        "record Bad with n end\n\
+         implement Stringable for Bad\nfn to_string(self)\nraise \"boom\"\nend\nend\n\
+         let b = Bad(n: 1)\n",
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    let h = global_handle(&mut inst, "b");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Raised(v) => {
+            let (kind, message) = inst.describe_raised(inst.resolve(v).unwrap());
+            assert_eq!((kind.as_str(), message.as_str()), ("raised", "boom"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        inst.state(),
+        InstanceState::Completed,
+        "the instance is still usable"
+    );
+}
+
+#[test]
+fn a_runaway_to_string_faults_on_its_own_budget() {
+    use crate::drive::{Directive, EngineFault, LimitKind, Outcome, run};
+    // A `to_string` that loops forever exhausts the aux drive's own budget — a fault, not a
+    // hang — without touching the outer program's budget or state.
+    let mut inst = load_source(
+        "record Spin with n end\n\
+         implement Stringable for Spin\nfn to_string(self)\nloop do\n1\nend\nend\nend\n\
+         let s = Spin(n: 1)\n",
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    let h = global_handle(&mut inst, "s");
+    // A small per-call fuel: the runaway render exhausts it quickly and faults.
+    assert!(matches!(
+        inst.eval_to_string(h, 10_000),
+        super::AuxOutcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
+    ));
+    assert_eq!(
+        inst.state(),
+        InstanceState::Completed,
+        "the instance is still usable"
+    );
+}
+
+#[test]
+fn a_to_string_that_returns_a_non_string_raises_a_type_mismatch() {
+    use crate::drive::{Directive, Outcome, run};
+    // A `to_string` returning a non-String makes the aux drive raise the same type-mismatch the
+    // program's interpolation would (E§8.4 rider) — the render previews the program's truth.
+    let mut inst = load_source(
+        "record Wrong with n end\n\
+         implement Stringable for Wrong\nfn to_string(self)\nreturn 42\nend\nend\n\
+         let w = Wrong(n: 1)\n",
+    );
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(None)
+    ));
+    let h = global_handle(&mut inst, "w");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Raised(v) => {
+            assert_eq!(
+                inst.describe_raised(inst.resolve(v).unwrap()).0.as_str(),
+                "type-mismatch"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn eval_to_string_works_at_a_raise_trap_pause() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // At a raise-trap pause the outer instance has an armed unwind; aux eval must clear and
+    // restore it, so the render runs and the outer raise still propagates on resume.
+    let mut inst = load_source("let x = 7\nraise \"outer\"\n");
+    inst.set_raise_trapping(true);
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::RaiseTrap)
+    ));
+    let h = global_handle(&mut inst, "x");
+    match inst.eval_to_string(h, 1 << 20) {
+        super::AuxOutcome::Rendered(s) => assert_eq!(aux_string(&inst, s), "7"),
+        other => panic!("{other:?}"),
+    }
+    // The outer raise survived the aux eval: resuming propagates it to the boundary.
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Raised(..)
+    ));
+}
+
 #[test]
 fn value_readers_match_only_their_own_variant() {
     assert_eq!(Value::Int(7).as_int(), Some(7));

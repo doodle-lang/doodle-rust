@@ -28,7 +28,9 @@ pub(crate) struct ElidedFrame {
 }
 
 /// A fixed-capacity ring of [`ElidedFrame`]s (E§8.3). Recording is O(1) and never
-/// grows past [`RING_CAPACITY`]; the oldest entry is overwritten when full.
+/// grows past [`RING_CAPACITY`]; the oldest entry is overwritten when full. `Clone` so an
+/// auxiliary-evaluation drive (E§8.4) can snapshot and restore it around a nested render.
+#[derive(Clone)]
 pub(crate) struct RingBuffer {
     /// Entries, growing to `RING_CAPACITY` then reused cyclically at `next`.
     entries: Vec<ElidedFrame>,

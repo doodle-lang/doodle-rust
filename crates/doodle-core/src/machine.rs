@@ -15,6 +15,7 @@
 
 mod arith;
 mod assign;
+mod aux_eval;
 mod block;
 mod boundary;
 mod breakpoint;
@@ -60,6 +61,7 @@ mod unwind;
 mod value;
 
 pub use crate::heap::Finalizer;
+pub use aux_eval::AuxOutcome;
 pub use boundary::{Kind, ValueError};
 pub use breakpoint::BreakpointInfo;
 pub use cancel::CancelToken;
