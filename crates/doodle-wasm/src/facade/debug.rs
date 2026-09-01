@@ -14,6 +14,7 @@
 use super::{Session, fault_tag};
 use doodle_core::drive::{BreakpointId, ObservationMode};
 use doodle_core::machine::{AuxOutcome, BreakpointInfo, Handle};
+use doodle_core::resolve::GlobalKind;
 use doodle_core::span::Span;
 
 /// The reflection of a call frame's callable (E§8.2), as plain data the JS GC owns — the stack
@@ -47,8 +48,25 @@ pub struct FrameData {
     pub locals: Vec<String>,
     /// The `with`-established dynamic-parameter names in this frame (empty for an elided frame).
     pub dynamics: Vec<String>,
+    /// The frame's **home module** index (E§8.2) — the module whose globals are in scope here,
+    /// the key for [`module_global_names`](Session::module_global_names). `None` for an elided
+    /// frame.
+    pub module: Option<u32>,
     /// `true` if this is a tail-elided caller (E§8.3), not a live activation.
     pub elided: bool,
+}
+
+/// A module-level binding the debugger lists (E§8.2): its `name`, declaration `kind` tag (the host
+/// filters — the *variables* are `let`/`const`/`parameter`), and `slot` (the key for
+/// [`module_global_value`](Session::module_global_value)). Value-free; read the value lazily.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalBindingData {
+    /// The declared name.
+    pub name: String,
+    /// The declaration-kind tag: `let`/`const`/`parameter`/`to`/`fn`/`record`/`protocol`/`module`.
+    pub kind: &'static str,
+    /// The binding's declaration-order index — the `slot` for [`module_global_value`].
+    pub slot: usize,
 }
 
 /// The outcome of an auxiliary `to_string` evaluation (E§8.4/S-22) — a plain-typed mirror of
@@ -128,6 +146,7 @@ impl Session {
                 tail_count: frame.tail_count,
                 locals: self.instance.frame_local_names(index),
                 dynamics: self.instance.frame_dynamic_names(index),
+                module: Some(frame.module.0),
                 elided: false,
             });
         }
@@ -144,10 +163,42 @@ impl Session {
                 tail_count: 0,
                 locals: Vec::new(),
                 dynamics: Vec::new(),
+                module: None,
                 elided: true,
             });
         }
         out
+    }
+
+    /// The module-level bindings of module `module` (E§8.2, the home module of a
+    /// [`stack_walk`](Self::stack_walk) frame), each `{name, kind, slot}` — the handle-free eager
+    /// half; read a value lazily with [`module_global_value`](Self::module_global_value). Module
+    /// globals are in scope module-wide, so a host shows them once per module.
+    pub fn module_global_names(&self, module: u32) -> Vec<GlobalBindingData> {
+        self.instance
+            .module_global_names(module as usize)
+            .into_iter()
+            .map(|g| GlobalBindingData {
+                name: g.name,
+                kind: global_kind_tag(g.kind),
+                slot: g.slot,
+            })
+            .collect()
+    }
+
+    /// A fresh **host-owned** handle to the current value of module `module`'s `slot`-th global
+    /// (§8.2), or `None` if out of range or **not yet defined** (the module-level TDZ; never a
+    /// fault). A `parameter`'s value is its live `with`-overridden value. `generation` must be the
+    /// [`pause_generation`](Self::pause_generation) the read is tied to; a stale one is a
+    /// [`StaleGeneration`] error.
+    pub fn module_global_value(
+        &mut self,
+        generation: u32,
+        module: u32,
+        slot: usize,
+    ) -> Result<Option<Handle>, StaleGeneration> {
+        self.check_generation(generation)?;
+        Ok(self.instance.module_global_value(module as usize, slot))
     }
 
     /// A fresh **host-owned** handle to frame `frame`'s `slot`-th local value (§8.2), or `None`
@@ -234,4 +285,18 @@ impl Session {
 /// A [`Span`] as a `[start, end)` byte-offset pair — the JS-facing span shape.
 fn span_pair(span: Span) -> [u32; 2] {
     [span.start, span.end]
+}
+
+/// The host-facing tag for a module-global declaration kind (the source keyword).
+fn global_kind_tag(kind: GlobalKind) -> &'static str {
+    match kind {
+        GlobalKind::Let => "let",
+        GlobalKind::Const => "const",
+        GlobalKind::Parameter => "parameter",
+        GlobalKind::Proc => "to",
+        GlobalKind::Fn => "fn",
+        GlobalKind::Record => "record",
+        GlobalKind::Protocol => "protocol",
+        GlobalKind::Module => "module",
+    }
 }

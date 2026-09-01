@@ -304,6 +304,49 @@ fn step_stops_at_the_next_safe_point() {
 }
 
 #[test]
+fn module_globals_read_through_the_session_with_generation_gating() {
+    // A top-level program's variables are module globals (not frame locals), reachable through
+    // the frame's home module. Reads are pause-generation gated like the frame bindings.
+    let mut session = Session::demo("let count = 7\nconst name = \"hi\"\nprint(count)\n").unwrap();
+    session.set_breakpoint("main", 3);
+    assert_eq!(
+        session.drive(Directive::Continue, None),
+        DriveOutcome::Paused("breakpoint")
+    );
+
+    let generation = session.pause_generation();
+    let module = session
+        .stack_walk()
+        .last()
+        .unwrap()
+        .module
+        .expect("a live frame has a home module");
+
+    let globals = session.module_global_names(module);
+    let shape: Vec<(&str, &str)> = globals.iter().map(|g| (g.name.as_str(), g.kind)).collect();
+    assert!(shape.contains(&("count", "let")));
+    assert!(shape.contains(&("name", "const")));
+
+    let count_slot = globals.iter().find(|g| g.name == "count").unwrap().slot;
+    let handle = session
+        .module_global_value(generation, module, count_slot)
+        .unwrap()
+        .expect("`count` is bound");
+    assert_eq!(session.as_int(handle).unwrap(), 7);
+    session.release(handle).unwrap();
+
+    // A drive invalidates the generation, so a later global read errors cleanly.
+    assert_eq!(
+        session.drive(Directive::Continue, None),
+        DriveOutcome::Completed
+    );
+    assert!(matches!(
+        session.module_global_value(generation, module, count_slot),
+        Err(super::StaleGeneration)
+    ));
+}
+
+#[test]
 fn raise_trap_pauses_before_unwinding_then_resumes_to_the_raise() {
     let mut session = Session::demo("let x = 1\nraise \"boom\"\n").unwrap();
     session.set_raise_trapping(true);

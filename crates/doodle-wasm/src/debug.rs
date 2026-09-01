@@ -14,7 +14,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::DoodleInstance;
-use crate::facade::{AuxOutcomeData, CallableInfo, FrameData};
+use crate::facade::{AuxOutcomeData, CallableInfo, FrameData, GlobalBindingData};
 use crate::value_error;
 use doodle_core::machine::Handle;
 
@@ -127,6 +127,38 @@ impl DoodleInstance {
     ) -> Result<Option<u64>, JsError> {
         self.session
             .frame_dynamic(generation, frame, slot)
+            .map(|opt| opt.map(Handle::bits))
+            .map_err(stale_generation)
+    }
+
+    /// The module-level bindings of module `module` (E§8.2 — a stack frame's `module`) as
+    /// `{name, kind, slot}` objects: `let`/`const`/`parameter` **variables** plus the
+    /// `to`/`fn`/`record`/`protocol`/`module` declarations, in declaration order. Module globals
+    /// are in scope module-wide, so a host shows them once per module. The host filters by `kind`
+    /// (variables are `let`/`const`/`parameter`) and reads a value with
+    /// [`moduleGlobalValue`](DoodleInstance::module_global_value).
+    #[wasm_bindgen(js_name = moduleGlobals)]
+    pub fn module_globals(&self, module: u32) -> js_sys::Array {
+        let arr = js_sys::Array::new();
+        for global in self.session.module_global_names(module) {
+            arr.push(&global_binding_value(&global));
+        }
+        arr
+    }
+
+    /// A fresh **host-owned** handle (release it) to the current value of module `module`'s
+    /// `slot`-th global (§8.2), or `undefined` if out of range or **not yet defined** (the
+    /// module-level TDZ). A `parameter`'s value is its live `with`-overridden value. Throws on a
+    /// stale `generation`.
+    #[wasm_bindgen(js_name = moduleGlobalValue)]
+    pub fn module_global_value(
+        &mut self,
+        generation: u32,
+        module: u32,
+        slot: usize,
+    ) -> Result<Option<u64>, JsError> {
+        self.session
+            .module_global_value(generation, module, slot)
             .map(|opt| opt.map(Handle::bits))
             .map_err(stale_generation)
     }
@@ -311,9 +343,21 @@ fn frame_value(frame: &FrameData) -> JsValue {
     );
     set(&obj, "locals", &str_array(&frame.locals));
     set(&obj, "dynamics", &str_array(&frame.dynamics));
+    if let Some(module) = frame.module {
+        set(&obj, "module", &JsValue::from(module));
+    }
     if frame.elided {
         set(&obj, "elided", &JsValue::TRUE);
     }
+    obj.into()
+}
+
+/// Builds the JS object for one module-global binding ([`GlobalBindingData`]).
+fn global_binding_value(global: &GlobalBindingData) -> JsValue {
+    let obj = js_sys::Object::new();
+    set(&obj, "name", &JsValue::from_str(&global.name));
+    set(&obj, "kind", &JsValue::from_str(global.kind));
+    set(&obj, "slot", &JsValue::from_f64(global.slot as f64));
     obj.into()
 }
 

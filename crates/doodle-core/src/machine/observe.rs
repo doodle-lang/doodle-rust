@@ -67,6 +67,10 @@ pub struct FrameObservation {
     /// Tail-iterations absorbed into this frame by proper-tail-call reuse (E§8.3): `0`
     /// for a fresh frame, `n` after `n` tail calls reused the same slot.
     pub tail_count: u64,
+    /// The frame's **home module** (E§8.2): the module whose globals are in scope here, so a host
+    /// shows the module-level bindings ([`module_global_names`](Instance::module_global_names)) of
+    /// the selected frame's module — once per module (they are module-scoped, not per-frame).
+    pub module: ModuleId,
 }
 
 impl Instance {
@@ -141,7 +145,7 @@ impl Instance {
         // Collect the raw per-frame data first (an immutable borrow of frames + AST),
         // then mint the callable handles (a mutable borrow) — the two borrows cannot
         // overlap. Innermost first, so reverse the bottom-up frame stack.
-        let raw: Vec<(Option<super::CalIdx>, Option<Span>, u64)> = self
+        let raw: Vec<(Option<super::CalIdx>, Option<Span>, u64, ModuleId)> = self
             .machine
             .frames
             .iter()
@@ -154,14 +158,15 @@ impl Instance {
                 let call_site = frame
                     .call_site
                     .map(|node| self.current_resolved().ast.span(node));
-                (cal, call_site, frame.tail_count)
+                (cal, call_site, frame.tail_count, frame.module)
             })
             .collect();
         raw.into_iter()
-            .map(|(cal, call_site, tail_count)| FrameObservation {
+            .map(|(cal, call_site, tail_count, module)| FrameObservation {
                 callable: cal.map(|cal| self.intern(Value::Callable(cal))),
                 call_site,
                 tail_count,
+                module,
             })
             .collect()
     }

@@ -255,6 +255,74 @@ fn frame_observation_reads_a_function_frames_locals() {
     }
 }
 
+// --- M6.9b: module-globals observation (E§8.2) ---
+
+#[test]
+fn module_globals_list_top_level_bindings_with_kinds_and_report_tdz() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    use crate::resolve::GlobalKind;
+    // Breakpoint on line 4 (`let d = 4`): a/b/c are bound; d has not executed yet — the
+    // module-level temporal dead zone. Module-level let/const/parameter are globals, not frame
+    // locals, so they surface here (a top-level program's variables).
+    let mut inst = load_source("let a = 1\nconst b = 2\nparameter c = 3\nlet d = 4\nd\n");
+    inst.set_breakpoint("main", 4);
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::Breakpoint(_))
+    ));
+
+    // The frame's home module is the entry module (per-module addressing).
+    assert_eq!(inst.stack_walk().last().unwrap().module, ModuleId(0));
+
+    let names = inst.module_global_names(0);
+    let shape: Vec<(&str, GlobalKind, usize)> = names
+        .iter()
+        .map(|g| (g.name.as_str(), g.kind, g.slot))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("a", GlobalKind::Let, 0),
+            ("b", GlobalKind::Const, 1),
+            ("c", GlobalKind::Parameter, 2),
+            ("d", GlobalKind::Let, 3),
+        ]
+    );
+
+    // Bound values read back by slot; the not-yet-declared `d` is None (TDZ), never a fault.
+    for (slot, want) in [(0, 1), (1, 2), (2, 3)] {
+        let h = inst.module_global_value(0, slot).expect("bound global");
+        assert_eq!(inst.as_int(h).unwrap(), want);
+        inst.release(h).unwrap();
+    }
+    assert_eq!(inst.module_global_value(0, 3), None, "`d` is in the TDZ");
+    // Out-of-range module / slot: empty / None, never a panic.
+    assert!(inst.module_global_names(9).is_empty());
+    assert_eq!(inst.module_global_value(0, 99), None);
+}
+
+#[test]
+fn a_module_parameter_global_reads_the_active_with_override() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // Inside the `with` body the parameter's live value is the override (9), not the default
+    // (1) — a host watching a `with` block sees the dynamic value change.
+    let mut inst = load_source("parameter pen = 1\nwith pen = 9 do\n  pen\nend\n");
+    inst.set_breakpoint("main", 3);
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::Breakpoint(_))
+    ));
+    let names = inst.module_global_names(0);
+    assert_eq!(names[0].name, "pen");
+    let h = inst.module_global_value(0, 0).expect("`pen` is bound");
+    assert_eq!(
+        inst.as_int(h).unwrap(),
+        9,
+        "the with-override is the live value"
+    );
+    inst.release(h).unwrap();
+}
+
 // --- M6.3: host-requested pause (E§8.8) ---
 
 #[test]

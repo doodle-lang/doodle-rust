@@ -33,6 +33,7 @@ mod exception;
 mod foreign;
 mod frame;
 mod gc;
+mod globals;
 mod handle;
 mod hash;
 mod import;
@@ -67,6 +68,7 @@ pub use breakpoint::BreakpointInfo;
 pub use cancel::CancelToken;
 pub(crate) use error::Halt;
 pub use error::{Exception, ExceptionKind, Trace, TraceFrame};
+pub use globals::GlobalBinding;
 pub use handle::{Handle, HandleError};
 pub use intrinsic::{
     HostError, Intrinsic, IntrinsicCtx, Registry, clear_canvas as clear_canvas_intrinsic,

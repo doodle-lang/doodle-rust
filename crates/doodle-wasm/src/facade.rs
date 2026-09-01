@@ -34,7 +34,7 @@ mod debug;
 /// fields and callable/type/module reflection, mirroring the native `Instance` API 1:1.
 mod inspect;
 
-pub use debug::{AuxOutcomeData, CallableInfo, FrameData, StaleGeneration};
+pub use debug::{AuxOutcomeData, CallableInfo, FrameData, GlobalBindingData, StaleGeneration};
 
 /// The M3 turtle library, prepended to a turtle program as one module (the real module
 /// system is M5). Lives in `doodle-rust`; `doodle-web` reaches it only through the wasm
