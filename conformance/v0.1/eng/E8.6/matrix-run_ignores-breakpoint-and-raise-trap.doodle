@@ -1,0 +1,12 @@
+#! clause: E8.6
+#! mode: drive
+#! break: 10
+#! raise-trap: on
+#! do: run
+#! expect: raised boom @ 12:1
+# The matrix (RunToCompletion side): the same setup, but `run` ignores both the breakpoint
+# and the raise-trap and drives straight to the uncaught raise.
+let x = 1
+print(x)
+print(x)
+raise "boom"

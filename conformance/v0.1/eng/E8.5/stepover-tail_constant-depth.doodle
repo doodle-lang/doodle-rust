@@ -1,0 +1,25 @@
+#! clause: E8.5
+#! mode: drive
+#! do: into
+#! expect: paused step @ 19:1
+#! do: into
+#! expect: paused step @ 25:1
+#! do: into
+#! expect: paused step @ 20:3
+#! stack: go@25
+#! do: into
+#! expect: paused step @ 20:3
+#! do: over
+#! expect: paused step @ 23:3
+#! do: over
+#! expect: paused step @ 20:3
+#! stack: go@23x1
+# A tail call reuses the frame: `StepOver` over `go(n - 1)` returns to the loop's `if` at the
+# SAME depth, the frame's tail-iteration count climbing (E§8.3) — the constant-depth criterion.
+to go(n)
+  if n <= 1 then
+    return
+  end
+  go(n - 1)
+end
+go(3)

@@ -10,6 +10,9 @@ pub(crate) enum Mode {
     Static,
     /// Execute the program under the conformance host.
     Run,
+    /// Drive the program under a **script** of directives (E§8, S-22; drive-script format,
+    /// implementation-plan §4.3), asserting the resulting outcome/position/stack **transcript**.
+    Drive,
 }
 
 /// A single `#! expect-…` directive, retained for matching against real output.
@@ -40,6 +43,80 @@ pub(crate) struct Test {
     pub(crate) mode: Mode,
     /// The pipeline stage this test requires (mode + `#! stage:` resolved).
     pub(crate) required: Stage,
-    /// The declared `#! expect-…` directives, in file order.
+    /// The declared `#! expect-…` directives, in file order (`run`/`static` modes).
     pub(crate) expectations: Vec<Expectation>,
+    /// The drive script (`mode: drive` only): setup + the ordered directive/expectation steps.
+    pub(crate) drive: Option<DriveScript>,
+}
+
+/// A drive-script test (implementation-plan §4.3): debug **setup** applied once, then an
+/// **ordered** sequence of drive [`DriveStep`]s whose actual outcome/position/stack transcript is
+/// compared whole against the declared one — the cross-surface determinism evidence of E§8.
+#[derive(Clone, Debug)]
+pub(crate) struct DriveScript {
+    /// Breakpoints to set before driving, as `(canonical id, 1-based line)` (E§8.6).
+    pub(crate) breakpoints: Vec<(String, u32)>,
+    /// Whether to enable raise-trapping (E§8.7).
+    pub(crate) raise_trap: bool,
+    /// Whether to run in per-subexpression observation mode (E§8.8, S-62); else per-statement.
+    pub(crate) subexpr: bool,
+    /// The ordered steps: each drives one action and asserts the resulting stop.
+    pub(crate) steps: Vec<DriveStep>,
+}
+
+/// One step of a drive script: an action to perform and the stop it must produce.
+#[derive(Clone, Debug)]
+pub(crate) struct DriveStep {
+    /// The action driven this step (`#! do:`).
+    pub(crate) action: DriveAction,
+    /// The stop this step must produce (`#! expect:`).
+    pub(crate) expect: StopAssertion,
+    /// The optional stack shape at the stop (`#! stack:`), innermost frame first.
+    pub(crate) stack: Option<Vec<StackElem>>,
+}
+
+/// A drive-script action (`#! do:`) — a driving directive (E§7.3). Capability/import resolutions
+/// (§4.3) join when a suspending capability exists (M7); imports already resolve via sibling files.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DriveAction {
+    /// `run` — `RunToCompletion`.
+    Run,
+    /// `continue` — `Continue`.
+    Continue,
+    /// `step` — `Step`.
+    Step,
+    /// `into` — `StepInto`.
+    Into,
+    /// `over` — `StepOver`.
+    Over,
+    /// `out` — `StepOut`.
+    Out,
+}
+
+/// The stop a [`DriveStep`] must produce (`#! expect:`) — one entry of the outcome transcript.
+#[derive(Clone, Debug)]
+pub(crate) enum StopAssertion {
+    /// `completed` — the driven unit finished (a module top level completes with no value).
+    Completed,
+    /// `paused <reason> @ <pos>` — a `Paused` stop with this reason at this position.
+    Paused { reason: String, pos: Position },
+    /// `raised <substring> @ <pos>` — an uncaught raise whose message contains `substring`.
+    Raised { substring: String, pos: Position },
+    /// `suspended <id> @ <pos>` — a capability/import suspension with this request identity.
+    Suspended { id: String, pos: Position },
+    /// `faulted <kind>` — a non-resumable engine fault of this kind.
+    Faulted { kind: String },
+}
+
+/// One element of an asserted stack shape (`#! stack:`), a call frame: its call-site `line`, and
+/// optionally the callee `name` and a tail-iteration count `tail` (E§8.2/§8.3). The matcher checks
+/// whatever is given — bare `L`, `name@L`, or `name@L×N` — so a fixture asserts only what it means.
+#[derive(Clone, Debug)]
+pub(crate) struct StackElem {
+    /// The callee name, if the element pins it (`name@L`).
+    pub(crate) name: Option<String>,
+    /// The 1-based call-site line (always asserted).
+    pub(crate) line: u32,
+    /// The tail-iteration count, if the element pins it (`…×N`).
+    pub(crate) tail: Option<u64>,
 }

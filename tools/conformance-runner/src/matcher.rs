@@ -8,7 +8,7 @@
 //! intrinsic is registered before load, S-43/M2b.2). A run expectation at a static
 //! stage (or vice versa) is a mis-authored test and fails loudly.
 
-use crate::model::{Expectation, Test};
+use crate::model::{Expectation, Mode, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
 use doodle_core::machine::{
@@ -33,7 +33,11 @@ pub(crate) fn execute(
 ) -> Result<(), Vec<String>> {
     match test.required {
         Stage::Lex | Stage::Parse | Stage::Full => run_static(test, source, test.required),
-        Stage::Run => run_dynamic(test, source, modules_dir),
+        // Both `run` and `drive` need the full machine; the mode picks the executor.
+        Stage::Run => match test.mode {
+            Mode::Drive => crate::drive::run_drive(test, source, modules_dir),
+            _ => run_dynamic(test, source, modules_dir),
+        },
     }
 }
 
@@ -115,7 +119,7 @@ fn drive_to_terminal(
 /// The registry the runner drives with: the demo intrinsics a `mode: run` fixture may
 /// use. `print` (S-43), plus `length`/`each` for the grapheme + sequence work (M4.8a);
 /// more join as they land. All are provisional, superseded by the stdlib (M9a).
-fn demo_registry() -> Registry {
+pub(crate) fn demo_registry() -> Registry {
     let mut registry = Registry::new();
     for intrinsic in [
         print_intrinsic(),
@@ -157,7 +161,7 @@ fn match_output(test: &Test, actual: &[u8]) -> Result<(), Vec<String>> {
 }
 
 /// The messages of every error-severity diagnostic (empty when the load is clean).
-fn error_messages(diagnostics: &[Diagnostic]) -> Vec<String> {
+pub(crate) fn error_messages(diagnostics: &[Diagnostic]) -> Vec<String> {
     diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
@@ -376,6 +380,7 @@ mod tests {
             mode: Mode::Static,
             required: Stage::Lex,
             expectations,
+            drive: None,
         }
     }
 
@@ -461,6 +466,7 @@ mod tests {
             mode: Mode::Static,
             required: Stage::Parse,
             expectations,
+            drive: None,
         }
     }
 
@@ -496,6 +502,7 @@ mod tests {
             mode: Mode::Static,
             required: Stage::Full,
             expectations,
+            drive: None,
         }
     }
 

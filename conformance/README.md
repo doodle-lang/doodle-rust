@@ -122,6 +122,52 @@ exactly (count, order, content) and the program terminates (a runner step
 budget bounds it; hitting it is a FAIL). Runnable from **M2b** (the host's
 `print` needs foreign-function registration; raise-only tests from M2a).
 
+### `mode: drive` (engine drive scripts, §4.3)
+
+The **normative** drive-script format (this section is the spec; the Rust runner
+in `tools/conformance-runner` is its reference parser — a second parser, e.g.
+M7's C-ABI harness, MUST accept exactly this grammar). A drive fixture is a
+program (the file body) plus a header **script**: debug **setup** applied once,
+then an **ordered** sequence of drive steps whose actual outcome/position/stack
+**transcript** is compared whole against the declared one. Setup:
+
+```
+#! break: [<canonical>] <line>   (a breakpoint, E§8.6; canonical id defaults to `main`)
+#! raise-trap: on                (enable raise-trapping, E§8.7)
+#! obs: subexpr | statement      (observation mode, E§8.8/S-62; default statement)
+```
+
+All setup directives MUST precede the first `do:`. Each step is one `do:` (a
+driving directive) followed by one `expect:` (the stop it must produce) and an
+optional `stack:`:
+
+```
+#! do: run | continue | step | into | over | out    (a directive, E§7.3)
+#! expect: <stop>
+#! stack: <elem>, <elem>, …                          (call frames, innermost first)
+```
+
+A `<stop>` is one of:
+
+```
+completed                       (the driven unit finished)
+paused <reason> @ <line>:<col>  (reason: step | breakpoint | host-pause | raise-trap | slice-end)
+raised <substring> @ <line>:<col>
+suspended <id> @ <line>:<col>   (id: capability name or dotted import path)
+faulted <kind>                  (step-budget | heap | stack-depth | tail-history | cancelled | …)
+```
+
+A stack `<elem>` is `<line>`, `<name>@<line>`, or `<name>@<line>×<n>` (the
+tail-iteration count `n`, E§8.3; `x` is accepted for `×`); the matcher checks
+only what an element pins. Positions are 1-based, in the NFC'd source, and are
+**absolute file lines** (the `#!` header counts). Imports resolve transparently,
+like `mode: run` (sibling module file, else `NotFound`). An **unknown** `do:`/
+`expect:`/stack token, or a **reserved-but-unimplemented** directive (`local:`,
+`render:` — the named slots for a future value/inspection extension), is a
+fixture **error**, never silently ignored. The format is versioned implicitly by
+`mode: drive`; a future incompatible grammar would be `mode: drive2`. Drive
+fixtures live under `conformance/v0.1/eng/<clause>/` and are runnable from **M6**.
+
 ## Rules
 
 - Expected text uses **substring** match per event (full-match is too brittle
@@ -133,8 +179,10 @@ budget bounds it; hitting it is a FAIL). Runnable from **M2b** (the host's
 
 ## Deferred (placeholders)
 
-- **Engine drive scripts** (JSON: directives+resolutions in, expected
-  outcome/position/stack stream out) — spec'd at M2b, under
-  `conformance/v0.1/engine/`.
+- **Capability-resolution steps** in a drive script (a `resolve:`/`resolve-raise:`
+  action feeding a suspended capability) — the format's reserved next extension,
+  landing when a suspending capability exists (M7); imports already resolve
+  transparently. Value/local **inspection** assertions (`local:`, `render:`) are
+  reserved-but-unimplemented named slots (§ `mode: drive`).
 - **Determinism harness** (run twice + GC-stress, diff traces) — a runner
   flag, M2a.

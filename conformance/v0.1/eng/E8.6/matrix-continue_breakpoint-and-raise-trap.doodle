@@ -1,0 +1,16 @@
+#! clause: E8.6
+#! mode: drive
+#! break: 14
+#! raise-trap: on
+#! do: continue
+#! expect: paused breakpoint @ 14:1
+#! do: continue
+#! expect: paused raise-trap @ 16:1
+#! do: continue
+#! expect: raised boom @ 16:1
+# The directive-semantics matrix (Continue side): with a breakpoint AND raise-trap set,
+# `Continue` stops at each in turn; the sibling `matrix-run` runs straight through.
+let x = 1
+print(x)
+print(x)
+raise "boom"

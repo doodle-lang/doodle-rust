@@ -1,0 +1,10 @@
+#! clause: E8.7
+#! mode: drive
+#! raise-trap: on
+#! do: continue
+#! expect: paused raise-trap @ 10:1
+#! do: continue
+#! expect: raised nope @ 10:1
+# Raise-trapping stops at the raise before the stack unwinds; resuming continues the unwind.
+let x = 1
+raise "nope"

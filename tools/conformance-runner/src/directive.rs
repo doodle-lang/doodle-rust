@@ -24,6 +24,9 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
     let mut mode = Mode::Run;
     let mut stage_directive: Option<Stage> = None;
     let mut expectations: Vec<Expectation> = Vec::new();
+    // Drive-script directives (`mode: drive`), retained raw and in order, then parsed into a
+    // `DriveScript` below (crate::drivescript) once the whole header is read.
+    let mut drive_raw: Vec<(String, String)> = Vec::new();
 
     for raw in source.lines() {
         let line = raw.trim_start();
@@ -53,6 +56,17 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
                 "expect-out" => expectations.push(Expectation::Out {
                     text: value.to_string(),
                 }),
+                // Drive-script directives — retained raw, parsed as a unit below.
+                "break" | "raise-trap" | "obs" | "do" | "expect" | "stack" => {
+                    drive_raw.push((key.to_string(), value.to_string()));
+                }
+                // Reserved for the inspection follow-on (value/render assertions): a named slot
+                // that fails loudly, so a fixture using it is not silently skipped or mis-spelled.
+                "local" | "render" => {
+                    return Err(format!(
+                        "`#! {key}:` is reserved for a future drive-script extension, not yet supported"
+                    ));
+                }
                 other => return Err(format!("unknown directive `#! {other}:`")),
             }
         } else if is_comment_or_blank(line) {
@@ -68,12 +82,29 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
         .ok_or_else(|| "missing required `#! clause:` directive".to_string())?;
     let id = test_id(primary, rel_path);
 
+    // Drive directives belong only to `mode: drive`, and a drive fixture uses them instead of the
+    // `expect-…` directives — cross-checked so a mis-declared fixture fails at parse, not silently.
+    let drive = if mode == Mode::Drive {
+        if !expectations.is_empty() {
+            return Err(
+                "`mode: drive` uses `do:`/`expect:`, not `expect-…` directives".to_string(),
+            );
+        }
+        Some(crate::drivescript::parse(&drive_raw)?)
+    } else {
+        if !drive_raw.is_empty() {
+            return Err("`break:`/`do:`/`expect:`/`stack:` require `mode: drive`".to_string());
+        }
+        None
+    };
+
     Ok(Test {
         id,
         clauses,
         mode,
         required,
         expectations,
+        drive,
     })
 }
 
@@ -102,8 +133,9 @@ fn parse_mode(value: &str) -> Result<Mode, String> {
     match value {
         "run" => Ok(Mode::Run),
         "static" => Ok(Mode::Static),
+        "drive" => Ok(Mode::Drive),
         other => Err(format!(
-            "unknown mode `{other}` (expected `run` or `static`)"
+            "unknown mode `{other}` (expected `run`, `static`, or `drive`)"
         )),
     }
 }
@@ -122,17 +154,18 @@ fn parse_stage(value: &str) -> Result<Stage, String> {
 /// Resolves the stage a test requires from its mode and optional `stage:`.
 fn resolve_stage(mode: Mode, stage_directive: Option<Stage>) -> Result<Stage, String> {
     match mode {
-        Mode::Run if stage_directive.is_some() => {
+        Mode::Run | Mode::Drive if stage_directive.is_some() => {
             Err("`stage:` is only valid in `mode: static`".to_string())
         }
-        Mode::Run => Ok(Stage::Run),
+        // A drive script needs the full machine, exactly as a `run` fixture does.
+        Mode::Run | Mode::Drive => Ok(Stage::Run),
         Mode::Static => Ok(stage_directive.unwrap_or(Stage::Full)),
     }
 }
 
 /// Parses a `<substring> @ <line>:<col>` value into its match substring and
-/// 1-based [`Position`] (in the NFC'd source, S-1).
-fn parse_positioned(value: &str) -> Result<(String, Position), String> {
+/// 1-based [`Position`] (in the NFC'd source, S-1). Shared with the drive-script parser.
+pub(crate) fn parse_positioned(value: &str) -> Result<(String, Position), String> {
     let (substring, pos) = value
         .rsplit_once('@')
         .ok_or_else(|| format!("expected `<substring> @ <line>:<col>` in `{value}`"))?;
@@ -284,5 +317,47 @@ mod tests {
         let src = "\u{feff}#! clause: L1\n#! mode: static\nx\n";
         let t = parse_test("f.doodle", src).unwrap();
         assert_eq!(t.clauses, ["L1"]);
+    }
+
+    #[test]
+    fn parses_a_drive_script() {
+        let src = "#! clause: E8.6\n#! mode: drive\n#! break: 4\n#! raise-trap: on\n\
+                   #! do: continue\n#! expect: paused breakpoint @ 4:1\n\
+                   #! do: continue\n#! expect: raised boom @ 4:1\nprint(1)\nraise \"boom\"\n";
+        let t = parse_test("v0.1/eng/E8.6/x.doodle", src).unwrap();
+        assert_eq!(t.mode, Mode::Drive);
+        assert_eq!(t.required, Stage::Run);
+        let drive = t.drive.expect("a drive script");
+        assert_eq!(drive.breakpoints, [("main".to_string(), 4)]);
+        assert!(drive.raise_trap && !drive.subexpr);
+        assert_eq!(drive.steps.len(), 2);
+    }
+
+    #[test]
+    fn a_reserved_drive_directive_is_an_error() {
+        // `local:`/`render:` are reserved-but-unimplemented named slots — a loud error, never
+        // silently ignored, so the inspection follow-on cannot be reinvented ad hoc.
+        for key in ["local", "render"] {
+            let src = format!("#! clause: E8\n#! mode: drive\n#! do: step\n#! {key}: x\nx\n");
+            assert!(parse_test("f.doodle", &src).is_err(), "{key} must error");
+        }
+    }
+
+    #[test]
+    fn an_unknown_drive_directive_is_an_error() {
+        let src = "#! clause: E8\n#! mode: drive\n#! wat: x\n#! do: step\nx\n";
+        assert!(parse_test("f.doodle", src).is_err());
+    }
+
+    #[test]
+    fn drive_directives_require_drive_mode() {
+        let src = "#! clause: E8\n#! mode: run\n#! do: step\nx\n";
+        assert!(parse_test("f.doodle", src).is_err());
+    }
+
+    #[test]
+    fn a_do_without_an_expect_is_an_error() {
+        let src = "#! clause: E8\n#! mode: drive\n#! do: step\n#! do: step\nx\n";
+        assert!(parse_test("f.doodle", src).is_err());
     }
 }

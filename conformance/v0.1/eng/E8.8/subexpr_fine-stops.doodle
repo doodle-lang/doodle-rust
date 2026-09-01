@@ -1,0 +1,14 @@
+#! clause: E8.8
+#! mode: drive
+#! obs: subexpr
+#! do: step
+#! expect: paused step @ 14:9
+#! do: step
+#! expect: paused step @ 14:13
+#! do: step
+#! expect: paused step @ 14:9
+#! do: step
+#! expect: paused step @ 14:18
+# In per-subexpression mode, Step also stops at each non-leaf subexpression completion (S-62),
+# reporting the completed subexpression's position: `2 * 3` (col 13) then `1 + 2 * 3` (col 9).
+let n = 1 + 2 * 3

@@ -15,6 +15,8 @@
 //! (the captured output). A run test above the implemented stage still SKIPs.
 
 mod directive;
+mod drive;
+mod drivescript;
 mod matcher;
 mod model;
 
