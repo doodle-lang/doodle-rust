@@ -172,6 +172,13 @@ impl DoodleInstance {
             .map(|s| vec![s.start, s.end])
     }
 
+    /// A fresh **host-owned** handle (release it) to the current result-register value (E§8.4) —
+    /// the just-produced value at a fine (watch-it-run) stop; `undefined` for Void.
+    #[wasm_bindgen(js_name = currentResult)]
+    pub fn current_result(&mut self) -> Option<u64> {
+        self.session.current_result().map(|h| h.bits())
+    }
+
     /// At a raise-trap pause (E§8.7), a fresh **host-owned** handle (release it) to the raised
     /// value; `undefined` if no raise is trapped. Consuming it marks the trap taken.
     #[wasm_bindgen(js_name = trappedRaise)]

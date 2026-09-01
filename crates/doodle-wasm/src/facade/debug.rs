@@ -234,6 +234,13 @@ impl Session {
         self.instance.completed_position().map(|p| p.span)
     }
 
+    /// A fresh **host-owned** handle to the current result-register value (E§8.4), or `None` for
+    /// Void — the just-produced value at a fine stop, paired with
+    /// [`completed_position`](Self::completed_position).
+    pub fn current_result(&mut self) -> Option<Handle> {
+        self.instance.result_handle()
+    }
+
     /// At a raise-trap pause (E§8.7), a fresh **host-owned** handle to the raised value; `None`
     /// if no raise is trapped. Consuming it marks the trap taken so the resumed drive unwinds.
     pub fn trapped_raise(&mut self) -> Option<Handle> {

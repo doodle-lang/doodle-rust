@@ -304,6 +304,31 @@ fn step_stops_at_the_next_safe_point() {
 }
 
 #[test]
+fn current_result_reads_the_value_at_a_fine_stop() {
+    // In subexpression mode a step stops at each non-leaf completion; at the `2 + 3` stop the
+    // result register holds 5 — the watch-it-run value (S-62).
+    let mut session = Session::demo("let x = 2 + 3\nprint(x)\n").unwrap();
+    session.set_observation_mode(true);
+    for _ in 0..50 {
+        match session.drive(Directive::Step, None) {
+            DriveOutcome::Paused(_) => {
+                if session.completed_position().is_some()
+                    && let Some(handle) = session.current_result()
+                {
+                    let value = session.as_int(handle).ok();
+                    session.release(handle).unwrap();
+                    if value == Some(5) {
+                        return;
+                    }
+                }
+            }
+            other => panic!("never reached the `2 + 3` fine stop: {other:?}"),
+        }
+    }
+    panic!("never observed the fine-stop value 5");
+}
+
+#[test]
 fn module_globals_read_through_the_session_with_generation_gating() {
     // A top-level program's variables are module globals (not frame locals), reachable through
     // the frame's home module. Reads are pause-generation gated like the frame bindings.

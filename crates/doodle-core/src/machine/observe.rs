@@ -137,6 +137,16 @@ impl Instance {
         Some(Position { module, span })
     }
 
+    /// A fresh **host-owned** handle to the current **result register** value (E§8.4), or `None`
+    /// if the register is empty (Void). At a **fine** safe point (`Subexpression` mode) this is the
+    /// value the just-completed subexpression produced — together with
+    /// [`completed_position`](Self::completed_position), the "watch your expression evaluate"
+    /// primitive (S-62). Mints a handle like [`stack_walk`](Self::stack_walk); the host frees it.
+    pub fn result_handle(&mut self) -> Option<Handle> {
+        let value = self.result()?;
+        Some(self.intern(value))
+    }
+
     /// The current call stack (E§8.2), innermost frame first: each frame's callable (a
     /// fresh host-owned handle), its call-site position, and its tail-iteration count.
     /// Mints one handle per callable frame — like [`list_get`](Instance::list_get), the
