@@ -360,6 +360,16 @@ pub struct Instance {
     state: InstanceState,
 }
 
+/// An [`Instance`] is `Send` (M7/D-M7-5): a host may move an instance to another thread and
+/// drive it there — instances are independent, and one thread drives one instance at a time
+/// (`!Sync`: `StrObj`'s grapheme cache is `&self`-mutated). Asserted at compile time so a
+/// future non-`Send` field — e.g. a [`Finalizer`](crate::heap::Finalizer) that dropped its
+/// `+ Send` bound — is caught here rather than at a C-ABI use site.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Instance>();
+};
+
 impl Instance {
     /// The module the top frame is executing in — whose resolved AST and namespace the
     /// next transition reads (AD5). `ModuleId(0)` (the main module) when no frame is

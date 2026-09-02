@@ -211,13 +211,18 @@ pub struct RecObj {
 /// once** when the value is garbage-collected or the instance is destroyed, given the
 /// value's opaque host pointer, to release the underlying resource.
 ///
-/// **Provisional in-engine shape (M2b.6, S-42-lite).** A boxed `FnOnce(host_ptr)`, so
-/// a finalizer can own the Rust-side resource it releases and run test-observably. The
-/// C-ABI form — an `extern "C" fn(void*)` — is deferred to the full S-42 host-callback
-/// FFI (M7), which this bridges to (the `u64` is the `void*`). It is host state, never
-/// part of the deterministic Doodle heap: it is not snapshotted (replay re-supplies it
-/// via `make_foreign`) and its effects cannot re-enter the instance (E§4.5).
-pub type Finalizer = Box<dyn FnOnce(u64)>;
+/// **In-engine shape (S-42).** A boxed `FnOnce(host_ptr)`, so a finalizer can own the
+/// Rust-side resource it releases and run test-observably. The C-ABI form — an
+/// `extern "C" fn(void*)` — is the S-42 host-callback FFI (M7), which this bridges to
+/// (the `u64` is the `void*`). It is host state, never part of the deterministic Doodle
+/// heap: it is not snapshotted (replay re-supplies it via `make_foreign`) and its effects
+/// cannot re-enter the instance (E§4.5).
+///
+/// `+ Send` so an [`Instance`](crate::machine::Instance) is `Send` (M7/D-M7-5: a host may
+/// move an instance to another thread — one thread drives one instance at a time). The
+/// C-ABI trampoline captures only the `extern "C" fn(void*)` and the `void*` payload, both
+/// `Send`; a finalizer given the instance would be both unsound (re-entry) and non-`Send`.
+pub type Finalizer = Box<dyn FnOnce(u64) + Send>;
 
 /// A foreign (host) value (engine spec E§4.5): an opaque host object exposed to Doodle.
 /// It is **inert data** to Doodle — reference-typed with identity equality (L§4.13), no

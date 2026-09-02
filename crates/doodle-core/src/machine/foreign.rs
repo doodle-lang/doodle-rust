@@ -47,8 +47,8 @@ impl Instance {
 mod tests {
     use super::*;
     use crate::span::ModuleId;
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
     /// A `Ready` instance over a trivial clean-loading program — foreign values need only
     /// the heap + handle table, not a running program.
@@ -74,8 +74,10 @@ mod tests {
     }
 
     /// Wraps `f` as a boxed [`Finalizer`] (the coercion to `dyn FnOnce` needs the target
-    /// type, which the return type supplies).
-    fn finalizer(f: impl FnOnce(u64) + 'static) -> Option<Finalizer> {
+    /// type, which the return type supplies). `+ Send` mirrors the [`Finalizer`] alias, so
+    /// these tests exercise the same bound the C-ABI trampoline satisfies (state shared with
+    /// the test is `Arc`/atomic, not `Rc`).
+    fn finalizer(f: impl FnOnce(u64) + Send + 'static) -> Option<Finalizer> {
         Some(Box::new(f))
     }
 
@@ -104,67 +106,107 @@ mod tests {
     #[test]
     fn an_unreachable_foreign_runs_its_finalizer_once_at_gc() {
         let mut inst = instance();
-        let count = Rc::new(Cell::new(0u32));
-        let seen_ptr = Rc::new(Cell::new(0u64));
+        let count = Arc::new(AtomicU32::new(0));
+        let seen_ptr = Arc::new(AtomicU64::new(0));
         let (c, p) = (count.clone(), seen_ptr.clone());
         let h = inst.make_foreign(
             1,
             77,
             finalizer(move |ptr| {
-                c.set(c.get() + 1);
-                p.set(ptr);
+                c.fetch_add(1, Relaxed);
+                p.store(ptr, Relaxed);
             }),
         );
         inst.release(h).unwrap(); // now unreachable
         inst.force_collect();
         assert_eq!(
-            count.get(),
+            count.load(Relaxed),
             1,
             "finalizer ran once at the reclaiming collection"
         );
-        assert_eq!(seen_ptr.get(), 77, "the finalizer received the host ptr");
+        assert_eq!(
+            seen_ptr.load(Relaxed),
+            77,
+            "the finalizer received the host ptr"
+        );
         // The slot is freed and its finalizer taken, so a later collection cannot run it
         // again — exactly-once.
         inst.force_collect();
-        assert_eq!(count.get(), 1, "not re-run by a subsequent collection");
+        assert_eq!(
+            count.load(Relaxed),
+            1,
+            "not re-run by a subsequent collection"
+        );
     }
 
     #[test]
     fn a_retained_foreign_is_not_finalized_at_gc() {
         let mut inst = instance();
-        let count = Rc::new(Cell::new(0u32));
+        let count = Arc::new(AtomicU32::new(0));
         let c = count.clone();
         // Keep the handle (a GC root), so the value survives collection unfinalized.
-        let _h = inst.make_foreign(1, 0, finalizer(move |_| c.set(c.get() + 1)));
+        let _h = inst.make_foreign(
+            1,
+            0,
+            finalizer(move |_| {
+                c.fetch_add(1, Relaxed);
+            }),
+        );
         inst.force_collect();
-        assert_eq!(count.get(), 0, "a reachable foreign is not finalized");
+        assert_eq!(
+            count.load(Relaxed),
+            0,
+            "a reachable foreign is not finalized"
+        );
     }
 
     #[test]
     fn destroy_finalizes_every_live_foreign_once() {
         let mut inst = instance();
-        let count = Rc::new(Cell::new(0u32));
+        let count = Arc::new(AtomicU32::new(0));
         let (c1, c2) = (count.clone(), count.clone());
         // Two live foreign values (handles held); destroy must finalize both, once each.
-        let _a = inst.make_foreign(1, 10, finalizer(move |_| c1.set(c1.get() + 1)));
-        let _b = inst.make_foreign(2, 20, finalizer(move |_| c2.set(c2.get() + 1)));
+        let _a = inst.make_foreign(
+            1,
+            10,
+            finalizer(move |_| {
+                c1.fetch_add(1, Relaxed);
+            }),
+        );
+        let _b = inst.make_foreign(
+            2,
+            20,
+            finalizer(move |_| {
+                c2.fetch_add(1, Relaxed);
+            }),
+        );
         inst.destroy();
-        assert_eq!(count.get(), 2, "both live finalizers ran once at destroy");
+        assert_eq!(
+            count.load(Relaxed),
+            2,
+            "both live finalizers ran once at destroy"
+        );
     }
 
     #[test]
     fn a_gc_finalized_foreign_is_not_finalized_again_at_destroy() {
         let mut inst = instance();
-        let count = Rc::new(Cell::new(0u32));
+        let count = Arc::new(AtomicU32::new(0));
         let c = count.clone();
-        let h = inst.make_foreign(1, 0, finalizer(move |_| c.set(c.get() + 1)));
+        let h = inst.make_foreign(
+            1,
+            0,
+            finalizer(move |_| {
+                c.fetch_add(1, Relaxed);
+            }),
+        );
         inst.release(h).unwrap();
         inst.force_collect();
-        assert_eq!(count.get(), 1, "finalized at GC");
+        assert_eq!(count.load(Relaxed), 1, "finalized at GC");
         // The value is gone; destroy must not run its finalizer a second time.
         inst.destroy();
         assert_eq!(
-            count.get(),
+            count.load(Relaxed),
             1,
             "destroy does not re-finalize a collected value"
         );
@@ -186,22 +228,32 @@ mod tests {
         // it neither skips its peers' finalizers (which would leak their resources) nor
         // aborts the process at destroy. Both finalizers here run; the panic is contained.
         let mut inst = instance();
-        let count = Rc::new(Cell::new(0u32));
+        let count = Arc::new(AtomicU32::new(0));
         let (c_panic, c_ok) = (count.clone(), count.clone());
         let _a = inst.make_foreign(
             1,
             0,
             finalizer(move |_| {
-                c_panic.set(c_panic.get() + 1);
+                c_panic.fetch_add(1, Relaxed);
                 panic!("a finalizer that misbehaves");
             }),
         );
-        let _b = inst.make_foreign(2, 0, finalizer(move |_| c_ok.set(c_ok.get() + 1)));
+        let _b = inst.make_foreign(
+            2,
+            0,
+            finalizer(move |_| {
+                c_ok.fetch_add(1, Relaxed);
+            }),
+        );
         // Silence the expected panic's default hook so it does not clutter test output.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         inst.destroy();
         std::panic::set_hook(prev);
-        assert_eq!(count.get(), 2, "the panicking finalizer's peer still ran");
+        assert_eq!(
+            count.load(Relaxed),
+            2,
+            "the panicking finalizer's peer still ran"
+        );
     }
 }

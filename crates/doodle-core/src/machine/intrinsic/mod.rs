@@ -18,8 +18,10 @@
 //! invokes the callback with an [`IntrinsicCtx`] granting read access to the bound
 //! arguments and the heap plus the instance's output sink. Reentrant callbacks
 //! (invoking a Doodle callable / a block argument) and foreign block parameters are
-//! M2b.5; foreign *heap-backed* defaults are S-42/M7 — a default here is an inline
-//! value (the registry is built before the heap exists, so it can hold no heap ref).
+//! M2b.5. A foreign default is a [`ConstValue`](super::native::ConstValue) **recipe**
+//! (the registry predates the heap, so it holds no heap ref), materialized per call in
+//! [`binding`]; `ConstValue` spans only immutable values, so a mutable foreign default is
+//! unrepresentable — L§8.3-equivalent by construction (S-42, D-M7-8).
 
 use super::Value;
 use super::error::Raise;
@@ -41,15 +43,21 @@ pub(crate) struct PendingRequest {
     pub span: Span,
 }
 
-/// A parameter of an intrinsic foreign function (E§5.1). Its `default`, if present,
-/// is an **inline** value (no heap reference — the registry is built before the heap
-/// exists); a heap-backed foreign default is deferred to S-42/M7.
+/// A parameter of an intrinsic foreign function (E§5.1). Its `default`, if present, is a
+/// [`ConstValue`] **recipe** — not a heap [`Value`] — because the registry is built before
+/// any heap exists (S-42). The recipe is materialized into the instance heap **when the
+/// default fills a missing argument** (`binding.rs`); for the immutable values `ConstValue`
+/// can express, materialize-per-call and materialize-once are indistinguishable (identity
+/// is observable only for reference types, L§4.13/§4.14), so this is L§8.3-equivalent
+/// (D-M7-8). `ConstValue` has no list/dict/record variant, so a **mutable** foreign default
+/// is unrepresentable — the immutability restriction is enforced by construction, keeping
+/// host code out of Python's mutable-default-argument footgun.
 #[derive(Clone, Debug)]
 pub(crate) struct ForeignParam {
     /// The parameter name (for keyword binding and diagnostics).
     pub name: Box<str>,
-    /// An inline default value, or `None` for a required parameter.
-    pub default: Option<Value>,
+    /// A default-value recipe (materialized per call), or `None` for a required parameter.
+    pub default: Option<super::native::ConstValue>,
     /// Whether this is the trailing block parameter (bound reentrantly, M2b.5).
     pub is_block: bool,
 }

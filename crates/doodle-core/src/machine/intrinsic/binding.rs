@@ -62,8 +62,11 @@ pub(super) fn bind_foreign_arguments(
         }
         let value = match slots[i] {
             Some(v) => v,
-            None => match (filled[i], p.default) {
-                (false, Some(d)) => d,
+            None => match (filled[i], &p.default) {
+                // Materialize the default recipe into the heap for this call (S-42): an
+                // immutable value, so per-call materialization is L§8.3-equivalent (D-M7-8).
+                // Rooted immediately — it is bound into the returned arg vector.
+                (false, Some(d)) => crate::machine::native::materialize_const(d.clone(), heap),
                 _ => {
                     return Err(Raise::new(
                         ExceptionKind::MissingArgument,

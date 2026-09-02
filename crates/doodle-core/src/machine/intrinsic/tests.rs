@@ -370,6 +370,81 @@ fn returning_a_value_after_a_non_local_exit_faults() {
     assert_eq!(inst.state(), crate::machine::InstanceState::Faulted);
 }
 
+/// A foreign `to` with a **heap-backed default** (a string materialized per call, S-42) and a
+/// trailing **block parameter** — the M7.0 accept shape (a default + a block, binding per
+/// L§8.3). Invokes its block once with the greeting (the passed value, or the default).
+fn greet_with_default() -> Intrinsic {
+    Intrinsic {
+        name: "greet".into(),
+        kind: BodyKind::Proc,
+        params: vec![
+            ForeignParam {
+                name: "who".into(),
+                default: Some(crate::machine::ConstValue::Str("world".into())),
+                is_block: false,
+            },
+            ForeignParam {
+                name: "body".into(),
+                default: None,
+                is_block: true,
+            },
+        ],
+        body: ForeignBody::Sync(|ctx| {
+            let who = ctx.args()[0];
+            ctx.invoke_block(vec![who])?;
+            Ok(None)
+        }),
+    }
+}
+
+#[test]
+fn a_foreign_default_and_block_bind_per_l8_3() {
+    // S-42 / D-M7-8: an omitted argument binds the descriptor's default (a heap-backed string
+    // materialized per call from its `ConstValue` recipe); the trailing block parameter is
+    // invoked reentrantly with the bound value. First call defaults to "world"; second passes
+    // "moon".
+    let (inst, outcome) = run_with(
+        "greet() do (who)\nprint(who)\nend\ngreet(\"moon\") do (who)\nprint(who)\nend\n",
+        registry_with(vec![print(), greet_with_default()]),
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"world\nmoon\n");
+}
+
+#[test]
+fn a_materialized_foreign_default_survives_a_gc_during_the_call() {
+    // The default is materialized per call and bound into the block's reentrant drive. Under a
+    // collect at every safe point (max GC pressure), the materialized string must survive that
+    // drive — the recipe holds no heap reference, and there is no safe point between
+    // materialization and binding, so the value is never unrooted at a collectable instant.
+    use crate::diag::Severity;
+    let src = "greet() do (who)\nprint(who)\nend\n";
+    let nfc = crate::source::normalize(src);
+    let parsed = crate::parse::parse_program(nfc.as_ref(), ModuleId(0));
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error),
+        "parse error(s): {:?}",
+        parsed.diagnostics
+    );
+    let resolved = crate::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let mut inst = Instance::load_with_intrinsics(
+        resolved.module,
+        registry_with(vec![print(), greet_with_default()]),
+    );
+    inst.collect_at_every_safe_point();
+    let outcome = run(&mut inst, Directive::RunToCompletion);
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"world\n");
+}
+
 #[test]
 fn register_rejects_a_reserved_prelude_name() {
     // A host intrinsic may not shadow a fixed prelude name (M5.10): `Error` and the well-known
