@@ -120,21 +120,47 @@ impl Instance {
         let saved_pending = std::mem::take(&mut self.machine.pending);
         let saved_pending_fault = self.machine.pending_fault.take();
         let saved_ring: RingBuffer = self.machine.ring.clone();
+        let saved_gc_threshold = self.machine.gc_threshold;
         let frames_len = self.machine.frames.len();
         let dyn_len = self.machine.dyn_stack.len();
         let handling_len = self.machine.handling.len();
         let foreign_len = self.machine.foreign_roots.len();
 
+        // Keep the **saved context's** heap values rooted while the nested drive runs. They were
+        // moved out of the machine fields above (reg/unwind/pending), so `gc::collect` — which
+        // roots them only through those live fields — no longer reaches them, and a collection
+        // inside the aux drive would sweep them, corrupting the restored pause. The sharp case is a
+        // raise-trap pause: the trapped raise value is reachable *only* from `unwind`, so clearing
+        // `unwind` (load-bearing, above) leaves it unrooted. `foreign_roots` exists for exactly
+        // this — rooting Rust-stack-held values across a reentrant drive — and the
+        // `truncate(foreign_len)` below drops these afterward (captured before the pushes).
+        if let Some(v) = saved_reg {
+            self.machine.foreign_roots.push(v);
+        }
+        if let Some(v) = saved_unwind.as_ref().and_then(|u| u.gc_value()) {
+            self.machine.foreign_roots.push(v);
+        }
+        if let Some(super::modload::Suspension::Capability(pending)) = &saved_pending {
+            for value in &pending.args {
+                self.machine.foreign_roots.push(*value);
+            }
+        }
+
         self.machine.enter_reentry();
         let result = self.run_aux_drive(cal, value, frames_len);
         self.machine.exit_reentry();
 
-        // Restore the debug context. Truncate anything left above the boundary — a completion or
-        // a raise already drained to it, but a fault leaves partial frames/bindings.
+        // Restore the debug context. `frames`/`handling`/`foreign_roots` truncate to their saved
+        // heights — a completion or raise already drained there, and a fault's partial entries
+        // hold no cell state needing writeback. `dyn_stack` must be **restored**, not truncated:
+        // a fault mid-`with` leaves `(cell, old)` save entries whose values must be written back
+        // into their (program-shared) parameter cells, or the aux drive's `with` binding leaks into
+        // the outer program (`restore` is a no-op when already drained to `dyn_len`).
         self.machine.frames.truncate(frames_len);
-        self.machine.dyn_stack.truncate(dyn_len);
+        super::unwind::restore(&mut self.machine, &mut self.heap, dyn_len as u32);
         self.machine.handling.truncate(handling_len);
         self.machine.foreign_roots.truncate(foreign_len);
+        self.machine.gc_threshold = saved_gc_threshold;
         self.machine.reg = saved_reg;
         self.machine.unwind = saved_unwind;
         self.machine.fuel = saved_fuel;
@@ -190,6 +216,10 @@ impl Instance {
                     // The render raised and unwound to the boundary (a caller `try` below it is
                     // never reached — the aux render is a separate evaluation).
                     Some(Unwind::Raise { value, .. }) => AuxResult::Raised(value),
+                    // The host pressed stop during the aux render: `poll_cancel` armed a cancel and
+                    // drained here. The cancel flag stays set, so the outer resume observes it too;
+                    // report the aux drive's own outcome as cancelled, not a spurious `Internal`.
+                    Some(Unwind::Cancel) => AuxResult::Faulted(EngineFault::Cancelled),
                     // A `break`/`return` cannot escape a `to_string` callable to the boundary (a
                     // valued `break` with no consumer raises, S-10); any other unwind here is a
                     // broken invariant.

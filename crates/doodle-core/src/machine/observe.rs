@@ -282,7 +282,10 @@ impl Instance {
             return Vec::new();
         };
         let (start, end) = self.frame_dyn_range(actual);
-        self.machine.dyn_stack[start..end]
+        self.machine
+            .dyn_stack
+            .get(start..end)
+            .unwrap_or(&[])
             .iter()
             .map(|(cell, _)| self.cell_name(*cell))
             .collect()
@@ -294,7 +297,12 @@ impl Instance {
     pub fn frame_dynamic_value(&mut self, index: usize, slot: usize) -> Option<Handle> {
         let actual = self.frame_at(index)?;
         let (start, end) = self.frame_dyn_range(actual);
-        let cell = self.machine.dyn_stack[start..end]
+        // Fail-soft on the slice like every sibling reader (a broken `dyn_depth` invariant returns
+        // `None`, never panics — the observation surface must be safe at any stopped state).
+        let cell = self
+            .machine
+            .dyn_stack
+            .get(start..end)?
             .get(slot)
             .map(|(c, _)| *c)?;
         let value = self.heap.cell(cell).value?;

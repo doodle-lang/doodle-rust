@@ -180,7 +180,8 @@ impl DoodleInstance {
     }
 
     /// At a raise-trap pause (E§8.7), a fresh **host-owned** handle (release it) to the raised
-    /// value; `undefined` if no raise is trapped. Consuming it marks the trap taken.
+    /// value; `undefined` if no raise is trapped. A pure read (safe to call more than once); the
+    /// trap is taken by the resumed drive, not by reading.
     #[wasm_bindgen(js_name = trappedRaise)]
     pub fn trapped_raise(&mut self) -> Option<u64> {
         self.session.trapped_raise().map(|h| h.bits())

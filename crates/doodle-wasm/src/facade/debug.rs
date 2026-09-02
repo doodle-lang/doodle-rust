@@ -246,7 +246,9 @@ impl Session {
     }
 
     /// At a raise-trap pause (E§8.7), a fresh **host-owned** handle to the raised value; `None`
-    /// if no raise is trapped. Consuming it marks the trap taken so the resumed drive unwinds.
+    /// if no raise is trapped. A pure read (mints a fresh handle each call, safe to call more than
+    /// once); the trap is taken by the *resumed drive*, not by reading — resuming continues the
+    /// unwind.
     pub fn trapped_raise(&mut self) -> Option<Handle> {
         self.instance.trapped_raise()
     }
@@ -285,7 +287,10 @@ impl Session {
         }
     }
 
-    /// Errors if `generation` is not the current pause generation (a stale frame index).
+    /// Errors if `generation` is not the current pause generation (a stale frame index). The
+    /// generation is a wrapping `u32`; a token held un-refreshed across exactly 2^32 drives could
+    /// alias — not reachable in practice (a correct host re-walks at each pause), and even then a
+    /// read stays bounds-safe (a wrong value at worst, never a panic).
     fn check_generation(&self, generation: u32) -> Result<(), StaleGeneration> {
         (generation == self.pause_generation())
             .then_some(())

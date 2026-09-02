@@ -323,6 +323,99 @@ fn a_module_parameter_global_reads_the_active_with_override() {
     inst.release(h).unwrap();
 }
 
+// --- M6.10: the observation surface must not perturb the program trace (E§7.7/§11) ---
+
+/// Drives `inst` to a terminal outcome under `directive`, performing the **pure** observation
+/// reads (stack walk, frame locals + dynamic bindings, module globals, tail-elided history) at
+/// every pause and releasing every handle they mint. Returns the terminal outcome tag. Aux
+/// evaluation is deliberately excluded — it is the one *effectful* observation primitive (S-22).
+fn drive_observing(inst: &mut Instance, directive: crate::drive::Directive) -> &'static str {
+    use crate::drive::{Outcome, run};
+    loop {
+        match run(inst, directive) {
+            Outcome::Completed(_) => return "completed",
+            Outcome::Raised(..) => return "raised",
+            Outcome::Faulted(_) => return "faulted",
+            Outcome::Suspended(_) | Outcome::SuspendedImport(_) => return "suspended",
+            Outcome::Paused(_) => {
+                let frames = inst.stack_walk();
+                let depth = frames.len();
+                for frame in frames {
+                    if let Some(handle) = frame.callable {
+                        let _ = inst.release(handle);
+                    }
+                }
+                for i in 0..depth {
+                    for binding in inst.frame_locals(i) {
+                        if let Some(handle) = binding.value {
+                            let _ = inst.release(handle);
+                        }
+                    }
+                    for binding in inst.frame_dynamic_bindings(i) {
+                        if let Some(handle) = binding.value {
+                            let _ = inst.release(handle);
+                        }
+                    }
+                }
+                for global in inst.module_global_names(0) {
+                    if let Some(handle) = inst.module_global_value(0, global.slot) {
+                        let _ = inst.release(handle);
+                    }
+                }
+                for elided in inst.tail_elided_history() {
+                    let _ = inst.release(elided.callable);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_observation_surface_does_not_perturb_the_program_trace() {
+    use crate::drive::{Directive, ObservationMode};
+    // A program exercising a `fn`, a loop, a dynamic `parameter` + `with`, and arithmetic. Run
+    // straight, it prints `2/4/6/50/done`. Stepping, breakpoints, fine mode, and the pull reads —
+    // under a collect at every safe point — must not change the output or the terminal outcome:
+    // the observation surface is outside replay identity (E§7.7).
+    let src = "parameter scale = 2\n\
+         fn doubled(n)\nreturn n * scale\nend\n\
+         let i = 1\n\
+         while i <= 3 do\nprint(doubled(i))\ni = i + 1\nend\n\
+         with scale = 10 do\nprint(doubled(5))\nend\n\
+         print(\"done\")\n";
+
+    // Baseline: a straight run with no observation.
+    let mut base = load_source_with_print(src);
+    let base_outcome = drive_observing(&mut base, Directive::RunToCompletion);
+    let base_output = base.output().to_vec();
+    assert_eq!(base_output, b"2\n4\n6\n50\ndone\n");
+
+    // Stepping through every safe point, with the pull reads, under GC stress.
+    let mut stepped = load_source_with_print(src);
+    stepped.collect_at_every_safe_point();
+    assert_eq!(drive_observing(&mut stepped, Directive::Step), base_outcome);
+    assert_eq!(
+        stepped.output(),
+        base_output,
+        "stepping perturbed the trace"
+    );
+
+    // Fine (per-subexpression) mode, stepped, under GC stress.
+    let mut fine = load_source_with_print(src);
+    fine.collect_at_every_safe_point();
+    fine.set_observation_mode(ObservationMode::Subexpression);
+    assert_eq!(drive_observing(&mut fine, Directive::Step), base_outcome);
+    assert_eq!(fine.output(), base_output, "fine mode perturbed the trace");
+
+    // Continue with breakpoints (in the loop body and the `with` body), under GC stress.
+    let mut bp = load_source_with_print(src);
+    bp.collect_at_every_safe_point();
+    bp.set_breakpoint("main", 7); // print(doubled(i)) — refires each iteration
+    bp.set_breakpoint("main", 11); // print(doubled(5)) inside the with
+    assert_eq!(drive_observing(&mut bp, Directive::Continue), base_outcome);
+    assert_eq!(bp.output(), base_output, "breakpoints perturbed the trace");
+}
+
 // --- M6.3: host-requested pause (E§8.8) ---
 
 #[test]
@@ -1054,6 +1147,81 @@ fn eval_to_string_works_at_a_raise_trap_pause() {
         run(&mut inst, Directive::Continue),
         Outcome::Raised(..)
     ));
+}
+
+#[test]
+fn eval_to_string_at_a_raise_trap_survives_a_gc_in_the_render() {
+    use crate::drive::{Directive, Outcome, PauseReason, run};
+    // Regression (M6.10 review, CRITICAL): at a raise-trap pause on an ENGINE raise, the trapped
+    // `Error` record is reachable *only* from the in-flight unwind. `eval_to_string` clears that
+    // unwind for its nested drive, so the trapped value must stay rooted (foreign_roots) or a GC
+    // during a `Stringable` render frees it and the restored raise dangles. The stress knob
+    // `collect_at_every_safe_point` forces a collection inside the render; without the fix this
+    // reads a freed slot.
+    let src = "record P with n end\n\
+         implement Stringable for P\nfn to_string(self)\nreturn \"p!\"\nend\nend\n\
+         let p = P(n: 1)\n\
+         let boom = 1 + true\n";
+    let mut inst = load_source(src);
+    inst.collect_at_every_safe_point();
+    inst.set_raise_trapping(true);
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::RaiseTrap)
+    ));
+
+    // Render a Stringable value — a nested drive that allocates and (under the stress knob) GCs.
+    let p = global_handle(&mut inst, "p");
+    match inst.eval_to_string(p, 1 << 20) {
+        super::AuxOutcome::Rendered(s) => assert_eq!(aux_string(&inst, s), "p!"),
+        other => panic!("aux render: {other:?}"),
+    }
+
+    // The trapped raise value survived intact (a `type-mismatch` Error, not a freed/reused slot).
+    let raised = inst.trapped_raise().expect("a trapped raise value");
+    let value = inst.value_of(raised).expect("a live handle");
+    assert_eq!(inst.describe_raised(value).0, "type-mismatch");
+    inst.release(raised).unwrap();
+
+    // Resuming propagates the same raise cleanly.
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Raised(..)
+    ));
+}
+
+#[test]
+fn an_aux_to_string_faulting_mid_with_restores_the_outer_parameter() {
+    use crate::drive::{Directive, EngineFault, LimitKind, Outcome, PauseReason, run};
+    // Regression (M6.10 review, MAJOR): a `to_string` that opens a `with` on a module parameter and
+    // then exhausts its own budget faults mid-`with`. The aux restore must write the parameter cell
+    // back (unwind::restore), not merely truncate dyn_stack — else the aux `with` value (9) leaks
+    // into the outer program's shared `pen` parameter.
+    let src = "parameter pen = 1\n\
+         record Q with n end\n\
+         implement Stringable for Q\nfn to_string(self)\n\
+         with pen = 9 do\nloop do\n1\nend\nend\nend\nend\n\
+         let q = Q(n: 1)\n\
+         let stop = 1\n";
+    let mut inst = load_source(src);
+    inst.set_breakpoint("main", 13); // `let stop = 1` — paused after q is bound, pen == 1
+    assert!(matches!(
+        run(&mut inst, Directive::Continue),
+        Outcome::Paused(PauseReason::Breakpoint(_))
+    ));
+
+    // Render q with a small budget: its `to_string` opens `with pen = 9` then loops → a
+    // step-budget fault mid-`with`.
+    let q = global_handle(&mut inst, "q");
+    match inst.eval_to_string(q, 50) {
+        super::AuxOutcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget)) => {}
+        other => panic!("expected a step-budget fault, got {other:?}"),
+    }
+
+    // The outer `pen` parameter is restored to its default (1), not left at the aux drive's 9.
+    let pen = global_handle(&mut inst, "pen");
+    assert_eq!(inst.as_int(pen).unwrap(), 1);
+    inst.release(pen).unwrap();
 }
 
 #[test]
