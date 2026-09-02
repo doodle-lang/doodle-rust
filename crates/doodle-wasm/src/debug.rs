@@ -132,7 +132,7 @@ impl DoodleInstance {
     }
 
     /// The module-level bindings of module `module` (E§8.2 — a stack frame's `module`) as
-    /// `{name, kind, slot}` objects: `let`/`const`/`parameter` **variables** plus the
+    /// `{name, kind, slot, declSpan}` objects: `let`/`const`/`parameter` **variables** plus the
     /// `to`/`fn`/`record`/`protocol`/`module` declarations, in declaration order. Module globals
     /// are in scope module-wide, so a host shows them once per module. The host filters by `kind`
     /// (variables are `let`/`const`/`parameter`) and reads a value with
@@ -365,6 +365,7 @@ fn global_binding_value(global: &GlobalBindingData) -> JsValue {
     set(&obj, "name", &JsValue::from_str(&global.name));
     set(&obj, "kind", &JsValue::from_str(global.kind));
     set(&obj, "slot", &JsValue::from_f64(global.slot as f64));
+    set(&obj, "declSpan", &span_value(global.decl_span));
     obj.into()
 }
 

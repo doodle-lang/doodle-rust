@@ -10,11 +10,13 @@
 use super::control;
 use super::{Handle, Instance};
 use crate::resolve::GlobalKind;
+use crate::span::Span;
 
 /// A module-level binding the debugger lists (E§8.2): its `name`, declaration `kind` (the host
 /// filters — the *variables* are `Let`/`Const`/`Parameter`; `Proc`/`Fn`/`Record`/`Protocol`/
-/// `Module` are the other declarations), and `slot` — its index, the key for
-/// [`module_global_value`](Instance::module_global_value). Value-free; read the value lazily.
+/// `Module` are the other declarations), `slot` — its index, the key for
+/// [`module_global_value`](Instance::module_global_value) — and the `decl_span` of its
+/// declaration. Value-free; read the value lazily.
 #[derive(Clone, Debug)]
 pub struct GlobalBinding {
     /// The declared name.
@@ -24,6 +26,10 @@ pub struct GlobalBinding {
     pub kind: GlobalKind,
     /// The binding's index in declaration order — the `slot` for [`module_global_value`].
     pub slot: usize,
+    /// The source span of the binding's declaration (E§8.1) — the host maps it to a line, and a
+    /// host that prepends a library into the entry module (the M3 turtle demo) uses it to tell
+    /// its own top-level globals from the prepended library's.
+    pub decl_span: Span,
 }
 
 impl Instance {
@@ -46,6 +52,7 @@ impl Instance {
                 name: global.name.to_string(),
                 kind: global.kind,
                 slot,
+                decl_span: loaded.resolved.ast.span(global.decl),
             })
             .collect()
     }

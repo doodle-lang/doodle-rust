@@ -67,6 +67,9 @@ pub struct GlobalBindingData {
     pub kind: &'static str,
     /// The binding's declaration-order index — the `slot` for [`module_global_value`].
     pub slot: usize,
+    /// The `[start, end)` span of the binding's declaration — a host distinguishes its own
+    /// top-level globals from a prepended library's by whether this precedes the prelude.
+    pub decl_span: [u32; 2],
 }
 
 /// The outcome of an auxiliary `to_string` evaluation (E§8.4/S-22) — a plain-typed mirror of
@@ -182,6 +185,7 @@ impl Session {
                 name: g.name,
                 kind: global_kind_tag(g.kind),
                 slot: g.slot,
+                decl_span: [g.decl_span.start, g.decl_span.end],
             })
             .collect()
     }
