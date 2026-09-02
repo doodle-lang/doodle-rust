@@ -23,10 +23,11 @@
 //! [`binding`]; `ConstValue` spans only immutable values, so a mutable foreign default is
 //! unrepresentable — L§8.3-equivalent by construction (S-42, D-M7-8).
 
-use super::Value;
 use super::error::Raise;
+use super::{Handle, Value};
 use crate::resolve::BodyKind;
 use crate::span::Span;
+use std::sync::Arc;
 
 /// A parked capability request (engine spec E§7.5, MD §14): a call to a **suspending
 /// capability** reached `apply`, so the machine stores the capability's identity + its
@@ -62,25 +63,61 @@ pub(crate) struct ForeignParam {
     pub is_block: bool,
 }
 
-/// The callback of a synchronous intrinsic (E§5.2): given the bound arguments and
-/// the instance's output sink, it returns the call's result (`Some` for a `fn`,
-/// `None` for a `to`'s Void) or raises. A plain `fn` pointer, not a closure — an
-/// intrinsic's behavior is engine/host code with no captured Rust state, and this
-/// keeps the callback [`Copy`] so reading it out of the registry does not borrow the
-/// machine while the call mutates the output sink. Crate-internal (it names the
-/// machine's `Raise`); hosts register engine-provided intrinsics (e.g. [`print`]),
-/// not hand-written callbacks — the general host-callback FFI is the C ABI (M7).
+/// The callback of an **engine-authored** synchronous intrinsic (E§5.2): given the bound
+/// arguments and the instance's output sink, it returns the call's result (`Some` for a
+/// `fn`, `None` for a `to`'s Void) or raises. A plain `fn` pointer, not a closure — an
+/// engine intrinsic's behavior has no captured Rust state, and this keeps the callback
+/// [`Copy`] so reading it out of the registry does not borrow the machine while the call
+/// mutates the output sink. Crate-internal (it names the machine's `Raise`); a **host**
+/// registers a general callback through [`ForeignBody::Host`] (the C ABI, the only `unsafe`
+/// crate), which speaks in handles instead so it never names an engine `Value`/`Raise`.
 pub(crate) type IntrinsicFn = fn(&mut IntrinsicCtx) -> Result<Option<Value>, Raise>;
 
+/// The result a **host** foreign callback ([`ForeignBody::Host`]) reports (E§5.2): the
+/// call's value (or Void for a `to`), or a raise — both as host [`Handle`]s, so the C ABI
+/// never names an engine `Value`/`Raise`. The engine resolves the handle against the same
+/// table [`IntrinsicCtx::arg_handle`] mints from, then (for `Raise`) arms the value at the
+/// call site exactly like a capability's `resolve(Raise)` (E§7.5).
+#[derive(Clone, Copy, Debug)]
+pub enum HostReply {
+    /// A `fn` result value (host handle), or Void for a `to` (`None`).
+    Value(Option<Handle>),
+    /// Raise the value named by this handle at the call site.
+    Raise(Handle),
+}
+
+/// A **host-registered** synchronous foreign callback (E§5.2): given the call activation
+/// ([`IntrinsicCtx`]) it reads the bound arguments (as handles), may invoke a received block
+/// reentrantly, and reports a [`HostReply`]. `Fn` (re-callable) and `Send + Sync` (an
+/// instance is `Send`; the callback is only ever run on the single driving thread). Built by
+/// the C ABI; engine intrinsics use the [`Sync`](ForeignBody::Sync) fn-pointer body instead.
+pub type HostCallback = Arc<dyn Fn(&mut IntrinsicCtx) -> HostReply + Send + Sync>;
+
 /// How a foreign function is fulfilled (engine spec E§5.1): a **synchronous** callback
-/// run inline (§5.2), or a **suspending capability** that yields to the host (§5.3).
-#[derive(Clone, Debug)]
+/// run inline (§5.2, engine-authored or host), or a **suspending capability** that yields to
+/// the host (§5.3).
+#[derive(Clone)]
 pub(crate) enum ForeignBody {
-    /// Run the callback inline and continue (E§5.2).
+    /// Run an engine-authored callback inline and continue (E§5.2).
     Sync(IntrinsicFn),
+    /// Run a host-registered callback inline and continue (E§5.2); it reports a
+    /// [`HostReply`] the engine maps to a result or a raise.
+    Host(HostCallback),
     /// Suspend: park a capability request and return `Suspended`; the host supplies the
     /// result via `resolve` (E§5.3/§7.5). The capability identity is the registry index.
     Capability,
+}
+
+// `HostCallback` is an opaque `dyn Fn`, so `ForeignBody` cannot derive `Debug` (an
+// `Intrinsic` must stay `Debug`); render each variant as its name.
+impl std::fmt::Debug for ForeignBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ForeignBody::Sync(_) => "Sync(..)",
+            ForeignBody::Host(_) => "Host(..)",
+            ForeignBody::Capability => "Capability",
+        })
+    }
 }
 
 /// A registered intrinsic foreign function (E§5.1): its name, kind (`to`/`fn`),
@@ -99,6 +136,78 @@ pub struct Intrinsic {
     pub(crate) params: Vec<ForeignParam>,
     /// The synchronous callback or suspending-capability body.
     pub(crate) body: ForeignBody,
+}
+
+/// Builds a host [`Intrinsic`] with a [`Host`](ForeignBody::Host) callback (E§5.1/§5.2) —
+/// the constructor the C ABI drives, so a host never touches [`Intrinsic`]'s private fields
+/// or the [`ForeignParam`] recipe directly. Ordinary parameters (required or with an
+/// immutable default) then at most one trailing block parameter (L§8.2/§8.3), in the order
+/// added; [`host`](Self::host) finishes with the callback.
+pub struct ForeignBuilder {
+    name: Box<str>,
+    kind: BodyKind,
+    params: Vec<ForeignParam>,
+}
+
+impl ForeignBuilder {
+    /// A builder for a foreign function named `name` of `kind` (`Proc` = `to`, `Func` = `fn`).
+    pub fn new(name: impl Into<Box<str>>, kind: BodyKind) -> Self {
+        ForeignBuilder {
+            name: name.into(),
+            kind,
+            params: Vec::new(),
+        }
+    }
+
+    /// Adds a required ordinary parameter `name` (L§8.3).
+    #[must_use]
+    pub fn param(mut self, name: impl Into<Box<str>>) -> Self {
+        self.params.push(ForeignParam {
+            name: name.into(),
+            default: None,
+            is_block: false,
+        });
+        self
+    }
+
+    /// Adds an ordinary parameter `name` with an immutable `default` (D-M7-8): the recipe is
+    /// materialized per call when the argument is omitted. `ConstValue` spans only immutable
+    /// values, so a mutable default is unrepresentable — L§8.3-equivalent by construction.
+    #[must_use]
+    pub fn default_param(
+        mut self,
+        name: impl Into<Box<str>>,
+        default: super::native::ConstValue,
+    ) -> Self {
+        self.params.push(ForeignParam {
+            name: name.into(),
+            default: Some(default),
+            is_block: false,
+        });
+        self
+    }
+
+    /// Adds the trailing block parameter `name` (L§8.2): a `do … end` the callback invokes
+    /// reentrantly ([`IntrinsicCtx::invoke_block_handles`]).
+    #[must_use]
+    pub fn block_param(mut self, name: impl Into<Box<str>>) -> Self {
+        self.params.push(ForeignParam {
+            name: name.into(),
+            default: None,
+            is_block: true,
+        });
+        self
+    }
+
+    /// Finishes the builder into an [`Intrinsic`] with `callback` as its host body.
+    pub fn host(self, callback: HostCallback) -> Intrinsic {
+        Intrinsic {
+            name: self.name,
+            kind: self.kind,
+            params: self.params,
+            body: ForeignBody::Host(callback),
+        }
+    }
 }
 
 /// Why registering an intrinsic or native module failed (a host-API error, E§5.5/§5.1
@@ -208,8 +317,8 @@ impl Registry {
 /// split out for length.
 mod ctx;
 pub(crate) use ctx::BlockResult;
-pub use ctx::IntrinsicCtx;
 pub(crate) use ctx::apply;
+pub use ctx::{BlockOutcome, IntrinsicCtx};
 
 /// Argument binding for an intrinsic call (`param_infos`, `bind_foreign_arguments`), split
 /// out for length.

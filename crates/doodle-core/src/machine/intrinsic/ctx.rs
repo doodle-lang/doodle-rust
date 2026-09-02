@@ -5,14 +5,14 @@
 //! for length.
 
 use super::binding;
-use super::{ForeignBody, PendingRequest};
+use super::{ForeignBody, HostReply, PendingRequest};
 use crate::ast::NodeId;
 use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
 use crate::machine::error::Raise;
 use crate::machine::frame::BlockDescriptor;
 use crate::machine::modload::Suspension;
-use crate::machine::{Halt, LoadedModule, Machine, Value, block, step, unwind};
+use crate::machine::{Halt, Handle, LoadedModule, Machine, Value, block, observe, step, unwind};
 use crate::resolve::{BodyKind, ResolvedModule};
 use crate::span::{ModuleId, Span};
 use std::sync::Arc;
@@ -52,6 +52,23 @@ pub(crate) enum BlockResult {
     Halted,
 }
 
+/// The public outcome of a **host**-invoked reentrant block
+/// ([`IntrinsicCtx::invoke_block_handles`]), mirrored across the C ABI as
+/// `DoodleBlockOutcome`. `NonLocalExit` and `Halted` both mean the host callback must return
+/// promptly with no result (E§7.6): a `break`/`return`/raise crossed the boundary, or a
+/// fault parked. The engine's apply-site backstop (S-46/S-15) enforces this — a host that
+/// drives on regardless faults, never UB.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockOutcome {
+    /// The block completed (fell off its end, or `continue`d).
+    Completed,
+    /// A `break`/`return`/raise exited the block across the host boundary; the unwind is
+    /// parked for the apply site to resume.
+    NonLocalExit,
+    /// A fault parked (a limit, the S-15 `NestedSuspend`, or a stale block-argument handle).
+    Halted,
+}
+
 impl IntrinsicCtx<'_> {
     /// The bound argument values, in parameter order.
     pub(crate) fn args(&self) -> &[Value] {
@@ -83,9 +100,55 @@ impl IntrinsicCtx<'_> {
         self.call_span
     }
 
-    /// Appends `bytes` to the instance's captured output (`print`'s sink).
-    pub(crate) fn emit(&mut self, bytes: &[u8]) {
+    /// Appends `bytes` to the instance's captured output (`print`'s sink). Part of the
+    /// curated host-call surface (E§5.2) the C ABI drives, alongside the engine `print`.
+    pub fn emit(&mut self, bytes: &[u8]) {
         self.machine.output.extend_from_slice(bytes);
+    }
+
+    /// The number of bound (non-block) arguments (E§5.2) — the host reads each with
+    /// [`arg_handle`](Self::arg_handle).
+    pub fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+
+    /// Interns the `i`-th bound argument as a fresh **host-owned** handle (a GC root until
+    /// released), or `None` if `i` is out of range. The host reads it with the ordinary
+    /// boundary readers and releases it — like a `make_*` result (E§4.2/§4.3).
+    pub fn arg_handle(&mut self, i: usize) -> Option<Handle> {
+        let value = *self.args.get(i)?;
+        Some(self.machine.handles.intern(value))
+    }
+
+    /// Invokes this call's received block **reentrantly** (E§5.4/§7.6) with the values named
+    /// by `args` — [`invoke_block`](Self::invoke_block) with a Handle-in / [`BlockOutcome`]-out
+    /// surface, so no engine `Value`/`Raise` crosses the C ABI. A stale handle in `args` is a
+    /// host-contract violation → an `Internal` fault surfaced as `Halted`. A block-argument
+    /// binding error (e.g. wrong block arity) arms its raise at the boundary and reports
+    /// `NonLocalExit`, so it propagates like any block-body raise.
+    pub fn invoke_block_handles(&mut self, args: &[Handle]) -> BlockOutcome {
+        let mut values = Vec::with_capacity(args.len());
+        for &handle in args {
+            match self.machine.handles.resolve(handle) {
+                Ok(value) => values.push(value),
+                Err(_) => {
+                    self.machine.pending_fault = Some(EngineFault::Internal);
+                    return BlockOutcome::Halted;
+                }
+            }
+        }
+        match self.invoke_block(values) {
+            Ok(BlockResult::Completed) => BlockOutcome::Completed,
+            Ok(BlockResult::NonLocalExit) => BlockOutcome::NonLocalExit,
+            Ok(BlockResult::Halted) => BlockOutcome::Halted,
+            // A block-binding raise (a body raise instead comes back parked as
+            // `NonLocalExit`): materialize + arm it at the boundary so the apply site
+            // propagates it, then report the non-local exit the host must return on.
+            Err(raise) => {
+                step::arm_raise(self.resolved, self.machine, self.heap, raise);
+                BlockOutcome::NonLocalExit
+            }
+        }
     }
 
     /// **Test-only:** requests cancellation of the instance (E§10.1) from inside this
@@ -287,6 +350,80 @@ pub(crate) fn apply(
             // A `to` yields Void (register cleared); a `fn`'s value goes to the register.
             machine.reg = if kind == BodyKind::Proc { None } else { result };
             Ok(())
+        }
+        ForeignBody::Host(callback) => {
+            // As `Sync`, but a host callback reports a `HostReply` (handles) the engine maps
+            // to a result or a raise. Same boundary depth, argument-root pinning, and
+            // S-46/S-15 backstops.
+            let boundary = machine.frames.len();
+            let root_base = machine.push_foreign_roots(&args);
+            let reply = {
+                let mut ctx = IntrinsicCtx {
+                    resolved,
+                    modules,
+                    heap,
+                    machine,
+                    args,
+                    block,
+                    call_span: span,
+                };
+                callback(&mut ctx)
+            };
+            machine.pop_foreign_roots(root_base);
+            // A reentrant nested drive parked a fault (`invoke_block_handles`): `step`
+            // surfaces it — stop, superseding the callback's reply.
+            if machine.pending_fault.is_some() {
+                return Ok(());
+            }
+            // A `break`/`return`/raise in a block this callback drove crossed the native
+            // boundary (S-46): the compliant reply is `Value(None)` (return promptly, no
+            // result); a value or a raise instead is a host-contract violation (E§7.6) →
+            // fault. Otherwise resume the parked exit at this apply site.
+            if machine.unwind.is_some() {
+                if !matches!(reply, HostReply::Value(None)) {
+                    machine.unwind = None;
+                    machine.pending_fault = Some(EngineFault::Internal);
+                    return Ok(());
+                }
+                unwind::resume_native_boundary(machine, boundary, kind)?;
+                return Ok(());
+            }
+            // No parked transfer: map the reply. A `to` yields Void; a `fn`'s value goes to
+            // the register; a `Raise` arms the host's value at the call site (E§7.5), like a
+            // capability's `resolve(Raise)`. A stale result/raise handle is a host-contract
+            // violation → `Internal` fault.
+            match reply {
+                HostReply::Value(handle) => {
+                    let value = match handle {
+                        None => None,
+                        Some(h) => match machine.handles.resolve(h) {
+                            Ok(v) => Some(v),
+                            Err(_) => {
+                                machine.pending_fault = Some(EngineFault::Internal);
+                                return Ok(());
+                            }
+                        },
+                    };
+                    debug_assert!(
+                        kind != BodyKind::Func || value.is_some(),
+                        "a `fn` host callback must reply with a value"
+                    );
+                    machine.reg = if kind == BodyKind::Proc { None } else { value };
+                    Ok(())
+                }
+                HostReply::Raise(h) => {
+                    let value = match machine.handles.resolve(h) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            machine.pending_fault = Some(EngineFault::Internal);
+                            return Ok(());
+                        }
+                    };
+                    let trace = observe::capture_trace(resolved, heap, machine, Some(span));
+                    machine.arm_raise_value(value, trace);
+                    Ok(())
+                }
+            }
         }
         // Suspend (E§5.3/§7.5, MD §14): park the request; the drive loop returns
         // `Suspended`. No state is torn down — the caller's continuation waits, and

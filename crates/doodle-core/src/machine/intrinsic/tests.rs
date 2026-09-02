@@ -6,6 +6,7 @@ use super::*;
 use crate::drive::{Directive, Outcome, run};
 use crate::machine::Instance;
 use crate::span::ModuleId;
+use std::sync::Arc;
 
 /// An `fn` intrinsic returning `42`, for testing value-yielding foreign calls.
 fn answer() -> Intrinsic {
@@ -443,6 +444,37 @@ fn a_materialized_foreign_default_survives_a_gc_during_the_call() {
     let outcome = run(&mut inst, Directive::RunToCompletion);
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"world\n");
+}
+
+/// A **host**-registered foreign `to` (the C-ABI shape, built with [`ForeignBuilder`] and a
+/// [`Host`](ForeignBody::Host) callback): a materialized default (S-42) + a trailing block,
+/// binding per L§8.3. The callback reads its one bound argument as a handle and invokes the
+/// block reentrantly with it — exactly the path the C trampoline drives, minus the C fn.
+fn greet_host() -> Intrinsic {
+    ForeignBuilder::new("greet", BodyKind::Proc)
+        .default_param("who", crate::machine::ConstValue::Str("world".into()))
+        .block_param("body")
+        .host(Arc::new(|ctx: &mut IntrinsicCtx| {
+            let who = ctx.arg_handle(0).expect("one bound argument");
+            let outcome = ctx.invoke_block_handles(&[who]);
+            debug_assert_eq!(outcome, BlockOutcome::Completed);
+            HostReply::Value(None)
+        }))
+}
+
+#[test]
+fn a_host_callback_default_and_block_bind_per_l8_3() {
+    // The M7 accept shape through the engine's host-callback body (`ForeignBody::Host`): an
+    // omitted argument binds the descriptor's default, and the trailing block is invoked
+    // reentrantly with the bound value read back as a handle. First call defaults to "world";
+    // second passes "moon" — the same behavior as the `Sync` `greet_with_default`, now via
+    // the handle-based host surface the C ABI uses.
+    let (inst, outcome) = run_with(
+        "greet() do (who)\nprint(who)\nend\ngreet(\"moon\") do (who)\nprint(who)\nend\n",
+        registry_with(vec![print(), greet_host()]),
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"world\nmoon\n");
 }
 
 #[test]

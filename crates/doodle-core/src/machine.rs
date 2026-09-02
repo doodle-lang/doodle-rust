@@ -71,11 +71,11 @@ pub use error::{Exception, ExceptionKind, Trace, TraceFrame};
 pub use globals::GlobalBinding;
 pub use handle::{Handle, HandleError};
 pub use intrinsic::{
-    HostError, Intrinsic, IntrinsicCtx, Registry, clear_canvas as clear_canvas_intrinsic,
-    cos as cos_intrinsic, decode as decode_intrinsic, draw_line as draw_line_intrinsic,
-    each as each_intrinsic, encode as encode_intrinsic, length as length_intrinsic,
-    print as print_intrinsic, read_line as read_line_intrinsic, set_turtle as set_turtle_intrinsic,
-    sin as sin_intrinsic,
+    BlockOutcome, ForeignBuilder, HostCallback, HostError, HostReply, Intrinsic, IntrinsicCtx,
+    Registry, clear_canvas as clear_canvas_intrinsic, cos as cos_intrinsic,
+    decode as decode_intrinsic, draw_line as draw_line_intrinsic, each as each_intrinsic,
+    encode as encode_intrinsic, length as length_intrinsic, print as print_intrinsic,
+    read_line as read_line_intrinsic, set_turtle as set_turtle_intrinsic, sin as sin_intrinsic,
 };
 pub use native::{ConstValue, NativeMember, NativeModule};
 pub use observe::{Binding, ElidedFrameObservation, FrameObservation, Position};
