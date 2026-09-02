@@ -885,6 +885,48 @@ fn accounting_is_mode_independent_so_a_budget_faults_at_the_same_instant() {
 }
 
 #[test]
+fn a_result_growing_op_over_the_per_op_cap_faults_before_computing() {
+    use crate::drive::{Directive, EngineFault, LimitKind, Limits, Outcome, run};
+    // The per-op latency cap (E§10.2, the R8/S-40 fix): a bignum `**`/`*` or a string repetition
+    // whose result fits the heap but exceeds the single-operation cap faults `OpResult` **before**
+    // the expensive computation, so a pathological op cannot freeze the host. The default heap
+    // (1 GiB) is untouched, so this is the *latency* rail firing, not *out of memory*.
+    let limits = Limits {
+        max_op_result_bytes: 1 << 20, // 1 MiB
+        ..Limits::default()
+    };
+    for src in [
+        "let x = 500000 ** 500000\n", // a ~1.2 MiB integer
+        "let s = \"ab\" * 2000000\n", // a ~4 MiB string
+    ] {
+        let mut inst = load_source_with_print_and_limits(src, limits);
+        match run(&mut inst, Directive::RunToCompletion) {
+            Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::OpResult)) => {}
+            other => panic!("{src:?}: expected OpResult fault, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_result_within_the_per_op_cap_still_computes() {
+    use crate::drive::{Directive, Limits, Outcome, run};
+    // A modest result under the cap computes normally — the latency rail rejects nothing legit.
+    let limits = Limits {
+        max_op_result_bytes: 1 << 20,
+        ..Limits::default()
+    };
+    let mut inst = load_source_with_print_and_limits("print(2 ** 100)\n", limits);
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Outcome::Completed(_)
+    ));
+    assert!(
+        inst.output()
+            .starts_with(b"1267650600228229401496703205376")
+    );
+}
+
+#[test]
 fn a_fine_mode_step_trace_is_deterministic_across_runs() {
     // The fine safe-point set is part of replay identity (S-62): the same program stops at
     // the same subexpression completions every run.
@@ -2050,6 +2092,7 @@ fn a_bignum_power_charges_the_step_budget_by_its_size() {
             step_budget: 1_000_000,
             heap_bytes: 1 << 34,
             stack_depth: 100_000,
+            max_op_result_bytes: u64::MAX,
         },
     );
     assert!(matches!(
@@ -2269,6 +2312,7 @@ fn gc_stress_determinism_gate_over_limit_faults() {
         step_budget: 5_000,
         heap_bytes: 64 * 1024,
         stack_depth: 200,
+        max_op_result_bytes: u64::MAX,
     };
     for src in [
         "loop do\nb\"xxxx\"\nend\n",      // heap or step budget, whichever first
@@ -2345,6 +2389,7 @@ fn gc_stress_determinism_gate_over_r8_magnitude_faults() {
                 heap_bytes: 4096,
                 step_budget: 1 << 40,
                 stack_depth: 200,
+                max_op_result_bytes: u64::MAX,
             },
             LimitKind::Heap,
         ),
@@ -2354,6 +2399,7 @@ fn gc_stress_determinism_gate_over_r8_magnitude_faults() {
                 heap_bytes: 1 << 34,
                 step_budget: 1_000_000,
                 stack_depth: 200,
+                max_op_result_bytes: u64::MAX,
             },
             LimitKind::StepBudget,
         ),

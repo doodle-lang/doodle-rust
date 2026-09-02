@@ -154,7 +154,7 @@ completed                       (the driven unit finished)
 paused <reason> @ <line>:<col>  (reason: step | breakpoint | host-pause | raise-trap | slice-end)
 raised <substring> @ <line>:<col>
 suspended <id> @ <line>:<col>   (id: capability name or dotted import path)
-faulted <kind>                  (step-budget | heap | stack-depth | tail-history | cancelled | …)
+faulted <kind>                  (step-budget | heap | op-result | stack-depth | tail-history | cancelled | …)
 ```
 
 A stack `<elem>` is `<line>`, `<name>@<line>`, or `<name>@<line>×<n>` (the

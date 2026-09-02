@@ -14,7 +14,6 @@
 use super::error::{ExceptionKind, Raise};
 use super::{Machine, Value};
 use crate::ast::BinaryOp;
-use crate::drive::{EngineFault, LimitKind};
 use crate::heap::Heap;
 use crate::span::Span;
 use num_bigint::BigInt;
@@ -124,16 +123,19 @@ fn repeat(
             heap.alloc_string(String::new().into_boxed_str()),
         )));
     }
-    // A result that would exceed the heap limit faults rather than attempting an
-    // allocation that could overflow `usize` or exhaust memory (the R8 magnitude cap
-    // proper — an interior poll-point — is later; this is the single-allocation bound).
-    let within_limit = count
-        .to_usize()
-        .is_some_and(|c| (len as u128) * (c as u128) <= machine.limits.heap_bytes as u128);
-    let Some(count_usize) = count.to_usize().filter(|_| within_limit) else {
-        machine.set_pending_fault(EngineFault::LimitExceeded(LimitKind::Heap));
+    // Bound the result before building it — the same three rails as a bignum op (heap / per-op
+    // latency cap / step budget) — so a huge repetition faults before an allocation that could
+    // overflow `usize`, exhaust memory, or freeze the host. `admit_op_result` parks the right
+    // fault reason; a count beyond `u128` saturates to a certain over-limit estimate.
+    let result_bytes = count
+        .to_u128()
+        .map_or(u128::MAX, |c| (len as u128).saturating_mul(c));
+    if !machine.admit_op_result(result_bytes) {
         return Ok(Some(Value::Nil)); // placeholder; `step` surfaces the parked fault first
-    };
+    }
+    let count_usize = count
+        .to_usize()
+        .expect("admit_op_result passes ⇒ the result fits, so the count fits usize");
     let repeated = heap.string(s_idx).utf8.repeat(count_usize);
     // Each copy is NFC, but the internal seams may need renormalization; an ASCII string
     // (the common case) is already NFC, so this reallocates only when it must.

@@ -108,7 +108,7 @@ fn add_sub_mul(
                 // is at most `x.bits() + y.bits()` bits.
                 BinaryOp::Mul => {
                     let est_bytes = (u128::from(x.bits()) + u128::from(y.bits())) / 8 + 1;
-                    if !machine.admit_bignum(est_bytes) {
+                    if !machine.admit_op_result(est_bytes) {
                         return Ok(Value::Nil); // placeholder; the parked fault surfaces first
                     }
                     x * y
@@ -212,14 +212,14 @@ fn power(
             }
             // Otherwise the result grows with the exponent. Bound its size before computing
             // (R8): an exponent past the engine's computable range (u32), or a result over a
-            // limit, is a magnitude *fault* (via `admit_bignum`), not a raise — the same
+            // limit, is a magnitude *fault* (via `admit_op_result`), not a raise — the same
             // "too big" story as `"a" * 10**9` (a limit is a fault, uncatchable, E§10.2).
-            if !machine.admit_bignum(pow_result_bytes(base.bits(), &exp)) {
+            if !machine.admit_op_result(pow_result_bytes(base.bits(), &exp)) {
                 return Ok(Value::Nil); // placeholder; the parked fault surfaces first
             }
             let e = exp
                 .to_u32()
-                .expect("admit_bignum passes only when the exponent fits u32");
+                .expect("admit_op_result passes only when the exponent fits u32");
             Ok(int_value(Pow::pow(base, e), heap))
         }
         (a, b) => {

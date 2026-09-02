@@ -290,6 +290,7 @@ fn fault_kind(fault: EngineFault) -> String {
             LimitKind::Heap => "heap",
             LimitKind::StackDepth => "stack-depth",
             LimitKind::TailHistory => "tail-history",
+            LimitKind::OpResult => "op-result",
         }
         .to_string(),
         EngineFault::Cancelled => "cancelled".to_string(),

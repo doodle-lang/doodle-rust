@@ -41,16 +41,18 @@ pub use debug::{AuxOutcomeData, CallableInfo, FrameData, GlobalBindingData, Stal
 /// facade's `turtle` constructor.
 const TURTLE_LIBRARY: &str = include_str!("../../../doodle/turtle.doodle");
 
-/// Resource limits for the public browser demo (E§10.2). The **64 MiB** heap is vast
-/// headroom for kid turtle programs (KB–MB), yet a pathological magnitude — `9 ** 9 ** 9`
-/// is a ~154 MB integer, or a huge `*` — faults `LimitExceeded(Heap)` promptly instead of
-/// freezing the tab (R8). The step budget stays large: a long animation is paced by the
-/// stop button and slice fuel, never cut off, so the R8 step-budget charge is a backstop
-/// here, not the demo's guard.
+/// Resource limits for the public browser demo (E§10.2), one per rail: **space** (a 64 MiB heap,
+/// vast headroom for kid turtle programs, KB–MB), **total work** (a large step budget, so a long
+/// animation is paced by the stop button and slice fuel, never cut off), and **single-op latency**
+/// (a 1 MiB per-operation result cap). The latency cap is the demo's guard against a pathological
+/// `**`/`*`/repetition: a bignum whose result fits the heap but would take seconds to compute (an
+/// atomic op cannot be interrupted, S-40) faults `LimitExceeded(OpResult)` **before** computing,
+/// bounding the worst single-op stall to a fraction of a second rather than freezing the tab.
 const DEMO_LIMITS: Limits = Limits {
     step_budget: 1 << 40,
     heap_bytes: 64 << 20,
     stack_depth: 100_000,
+    max_op_result_bytes: 1 << 20,
 };
 
 /// A loaded engine session: a `doodle-core` [`Instance`] plus the exact source it was
@@ -395,6 +397,7 @@ fn fault_tag(fault: EngineFault) -> &'static str {
         EngineFault::LimitExceeded(LimitKind::Heap) => "limit:heap",
         EngineFault::LimitExceeded(LimitKind::StackDepth) => "limit:stack-depth",
         EngineFault::LimitExceeded(LimitKind::TailHistory) => "limit:tail-history",
+        EngineFault::LimitExceeded(LimitKind::OpResult) => "limit:op-result",
         EngineFault::Cancelled => "cancelled",
         EngineFault::NestedSuspend => "nested-suspend",
         EngineFault::Internal => "internal",

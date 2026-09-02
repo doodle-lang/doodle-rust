@@ -158,19 +158,27 @@ impl Machine {
         Ok(())
     }
 
-    /// R8 magnitude guard for a bignum-producing operation (`*`/`**`, MD §9): given the
-    /// result's estimated size in bytes, park a `LimitExceeded` fault **before** the
-    /// operation runs if it would exceed the **heap** limit, or the remaining **step
-    /// budget** once charged the size (bignum work is not free — a huge result cannot slip
-    /// under a flat per-statement cost). Returns `false` if a fault was parked — the caller
-    /// aborts with a placeholder value, and `step` surfaces the parked fault before the next
-    /// transition, so the placeholder is never observed. `true` means proceed.
+    /// Magnitude guard for a **result-growing operation** (`*`/`**`, string/list repetition, MD
+    /// §9): given the result's estimated size in bytes, park a `LimitExceeded` fault **before**
+    /// the operation runs if it would exceed one of the three rails — the **heap** (space), the
+    /// **per-operation** result cap (latency, R8/S-40), or the remaining **step budget** (total
+    /// work; a huge result cannot slip under a flat per-statement cost). Returns `false` if a fault
+    /// was parked — the caller aborts with a placeholder value, and `step` surfaces the parked
+    /// fault before the next transition, so the placeholder is never observed. `true` = proceed.
     ///
-    /// The estimate is a deterministic upper bound (E§11): the fault fires at the same
-    /// operation for the same program and limits, and no oversized allocation is ever begun.
-    pub(crate) fn admit_bignum(&mut self, result_bytes: u128) -> bool {
+    /// The order picks the most fundamental reason: a result past the heap is *out of memory*
+    /// (`Heap`); one that fits the heap but exceeds the per-op cap is *too big to compute in one
+    /// step* (`OpResult`, the latency rail — the fix for a single op that would otherwise freeze
+    /// the host, since an atomic op cannot yield mid-way, S-40). The estimate is a deterministic
+    /// upper bound (E§11): the fault fires at the same operation for the same program and limits,
+    /// and no oversized allocation is ever begun.
+    pub(crate) fn admit_op_result(&mut self, result_bytes: u128) -> bool {
         if result_bytes > u128::from(self.limits.heap_bytes) {
             self.set_pending_fault(EngineFault::LimitExceeded(LimitKind::Heap));
+            return false;
+        }
+        if result_bytes > u128::from(self.limits.max_op_result_bytes) {
+            self.set_pending_fault(EngineFault::LimitExceeded(LimitKind::OpResult));
             return false;
         }
         // Past the heap check `result_bytes <= heap_bytes <= u64::MAX`, so the cast is exact.

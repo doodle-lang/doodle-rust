@@ -15,6 +15,12 @@ pub enum LimitKind {
     StackDepth,
     /// The tail-history bound (E§8.3).
     TailHistory,
+    /// A **single operation's result** would exceed the per-operation result-size cap
+    /// ([`Limits::max_op_result_bytes`]) — the *latency rail*, distinct from running out of heap:
+    /// the result fits in memory but is too big to compute in one atomic step (a huge `**`/`*` or
+    /// a huge string repetition). An atomic operation cannot yield mid-way (S-40), so this
+    /// pre-admission cap is what bounds the longest single operation's latency.
+    OpResult,
 }
 
 /// Resource limits for an instance (engine spec E§10.2), enforced by the machine
@@ -44,6 +50,15 @@ pub struct Limits {
     pub heap_bytes: u64,
     /// Maximum non-tail frame-stack depth before `LimitExceeded(StackDepth)`.
     pub stack_depth: u32,
+    /// Maximum bytes a **single result-growing operation** may produce before
+    /// `LimitExceeded(OpResult)` — the **latency rail** (E§10.2): heap bounds *space*, the step
+    /// budget bounds *total work*, and this bounds *one operation's latency*. A bignum `*`/`**` or
+    /// a string repetition estimates its result size up front and faults **before** computing when
+    /// it would exceed this, so a result that fits the heap but would take seconds to compute (an
+    /// atomic op cannot be interrupted, S-40) does not freeze the host. Default [`u64::MAX`] leaves
+    /// it bounded only by `heap_bytes` (no change for hosts that do not set it); an untrusted host
+    /// (a browser demo) sets it small.
+    pub max_op_result_bytes: u64,
 }
 
 impl Default for Limits {
@@ -55,6 +70,9 @@ impl Default for Limits {
             step_budget: 1 << 40,
             heap_bytes: 1 << 30,
             stack_depth: 100_000,
+            // The latency rail is off by default (bounded only by the heap); an untrusted host
+            // sets a small value to keep a single op's compute time bounded.
+            max_op_result_bytes: u64::MAX,
         }
     }
 }
