@@ -8,6 +8,437 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/* The C ABI contract version (distinct from the engine version). See doodle_abi_version(). */
+#define DOODLE_ABI_VERSION_MAJOR 0
+#define DOODLE_ABI_VERSION_MINOR 1
+
+
+/**
+ * The observation-mode granularity (E§8.8): per-statement (default) or per-subexpression.
+ */
+enum DoodleObservationMode
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * Per-statement safe points only (the default).
+   */
+  DoodleObservationMode_Statement = 0,
+  /**
+   * Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
+   */
+  DoodleObservationMode_Subexpression = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleObservationMode DoodleObservationMode;
+#else
+typedef uint32_t DoodleObservationMode;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * The result of a fallible C-ABI call: `Ok` on success, else the reason. Fallible calls
+ * return this and write their result through an out-parameter (freeze convention 5).
+ */
+enum DoodleStatus
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The call succeeded; any out-parameters are written.
+   */
+  DoodleStatus_Ok = 0,
+  /**
+   * A handle named a freed/reused slot — a use-after-release, forged, or (M7.6) a
+   * cross-instance handle (mirrors `ValueError::Stale`).
+   */
+  DoodleStatus_ErrStaleHandle = 1,
+  /**
+   * A typed reader was applied to a value of a different kind (e.g. read an int from a
+   * string). The value's actual kind is available via `doodle_kind_of`.
+   */
+  DoodleStatus_ErrWrongKind = 2,
+  /**
+   * `doodle_as_int` on an integer whose magnitude exceeds `int64_t` (a bignum — read it
+   * with `doodle_as_int_decimal`).
+   */
+  DoodleStatus_ErrIntOutOfRange = 3,
+  /**
+   * A list/string index was past the end.
+   */
+  DoodleStatus_ErrIndexOutOfBounds = 4,
+  /**
+   * `doodle_make_string` was given bytes that are not well-formed UTF-8.
+   */
+  DoodleStatus_ErrInvalidUtf8 = 5,
+  /**
+   * `doodle_make_int_decimal` was given text that is not a base-10 integer literal.
+   */
+  DoodleStatus_ErrMalformedInt = 6,
+  /**
+   * The config named a Unicode version the engine does not support (S-41).
+   */
+  DoodleStatus_ErrUnsupportedUnicode = 7,
+  /**
+   * The program failed to load: a lex/parse/resolve error (its text is copied into
+   * `doodle_load`'s `err_buf`).
+   */
+  DoodleStatus_ErrLoad = 8,
+  /**
+   * A caller buffer was too small; the required length is written to the `needed`
+   * out-parameter and the buffer is left untouched (copy-out, freeze convention 4).
+   */
+  DoodleStatus_ErrBufferTooSmall = 9,
+  /**
+   * A required pointer argument was NULL.
+   */
+  DoodleStatus_ErrNullPointer = 10,
+  /**
+   * A host-contract violation the engine caught (e.g. resolving a non-suspended instance).
+   */
+  DoodleStatus_ErrContract = 11,
+  /**
+   * A Rust panic was caught at the boundary (an engine bug; the firewall of last resort,
+   * [`crate::guard`]). The instance should be considered unusable.
+   */
+  DoodleStatus_ErrPanic = 12,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleStatus DoodleStatus;
+#else
+typedef uint32_t DoodleStatus;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A driving directive (E§7.3): how far to run before returning to the host.
+ */
+enum DoodleDirective
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * Run to the next capability / raise / fault / completion (a fast run).
+   */
+  DoodleDirective_RunToCompletion = 0,
+  /**
+   * Like `RunToCompletion` but also stop at breakpoints and the raise-trap.
+   */
+  DoodleDirective_Continue = 1,
+  /**
+   * Stop at the next safe point, in any frame (synonym of `StepInto`).
+   */
+  DoodleDirective_Step = 2,
+  /**
+   * Step, descending into calls.
+   */
+  DoodleDirective_StepInto = 3,
+  /**
+   * Step, treating a call as one step.
+   */
+  DoodleDirective_StepOver = 4,
+  /**
+   * Run until the current frame returns.
+   */
+  DoodleDirective_StepOut = 5,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleDirective DoodleDirective;
+#else
+typedef uint32_t DoodleDirective;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Which kind of stop a drive reached (E§7.2) — the tag of [`DoodleOutcome`].
+ */
+enum DoodleOutcomeKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The driven unit finished (`DoodleOutcome::value` is its result, `0` for Void).
+   */
+  DoodleOutcomeKind_Completed = 0,
+  /**
+   * A capability must be fulfilled before continuing (`capability`/`request_count`;
+   * the arg marshalling is M7.2).
+   */
+  DoodleOutcomeKind_Suspended = 1,
+  /**
+   * An `import` reached an unloaded module (`request_count` path segments; the resolver
+   * is M7.2).
+   */
+  DoodleOutcomeKind_SuspendedImport = 2,
+  /**
+   * Stopped at a safe point (`pause_reason`; `breakpoint_id` when a breakpoint).
+   */
+  DoodleOutcomeKind_Paused = 3,
+  /**
+   * An uncaught exception reached the boundary (E§9); `span_*` is its site. Read its
+   * described form with `doodle_raised_kind` / `doodle_raised_message`.
+   */
+  DoodleOutcomeKind_Raised = 4,
+  /**
+   * A non-resumable engine fault (`fault`).
+   */
+  DoodleOutcomeKind_Faulted = 5,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleOutcomeKind DoodleOutcomeKind;
+#else
+typedef uint32_t DoodleOutcomeKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Why a drive paused (E§7.2).
+ */
+enum DoodlePauseReason
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The active `Step*` directive reached its next safe point.
+   */
+  DoodlePauseReason_Step = 0,
+  /**
+   * A breakpoint was hit (`DoodleOutcome::breakpoint_id`).
+   */
+  DoodlePauseReason_Breakpoint = 1,
+  /**
+   * A raise was trapped before propagating (E§8.7).
+   */
+  DoodlePauseReason_RaiseTrap = 2,
+  /**
+   * The host requested a pause (E§8.8).
+   */
+  DoodlePauseReason_HostPause = 3,
+  /**
+   * The drive's bounded-run fuel was spent (S-40) — a resumable slice boundary; re-drive.
+   */
+  DoodlePauseReason_SliceEnd = 4,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodlePauseReason DoodlePauseReason;
+#else
+typedef uint32_t DoodlePauseReason;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A non-resumable engine fault (E§7.2/§10). The core's `LimitExceeded(LimitKind)` is
+ * flattened into distinct `Limit*` codes (as the wasm surface flattens to string tags).
+ */
+enum DoodleFault
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The step budget was exhausted (E§10.2).
+   */
+  DoodleFault_LimitStepBudget = 0,
+  /**
+   * The heap-byte ceiling was exceeded (E§10.2).
+   */
+  DoodleFault_LimitHeap = 1,
+  /**
+   * The non-tail stack-depth limit was exceeded (E§10.2).
+   */
+  DoodleFault_LimitStackDepth = 2,
+  /**
+   * The tail-history bound was exceeded (E§8.3).
+   */
+  DoodleFault_LimitTailHistory = 3,
+  /**
+   * A single op's result would exceed the per-op result cap (the latency rail, E§10.2).
+   */
+  DoodleFault_LimitOpResult = 4,
+  /**
+   * The host cancelled the drive (E§10.1).
+   */
+  DoodleFault_Cancelled = 5,
+  /**
+   * A suspending capability was reached inside a foreign/native callback (E§5.4, S-15).
+   */
+  DoodleFault_NestedSuspend = 6,
+  /**
+   * An internal invariant was violated (an engine bug).
+   */
+  DoodleFault_Internal = 7,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleFault DoodleFault;
+#else
+typedef uint32_t DoodleFault;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A value's kind (E§4.4), the C mirror of `doodle_core`'s `Kind`.
+ */
+enum DoodleKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * `nil` (L§4.9).
+   */
+  DoodleKind_Nil = 0,
+  /**
+   * A boolean (L§4.1).
+   */
+  DoodleKind_Bool = 1,
+  /**
+   * An integer of any magnitude (L§4.2).
+   */
+  DoodleKind_Int = 2,
+  /**
+   * A float (L§4.3).
+   */
+  DoodleKind_Float = 3,
+  /**
+   * A string (L§4.4).
+   */
+  DoodleKind_String = 4,
+  /**
+   * A byte string (L§4.5).
+   */
+  DoodleKind_Bytes = 5,
+  /**
+   * A list (L§4.6).
+   */
+  DoodleKind_List = 6,
+  /**
+   * A dict (L§4.7).
+   */
+  DoodleKind_Dict = 7,
+  /**
+   * A record (L§4.14).
+   */
+  DoodleKind_Record = 8,
+  /**
+   * A callable (L§6).
+   */
+  DoodleKind_Callable = 9,
+  /**
+   * A module value (L§9).
+   */
+  DoodleKind_Module = 10,
+  /**
+   * A type value (L§4.12).
+   */
+  DoodleKind_Type = 11,
+  /**
+   * A foreign (host) value (E§4.5).
+   */
+  DoodleKind_Foreign = 12,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleKind DoodleKind;
+#else
+typedef uint32_t DoodleKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * An opaque instance configuration under construction. Built with `doodle_config_new`,
+ * mutated with the `doodle_config_set_*` setters, consumed by `doodle_load`, and released
+ * with `doodle_config_free`.
+ */
+typedef struct DoodleConfig DoodleConfig;
+
+/**
+ * A loaded Doodle program: the engine [`Instance`] plus the described form of its most
+ * recent uncaught raise (so `doodle_raised_kind`/`_message` can copy it out). Opaque to C.
+ */
+typedef struct DoodleInstance DoodleInstance;
+
+/**
+ * An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
+ * Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
+ * [`doodle_release`](crate::value::doodle_release) handles it no longer needs. `0` is the
+ * reserved null handle (no value), never a live handle.
+ */
+typedef uint64_t DoodleHandle;
+
+/**
+ * The result of a drive (E§7.2), written by `doodle_drive`/`doodle_resolve`. A flat
+ * `#[repr(C)]` struct (not a union — a union in a frozen header cannot grow safely): each
+ * field is meaningful only for the `kind`s named in its doc, others are `0`/false. The
+ * `reserved` tail is growth room — a future field claims a reserved slot without changing
+ * the struct's size or layout (freeze convention 2).
+ */
+typedef struct DoodleOutcome {
+  /**
+   * Which stop was reached (the tag).
+   */
+  DoodleOutcomeKind kind;
+  /**
+   * `Paused`: why.
+   */
+  DoodlePauseReason pause_reason;
+  /**
+   * `Faulted`: which fault.
+   */
+  DoodleFault fault;
+  /**
+   * `Paused` + `pause_reason == Breakpoint`: the breakpoint id.
+   */
+  uint32_t breakpoint_id;
+  /**
+   * `Suspended`: the capability id. `SuspendedImport`: the importing module id.
+   */
+  uint32_t capability;
+  /**
+   * `Suspended`: the number of bound argument handles. `SuspendedImport`: the number of
+   * dotted path segments. (The M7.2 accessors read the elements.)
+   */
+  uint32_t request_count;
+  /**
+   * `Raised`: whether `span_start`/`span_end` name the raising site.
+   */
+  bool has_span;
+  /**
+   * `Raised`: the raising site's start byte offset (when `has_span`).
+   */
+  uint32_t span_start;
+  /**
+   * `Raised`: the raising site's end byte offset (when `has_span`).
+   */
+  uint32_t span_end;
+  /**
+   * `Completed`: the result value (`0` for Void; a reentrant `fn` return populates it once
+   * the boundary can intern one, M7.3). A **host-owned** handle when non-zero —
+   * `doodle_release` it. `0` for every other kind (a raised value is read in described form
+   * via `doodle_raised_kind`/`_message`).
+   */
+  DoodleHandle value;
+  /**
+   * Reserved for additive growth (freeze convention 2); always written as `0`.
+   */
+  uint64_t reserved[4];
+} DoodleOutcome;
+
+/**
+ * The null handle: the absence of a value (a `to`/module result, an empty outcome slot).
+ */
+#define DOODLE_NULL_HANDLE 0
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -19,6 +450,310 @@ extern "C" {
  * be freed by the caller.
  */
 const char *doodle_version(void);
+
+/**
+ * Returns the C ABI contract version as `(major << 16) | minor` — distinct from the
+ * engine version ([`doodle_version`]). A host compiled against `doodle.h` compares this
+ * against the header's `DOODLE_ABI_VERSION_MAJOR`/`_MINOR` at load: a differing **major**
+ * is incompatible; a newer **minor** is backward-compatible (additive only).
+ */
+uint32_t doodle_abi_version(void);
+
+/**
+ * Creates a config with the engine defaults (E§3.1): default limits, statement-granularity
+ * observation, and the engine's pinned Unicode version. Returns NULL only on allocation
+ * failure. Free it with `doodle_config_free` (loading does not consume it).
+ */
+struct DoodleConfig *doodle_config_new(void);
+
+/**
+ * Frees a config created by `doodle_config_new`. NULL is a no-op. The config is the host's
+ * to free whether or not it was passed to `doodle_load` (load copies what it needs).
+ *
+ * # Safety
+ * `config` must be a pointer returned by `doodle_config_new` and not already freed.
+ */
+void doodle_config_free(struct DoodleConfig *config);
+
+/**
+ * Sets the resource limits (E§10.2): the step budget, heap-byte ceiling, non-tail stack
+ * depth, and the per-operation result-size cap (the latency rail — `UINT64_MAX` disables
+ * it). No-op on a NULL config.
+ *
+ * # Safety
+ * `config` must be a live pointer from `doodle_config_new` (or NULL).
+ */
+void doodle_config_set_limits(struct DoodleConfig *config,
+                              uint64_t step_budget,
+                              uint64_t heap_bytes,
+                              uint32_t stack_depth,
+                              uint64_t max_op_result_bytes);
+
+/**
+ * Sets the observation-mode granularity (E§8.8). No-op on a NULL config.
+ *
+ * # Safety
+ * `config` must be a live pointer from `doodle_config_new` (or NULL).
+ */
+void doodle_config_set_observation_mode(struct DoodleConfig *config, DoodleObservationMode mode);
+
+/**
+ * Sets the **target Unicode version** the host expects (S-41, the replay guard): a
+ * recording made under one UCD version fails to load under another rather than diverging
+ * silently on grapheme/normalization behavior (E§11). A `major` of `0` clears it (use the
+ * engine's pinned version). No-op on a NULL config.
+ *
+ * # Safety
+ * `config` must be a live pointer from `doodle_config_new` (or NULL).
+ */
+void doodle_config_set_target_unicode(struct DoodleConfig *config,
+                                      uint16_t major,
+                                      uint16_t minor,
+                                      uint16_t micro);
+
+/**
+ * Loads a program from UTF-8 `source` under `config`, writing a new instance to
+ * `out_instance` on success (`DoodleStatus_Ok`). The host owns the returned instance and
+ * frees it with [`doodle_free`]; `config` is not consumed (free it separately).
+ *
+ * On a lex/parse/resolve error the status is `DoodleStatus_ErrLoad` and the human-readable
+ * error text is copied into `err_buf` (up to `err_buf_cap` bytes, always NUL-free UTF-8),
+ * with the full byte length written to `out_err_len` (copy-out; a too-small buffer still
+ * reports the needed length). `config` may be NULL (engine defaults).
+ *
+ * # Safety
+ * `source` must point to `source_len` readable bytes; `out_instance` must be a writable
+ * `*DoodleInstance`; `err_buf` may be NULL only if `err_buf_cap` is 0; `out_err_len` and
+ * `config` may be NULL. Pointers must not alias in ways C forbids.
+ */
+DoodleStatus doodle_load(const uint8_t *source,
+                         uintptr_t source_len,
+                         const struct DoodleConfig *config,
+                         struct DoodleInstance **out_instance,
+                         uint8_t *err_buf,
+                         uintptr_t err_buf_cap,
+                         uintptr_t *out_err_len);
+
+/**
+ * Frees an instance from [`doodle_load`], running the finalizer of every live foreign value
+ * (E§3.1/§4.5). NULL is a no-op. After this the pointer is invalid.
+ *
+ * # Safety
+ * `instance` must be a pointer from `doodle_load` that has not already been freed.
+ */
+void doodle_free(struct DoodleInstance *instance);
+
+/**
+ * Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
+ * (E§7.3). Unbounded (runs until a capability / pause / raise / fault / completion); use
+ * [`doodle_drive_slice`] to bound the run with fuel.
+ *
+ * # Safety
+ * `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
+ */
+DoodleStatus doodle_drive(struct DoodleInstance *instance,
+                          DoodleDirective directive,
+                          struct DoodleOutcome *out_outcome);
+
+/**
+ * Like [`doodle_drive`] but runs at most `fuel` statement safe points before yielding a
+ * resumable `Paused(SliceEnd)` (S-40) — the host's cooperative-yield point. Re-drive to
+ * continue.
+ *
+ * # Safety
+ * As [`doodle_drive`].
+ */
+DoodleStatus doodle_drive_slice(struct DoodleInstance *instance,
+                                DoodleDirective directive,
+                                uint64_t fuel,
+                                struct DoodleOutcome *out_outcome);
+
+/**
+ * Requests cancellation (E§10.1): the drive tears down to `Faulted(Cancelled)` at its next
+ * safe point. Idempotent; callable from another thread while a drive runs (the cancel flag
+ * is atomic). No-op on NULL.
+ *
+ * # Safety
+ * `instance` must be a live pointer from [`doodle_load`] (or NULL).
+ */
+void doodle_cancel(const struct DoodleInstance *instance);
+
+/**
+ * Copies the described **kind** slug of the instance's most recent `Raised` outcome (E§9)
+ * into `buf` (copy-out; `out_len` gets the full length). `DoodleStatus_ErrContract` if the
+ * last drive did not raise.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_raised_kind(const struct DoodleInstance *instance,
+                                uint8_t *buf,
+                                uintptr_t cap,
+                                uintptr_t *out_len);
+
+/**
+ * Copies the **message** of the instance's most recent `Raised` outcome (E§9) into `buf`
+ * (copy-out). `DoodleStatus_ErrContract` if the last drive did not raise.
+ *
+ * # Safety
+ * As [`doodle_raised_kind`].
+ */
+DoodleStatus doodle_raised_message(const struct DoodleInstance *instance,
+                                   uint8_t *buf,
+                                   uintptr_t cap,
+                                   uintptr_t *out_len);
+
+/**
+ * Copies the instance's accumulated `print` output (raw UTF-8 bytes) into `buf` (copy-out;
+ * `out_len` gets the full length). The output only grows; a host reads incrementally by
+ * tracking how many bytes it has already consumed.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_output(const struct DoodleInstance *instance,
+                           uint8_t *buf,
+                           uintptr_t cap,
+                           uintptr_t *out_len);
+
+/**
+ * Makes an `Int` from an `int64_t` (E§4.3). Larger magnitudes use `doodle_make_int_decimal`.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_make_int(struct DoodleInstance *instance, int64_t value, DoodleHandle *out);
+
+/**
+ * Makes an `Int` of any magnitude from a base-10 decimal string (E§4.3). `ErrMalformedInt`
+ * if the text is not a base-10 integer literal.
+ *
+ * # Safety
+ * `instance` live; `decimal` points to `decimal_len` readable bytes; `out` writable.
+ */
+DoodleStatus doodle_make_int_decimal(struct DoodleInstance *instance,
+                                     const uint8_t *decimal,
+                                     uintptr_t decimal_len,
+                                     DoodleHandle *out);
+
+/**
+ * Makes a `Float` from a `double` (E§4.3); any NaN is canonicalized (E§11).
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_make_float(struct DoodleInstance *instance, double value, DoodleHandle *out);
+
+/**
+ * Makes a `Bool` (E§4.1).
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_make_bool(struct DoodleInstance *instance, bool value, DoodleHandle *out);
+
+/**
+ * Makes `nil` (E§4.9).
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_make_nil(struct DoodleInstance *instance, DoodleHandle *out);
+
+/**
+ * Makes a `String` from UTF-8 bytes (E§4.4); the engine validates UTF-8 and normalizes to
+ * NFC. `ErrInvalidUtf8` if the bytes are not well-formed UTF-8.
+ *
+ * # Safety
+ * `instance` live; `bytes` points to `bytes_len` readable bytes; `out` writable.
+ */
+DoodleStatus doodle_make_string(struct DoodleInstance *instance,
+                                const uint8_t *bytes,
+                                uintptr_t bytes_len,
+                                DoodleHandle *out);
+
+/**
+ * Reads an `Int` as `int64_t` (E§4.3). `ErrIntOutOfRange` for a bignum (read it with
+ * `doodle_as_int_decimal`); `ErrWrongKind` for a non-int; `ErrStaleHandle` if freed.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_as_int(const struct DoodleInstance *instance,
+                           DoodleHandle handle,
+                           int64_t *out);
+
+/**
+ * Reads a `Float` as `double` (E§4.3).
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_as_float(const struct DoodleInstance *instance,
+                             DoodleHandle handle,
+                             double *out);
+
+/**
+ * Reads a `Bool` (E§4.1).
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_as_bool(const struct DoodleInstance *instance, DoodleHandle handle, bool *out);
+
+/**
+ * Writes whether the value is `nil` (E§4.9) — `ErrStaleHandle` if freed, never `ErrWrongKind`.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_is_nil(const struct DoodleInstance *instance, DoodleHandle handle, bool *out);
+
+/**
+ * Writes the value's kind (E§4.4). `ErrStaleHandle` if the handle is freed.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_kind_of(const struct DoodleInstance *instance,
+                            DoodleHandle handle,
+                            DoodleKind *out);
+
+/**
+ * Copies an `Int`'s value as a base-10 decimal string into `buf` (copy-out; `out_len` gets
+ * the full length) — the arbitrary-precision counterpart of `doodle_as_int`.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_as_int_decimal(const struct DoodleInstance *instance,
+                                   DoodleHandle handle,
+                                   uint8_t *buf,
+                                   uintptr_t cap,
+                                   uintptr_t *out_len);
+
+/**
+ * Copies a `String`'s raw UTF-8 bytes into `buf` (copy-out; `out_len` gets the full byte
+ * length). The engine keeps strings NFC, so these bytes are NFC UTF-8.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_string_bytes(const struct DoodleInstance *instance,
+                                 DoodleHandle handle,
+                                 uint8_t *buf,
+                                 uintptr_t cap,
+                                 uintptr_t *out_len);
+
+/**
+ * Releases a host-owned handle (E§4.2): decrements its reference count, freeing the slot at
+ * zero. `ErrStaleHandle` if already freed. A handle must be released exactly as many times
+ * as it was obtained.
+ *
+ * # Safety
+ * `instance` must be a live pointer from `doodle_load`.
+ */
+DoodleStatus doodle_release(struct DoodleInstance *instance, DoodleHandle handle);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -12,8 +12,12 @@ publish = false
 # less cross-platform loader variance than a dynamic library). The C smoke test
 # links it statically. A cdylib would be added only if a dynamic-loading /
 # plugin consumer needs one.
+#
+# `rlib` is added so the `extern "C"` functions are callable from Rust `#[test]`s
+# (a staticlib crate hosts no test target) and, later, from `cargo miri test`
+# (D-M7-11) — the unsafe FFI lives here (AD1), so this is where Miri must run.
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [lints]
 workspace = true
