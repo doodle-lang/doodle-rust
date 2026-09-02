@@ -258,6 +258,8 @@ impl Instance {
                 prelude,
                 module_root_cells,
                 directive: Directive::RunToCompletion,
+                step_anchor: 0,
+                resuming: false,
                 pending_fault: None,
                 foreign_roots: Vec::new(),
                 dyn_stack: Vec::new(),

@@ -15,7 +15,7 @@ use super::frame::FrameKind;
 use super::modload::LoadState;
 use super::{Halt, LoadedModule, Machine, ObservationMode, Value, limits, stmt, unwind};
 use crate::ast::{BinaryOp, Node, NodeId};
-use crate::drive::EngineFault;
+use crate::drive::{EngineFault, SafePoint, SafePointKind};
 use crate::heap::Heap;
 use crate::resolve::ResolvedModule;
 use crate::span::Span;
@@ -25,15 +25,15 @@ use dispatch::dispatch;
 
 /// Performs one machine transition (machine-design §8), evaluating resource limits
 /// at each statement-level safe point (E§7.4, §10.2). Precondition: `machine` has at
-/// least one frame (the caller checks `is_halted` first). `Ok(Some(depth))` means the
-/// transition crossed a statement-level safe point at that frame depth (where the
-/// drive loop may pause a `Step*`); `Ok(None)` means none. `Err` stopped the drive.
+/// least one frame (the caller checks `is_halted` first). `Ok(Some(sp))` means the
+/// transition crossed a safe point (its frame `depth` and `kind` steer the `Step*`
+/// pause decision, E§8.5); `Ok(None)` means none. `Err` stopped the drive.
 pub(crate) fn step(
     resolved: &ResolvedModule,
     modules: &mut [LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
-) -> Result<Option<usize>, Halt> {
+) -> Result<Option<SafePoint>, Halt> {
     // Fresh each transition (E§7.4/§8.4): only a fine safe point below sets it, so it reflects
     // whether *this* step completed a non-leaf subexpression — `None` during an unwind, at a
     // statement/call-entry safe point, and in coarse mode.
@@ -73,9 +73,15 @@ pub(crate) fn step(
             return Err(Halt::Raise(value, trace));
         }
         return match settle {
+            // The settling transition hands control back to a shallower frame — a return
+            // safe point (E§8.5): `StepOver` treats a return *into* the stepped-over frame
+            // (equal depth) as mid-statement, not a stop (see `should_pause`).
             Some(depth) => {
                 limits::safe_point(heap, machine)?;
-                Ok(Some(depth))
+                Ok(Some(SafePoint {
+                    depth,
+                    kind: SafePointKind::Return,
+                }))
             }
             None => Ok(None),
         };
@@ -96,6 +102,14 @@ pub(crate) fn step(
         cont,
         Some(Cont::Seq { .. }) | Some(Cont::ReturnBarrier) | None
     );
+    // Classify that safe point for `Step*` (E§8.5): a `Seq` is a forward statement boundary; a
+    // `ReturnBarrier` (a callable falling off its end) or a drained `None` (the module top
+    // returning) hands control back — a return safe point, like the unwind-settle above.
+    let stmt_kind = if matches!(cont, Some(Cont::Seq { .. })) {
+        SafePointKind::Boundary
+    } else {
+        SafePointKind::Return
+    };
     // Record the statement about to run for breakpoint matching (E§8.6): the `Seq` case is
     // about to dispatch `stmts[next]`. Only at the outer drive — a reentrant native-consumer
     // drive's steps are not the outer drive's safe points, so `reentry_depth > 0` records
@@ -136,10 +150,10 @@ pub(crate) fn step(
         arm_raise(resolved, machine, heap, raise);
         return Ok(None);
     }
-    // The frame depth where a safe point fired this transition (for `Step*` anchoring),
+    // The safe point that fired this transition (frame depth + kind, for `Step*` anchoring),
     // or `None`. A statement safe point and a call-entry safe point never coincide in
     // one transition (a `Seq`/`ReturnBarrier` step pushes no frame), so at most one fires.
-    let mut safe_point_depth = None;
+    let mut safe_point = None;
     if stmt_safe_point {
         limits::safe_point(heap, machine)?;
         // Cancellation (E§10.1): the host stop button, polled at this safe point. Arming
@@ -148,11 +162,15 @@ pub(crate) fn step(
         if machine.poll_cancel() {
             return Ok(None);
         }
-        safe_point_depth = Some(machine.frames.len());
+        safe_point = Some(SafePoint {
+            depth: machine.frames.len(),
+            kind: stmt_kind,
+        });
     }
     // A call or block invocation just pushed a frame — a **non-tail** entry (a tail
     // call reuses a frame in place, §11): the call-entry safe point, and the only
-    // place non-tail stack depth grows.
+    // place non-tail stack depth grows. A forward boundary (descending into a call), not a
+    // return.
     let depth = machine.frames.len();
     if depth > depth_before {
         limits::safe_point(heap, machine)?;
@@ -160,7 +178,10 @@ pub(crate) fn step(
         if machine.poll_cancel() {
             return Ok(None);
         }
-        safe_point_depth = Some(depth);
+        safe_point = Some(SafePoint {
+            depth,
+            kind: SafePointKind::Boundary,
+        });
     }
     // A **fine** (per-subexpression) safe point (E§7.4, S-62), only when no statement/call-entry
     // safe point already fired this step: the popped cont completed a non-leaf subexpression
@@ -168,16 +189,20 @@ pub(crate) fn step(
     // **Observation-only** — no `limits::safe_point`/`poll_cancel` runs here, so the step budget,
     // slice fuel, GC, and cancellation observation stay at statement safe points and a fault
     // lands at the same instant in either mode. `fine_span` carries the completed span to
-    // `completed_position`; cleared when this is not a fine stop.
-    if safe_point_depth.is_none()
+    // `completed_position`; cleared when this is not a fine stop. A within-statement stop, so a
+    // forward boundary (a `StepOver` at the anchor depth still stops for it).
+    if safe_point.is_none()
         && let Some(span) = fine_completion.or(machine.fine_span)
     {
         machine.fine_span = Some(span);
-        safe_point_depth = Some(machine.frames.len());
+        safe_point = Some(SafePoint {
+            depth: machine.frames.len(),
+            kind: SafePointKind::Boundary,
+        });
     } else {
         machine.fine_span = None;
     }
-    Ok(safe_point_depth)
+    Ok(safe_point)
 }
 
 /// Runs the statement at `next` in `block`, and re-arms the sequence for the

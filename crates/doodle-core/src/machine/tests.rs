@@ -32,6 +32,8 @@ impl Machine {
             prelude: crate::span::ModuleId(0),
             module_root_cells: Vec::new(),
             directive: Directive::RunToCompletion,
+            step_anchor: 0,
+            resuming: false,
             pending_fault: None,
             foreign_roots: Vec::new(),
             dyn_stack: Vec::new(),
@@ -253,6 +255,52 @@ fn frame_observation_reads_a_function_frames_locals() {
         guard += 1;
         assert!(guard < 100, "never stepped inside `f`");
     }
+}
+
+#[test]
+fn step_over_treats_a_call_as_one_step() {
+    // E§8.5: `StepOver` treats a call as a single step. A statement that calls a function must
+    // not stop twice on the same line — once at the callee's *return* into the caller, then at
+    // the next statement. Before the return-safe-point refinement (a return at the anchor depth
+    // is not a `StepOver` stop, only strictly shallower), `let a = dbl(3)` stopped twice: once
+    // showing `dbl(3)` (its return) and again showing the whole statement.
+    use crate::drive::{Directive, Outcome, run};
+    let src = "fn dbl(x)\nreturn x * 2\nend\nlet a = dbl(3)\nlet b = dbl(4)\nprint(a)\n";
+    let mut inst = load_source_with_print(src);
+    // The 1-based source line each `StepOver` pause lands on, to a terminal.
+    let line_of = |start: usize| {
+        src.as_bytes()[..start]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1
+    };
+    let mut lines = Vec::new();
+    let mut guard = 0;
+    loop {
+        match run(&mut inst, Directive::StepOver) {
+            Outcome::Paused(_) => {
+                if let Some(pos) = inst.current_position() {
+                    lines.push(line_of(pos.span.start as usize));
+                }
+            }
+            Outcome::Completed(_) => break,
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        guard += 1;
+        assert!(guard < 100, "StepOver never completed; lines={lines:?}");
+    }
+    // Each `dbl` call statement (lines 4 and 5) is visited exactly once — the call is one step.
+    assert_eq!(
+        lines.iter().filter(|&&l| l == 4).count(),
+        1,
+        "StepOver stopped on the `dbl(3)` line more than once; lines={lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|&&l| l == 5).count(),
+        1,
+        "StepOver stopped on the `dbl(4)` line more than once; lines={lines:?}"
+    );
 }
 
 // --- M6.9b: module-globals observation (E§8.2) ---

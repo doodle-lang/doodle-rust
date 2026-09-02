@@ -219,6 +219,15 @@ pub(crate) struct Machine {
     /// The directive the current drive runs under, remembered across a suspend so
     /// `resolve` resumes under the same directive (E§7.3).
     directive: Directive,
+    /// The frame depth a depth-anchored step (`StepOver`/`StepOut`, E§8.5) was issued at.
+    /// Preserved across the internal suspend/slice re-entries of one step: a `StepOver` of a call
+    /// that suspends a capability (e.g. `forward` calling `draw_line`) must still treat the whole
+    /// call as one step, so it is **not** re-derived from the resume depth.
+    step_anchor: usize,
+    /// Whether the next drive is a **continuation** of an in-progress step — the previous drive
+    /// yielded internally (a `SliceEnd` or a capability `Suspended`) rather than reaching a
+    /// host-visible stop. A continuation reuses [`step_anchor`]; a fresh drive re-anchors.
+    resuming: bool,
     /// A fault parked during a transition because the Raise-typed dispatch/`apply` chain
     /// cannot carry an `EngineFault`: a fault raised **inside a reentrant nested drive** (a
     /// limit tripped while a native block-consumer ran its block, or the deferred S-15
@@ -445,12 +454,12 @@ impl Instance {
     }
 
     /// Performs one machine transition (machine-design §8). Precondition:
-    /// `!self.is_halted()`. `Ok(Some(depth))` means the transition crossed a
-    /// **statement-level safe point** (E§7.4) at that frame depth — where the drive
-    /// loop may pause a `Step*` directive; `Ok(None)` means no safe point this
-    /// transition. `Err` stopped the drive — an uncaught raise or an engine fault
-    /// (the drive loop maps each to its [`Outcome`](crate::drive::Outcome)).
-    pub(crate) fn step(&mut self) -> Result<Option<usize>, Halt> {
+    /// `!self.is_halted()`. `Ok(Some(sp))` means the transition crossed a **safe point**
+    /// (E§7.4): its depth and kind steer where the drive loop may pause a `Step*`
+    /// directive (E§8.5); `Ok(None)` means no safe point this transition. `Err` stopped
+    /// the drive — an uncaught raise or an engine fault (the drive loop maps each to its
+    /// [`Outcome`](crate::drive::Outcome)).
+    pub(crate) fn step(&mut self) -> Result<Option<crate::drive::SafePoint>, Halt> {
         // The transition reads the top frame's module's resolved AST (AD5). The whole
         // module table is threaded so the step can reach **another** module's resolved (a
         // cross-module call) and **mutate** the importer's namespace (an import binding).

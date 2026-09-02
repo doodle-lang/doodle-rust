@@ -46,6 +46,28 @@ impl Instance {
         self.machine.directive
     }
 
+    /// The depth anchor for a depth-anchored step (`StepOver`/`StepOut`, E§8.5) about to start.
+    /// A **continuation** of an in-progress step (the previous drive yielded internally — a
+    /// `SliceEnd` or a capability `Suspended`) reuses the stored anchor, so a step *over* a call
+    /// that suspends mid-way keeps treating the whole call as one step; a **fresh** step anchors at
+    /// the current frame depth. Consumes the resuming flag (each drive re-reads it).
+    pub(crate) fn step_anchor(&mut self, directive: Directive) -> usize {
+        let resuming = std::mem::take(&mut self.machine.resuming);
+        let depth_anchored = matches!(directive, Directive::StepOver | Directive::StepOut);
+        if resuming && depth_anchored {
+            self.machine.step_anchor
+        } else {
+            self.machine.step_anchor = self.frame_depth();
+            self.machine.step_anchor
+        }
+    }
+
+    /// Marks that the current drive yielded internally (a `SliceEnd` or a capability `Suspended`),
+    /// so the next drive continues the same step rather than re-anchoring (E§8.5).
+    pub(crate) fn mark_step_resuming(&mut self) {
+        self.machine.resuming = true;
+    }
+
     /// Arms the slice fuel for the drive call about to start (S-40): `Some(n)` runs at
     /// most `n` statement safe points before `Paused(SliceEnd)`; `None` runs unbounded.
     pub(crate) fn arm_slice(&mut self, fuel: Option<u64>) {
