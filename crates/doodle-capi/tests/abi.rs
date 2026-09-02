@@ -15,13 +15,60 @@ use doodle_capi::abi::{
 };
 use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_set_limits};
 use doodle_capi::instance::{
-    DoodleInstance, doodle_drive, doodle_free, doodle_load, doodle_output, doodle_raised_kind,
+    DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_load,
+    doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
 };
+use doodle_capi::registry::{DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_new};
 use doodle_capi::value::{
     doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_kind_of, doodle_make_int,
-    doodle_make_string, doodle_release, doodle_string_bytes,
+    doodle_make_nil, doodle_make_string, doodle_release, doodle_string_bytes,
 };
 use std::ptr;
+
+/// Loads `source` with a registry of `builtins` (in order), asserting success.
+fn load_with(source: &str, builtins: &[DoodleBuiltin]) -> *mut DoodleInstance {
+    let registry = doodle_registry_new();
+    for &b in builtins {
+        assert_eq!(
+            unsafe { doodle_registry_add_builtin(registry, b) },
+            DoodleStatus::Ok
+        );
+    }
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    let status = unsafe {
+        doodle_load_with_registry(
+            source.as_ptr(),
+            source.len(),
+            ptr::null(),
+            registry,
+            &mut inst,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, DoodleStatus::Ok);
+    inst
+}
+
+/// Copies out the instance's full output.
+fn read_output(inst: *const DoodleInstance) -> Vec<u8> {
+    let mut len = 0usize;
+    let _ = unsafe { doodle_output(inst, ptr::null_mut(), 0, &mut len) };
+    let mut buf = vec![0u8; len];
+    assert_eq!(
+        unsafe { doodle_output(inst, buf.as_mut_ptr(), buf.len(), &mut len) },
+        DoodleStatus::Ok
+    );
+    buf
+}
+
+/// Makes a `nil` handle for resolving a `to` capability.
+fn make_nil(inst: *mut DoodleInstance) -> u64 {
+    let mut h = 0u64;
+    assert_eq!(unsafe { doodle_make_nil(inst, &mut h) }, DoodleStatus::Ok);
+    h
+}
 
 /// Loads `source` with the default config, asserting success and returning the instance.
 fn load(source: &str) -> *mut DoodleInstance {
@@ -248,6 +295,98 @@ fn a_null_instance_is_a_defined_error_not_a_crash() {
     );
     // A NULL free is a no-op (no crash).
     unsafe { doodle_free(ptr::null_mut()) };
+}
+
+#[test]
+fn a_registered_print_writes_output() {
+    let inst = load_with("print(1 + 2)\n", &[DoodleBuiltin::Print]);
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Completed);
+    assert_eq!(read_output(inst), b"3\n");
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn a_capability_suspends_exposes_its_args_and_resolves() {
+    // `draw_line` is a `to` capability taking 8 coordinate/colour arguments.
+    let inst = load_with(
+        "draw_line(1, 2, 3, 4, 5, 6, 7, 8)\n",
+        &[DoodleBuiltin::DrawLine],
+    );
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Suspended);
+    assert_eq!(out.request_count, 8);
+    // Read the first and last bound argument (host-owned handles; release after reading).
+    for (index, expected) in [(0u32, 1i64), (7, 8)] {
+        let mut h = 0u64;
+        assert_eq!(
+            unsafe { doodle_capability_arg(inst, index, &mut h) },
+            DoodleStatus::Ok
+        );
+        let mut n = 0i64;
+        assert_eq!(unsafe { doodle_as_int(inst, h, &mut n) }, DoodleStatus::Ok);
+        assert_eq!(n, expected);
+        unsafe { doodle_release(inst, h) };
+    }
+    // Out of range.
+    let mut h = 0u64;
+    assert_eq!(
+        unsafe { doodle_capability_arg(inst, 8, &mut h) },
+        DoodleStatus::ErrIndexOutOfBounds
+    );
+    // A `to` capability yields Void: resolve with nil → the program completes.
+    let nil = make_nil(inst);
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, nil, &mut done) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Completed);
+    unsafe { doodle_release(inst, nil) };
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn a_resolved_fn_capability_value_flows_into_the_program() {
+    // `print` (registered first) + `read_line` (a `fn` capability): the resolved value is
+    // printed. Registration order is replay identity (§11): print=0, read_line=1.
+    let inst = load_with(
+        "print(read_line())\n",
+        &[DoodleBuiltin::Print, DoodleBuiltin::ReadLine],
+    );
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Suspended);
+    assert_eq!(out.request_count, 0, "read_line takes no arguments");
+    // Resolve with a string; the program prints it.
+    let text = "world";
+    let mut h = 0u64;
+    assert_eq!(
+        unsafe { doodle_make_string(inst, text.as_ptr(), text.len(), &mut h) },
+        DoodleStatus::Ok
+    );
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, h, &mut done) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Completed);
+    unsafe { doodle_release(inst, h) };
+    assert_eq!(read_output(inst), b"world\n");
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn resolving_a_non_suspended_instance_is_a_contract_error() {
+    let inst = load_with("print(1)\n", &[DoodleBuiltin::Print]);
+    // Nothing has suspended yet.
+    let nil = make_nil(inst);
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, nil, &mut out) },
+        DoodleStatus::ErrContract
+    );
+    unsafe { doodle_release(inst, nil) };
+    unsafe { doodle_free(inst) };
 }
 
 #[test]

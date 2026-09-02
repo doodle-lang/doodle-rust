@@ -52,8 +52,8 @@ fn instance_ref<'a>(p: *const DoodleInstance) -> Option<&'a Instance> {
 }
 
 /// Writes `value` through the out-pointer `out`, returning false if `out` is NULL. The one
-/// documented deref the scalar constructors/readers share.
-fn write_out<T>(out: *mut T, value: T) -> bool {
+/// documented deref the scalar constructors/readers (and `doodle_capability_arg`) share.
+pub(crate) fn write_out<T>(out: *mut T, value: T) -> bool {
     // SAFETY: `as_mut` returns None for NULL; a non-null `out` is writable and aligned for
     // `T` by the caller's `# Safety` contract.
     match unsafe { out.as_mut() } {

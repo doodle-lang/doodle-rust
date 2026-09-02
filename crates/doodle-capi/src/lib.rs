@@ -41,6 +41,7 @@ pub mod abi;
 pub mod config;
 pub mod guard;
 pub mod instance;
+pub mod registry;
 pub mod value;
 
 /// The C ABI contract version's major component (a breaking change bumps it). Mirrors

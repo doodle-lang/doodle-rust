@@ -63,6 +63,35 @@ int main(void) {
     }
 
     doodle_free(inst);
-    printf("c-host smoke: load/drive/handle round-trip OK\n");
+
+    /* Register the `print` built-in and check its output crosses the ABI. */
+    DoodleRegistry *registry = doodle_registry_new();
+    if (registry == NULL
+        || doodle_registry_add_builtin(registry, DoodleBuiltin_Print) != DoodleStatus_Ok) {
+        return fail("doodle_registry_add_builtin(Print) failed");
+    }
+    const char *printer = "print(1 + 2)\n";
+    DoodleInstance *pinst = NULL;
+    status = doodle_load_with_registry((const uint8_t *)printer, strlen(printer), NULL, registry,
+                                       &pinst, NULL, 0, NULL);
+    if (status != DoodleStatus_Ok || pinst == NULL) {
+        return fail("doodle_load_with_registry() failed");
+    }
+    status = doodle_drive(pinst, DoodleDirective_RunToCompletion, &outcome);
+    if (status != DoodleStatus_Ok || outcome.kind != DoodleOutcomeKind_Completed) {
+        doodle_free(pinst);
+        return fail("the printing program did not complete");
+    }
+    /* Copy out the output; it must be "3\n". */
+    char out[8];
+    size_t out_len = 0;
+    status = doodle_output(pinst, (uint8_t *)out, sizeof out, &out_len);
+    if (status != DoodleStatus_Ok || out_len != 2 || out[0] != '3' || out[1] != '\n') {
+        doodle_free(pinst);
+        return fail("print output was not \"3\\n\"");
+    }
+    doodle_free(pinst);
+
+    printf("c-host smoke: load/drive/handle + registry/print round-trip OK\n");
     return 0;
 }

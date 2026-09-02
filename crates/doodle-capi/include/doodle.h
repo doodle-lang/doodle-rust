@@ -287,6 +287,69 @@ typedef uint32_t DoodleFault;
 #endif // __cplusplus
 
 /**
+ * An engine-provided built-in intrinsic a host can register by identity (E§5.5), without
+ * supplying a callback. The synchronous ones (`Print`/`Length`/…) run inline; the
+ * capabilities (`ReadLine`/`DrawLine`/`SetTurtle`/`ClearCanvas`) suspend to the host.
+ */
+enum DoodleBuiltin
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * `print(value)` — renders a value and a newline to the output sink (synchronous).
+   */
+  DoodleBuiltin_Print = 0,
+  /**
+   * `length(x)` — the length of a string/list/dict/bytes (synchronous).
+   */
+  DoodleBuiltin_Length = 1,
+  /**
+   * `each(list) do (x) … end` — a native block-consumer (synchronous, reentrant).
+   */
+  DoodleBuiltin_Each = 2,
+  /**
+   * `encode(string) -> bytes` — UTF-8 encode (synchronous).
+   */
+  DoodleBuiltin_Encode = 3,
+  /**
+   * `decode(bytes) -> string` — UTF-8 decode (synchronous).
+   */
+  DoodleBuiltin_Decode = 4,
+  /**
+   * `read_line() -> string` — a suspending input capability.
+   */
+  DoodleBuiltin_ReadLine = 5,
+  /**
+   * `sin(x) -> float` (synchronous, deterministic libm).
+   */
+  DoodleBuiltin_Sin = 6,
+  /**
+   * `cos(x) -> float` (synchronous, deterministic libm).
+   */
+  DoodleBuiltin_Cos = 7,
+  /**
+   * `draw_line(x0,y0,x1,y1,r,g,b,a)` — a suspending turtle capability.
+   */
+  DoodleBuiltin_DrawLine = 8,
+  /**
+   * `set_turtle(x,y,heading,visible)` — a suspending turtle capability.
+   */
+  DoodleBuiltin_SetTurtle = 9,
+  /**
+   * `clear_canvas()` — a suspending turtle capability.
+   */
+  DoodleBuiltin_ClearCanvas = 10,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleBuiltin DoodleBuiltin;
+#else
+typedef uint32_t DoodleBuiltin;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * A value's kind (E§4.4), the C mirror of `doodle_core`'s `Kind`.
  */
 enum DoodleKind
@@ -363,10 +426,19 @@ typedef uint32_t DoodleKind;
 typedef struct DoodleConfig DoodleConfig;
 
 /**
- * A loaded Doodle program: the engine [`Instance`] plus the described form of its most
- * recent uncaught raise (so `doodle_raised_kind`/`_message` can copy it out). Opaque to C.
+ * A loaded Doodle program: the engine [`Instance`] plus a little host-facing state — the
+ * described form of its most recent uncaught raise (for `doodle_raised_kind`/`_message`) and
+ * the bound argument handles of a parked capability request (for `doodle_capability_arg`).
+ * Opaque to C.
  */
 typedef struct DoodleInstance DoodleInstance;
+
+/**
+ * A host-extension registry under construction (E§5.5). Built with `doodle_registry_new`,
+ * populated in order with `doodle_registry_add_builtin`, then **consumed** by
+ * `doodle_load_with_registry`. Opaque to C.
+ */
+typedef struct DoodleRegistry DoodleRegistry;
 
 /**
  * An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
@@ -512,38 +584,6 @@ void doodle_config_set_target_unicode(struct DoodleConfig *config,
                                       uint16_t micro);
 
 /**
- * Loads a program from UTF-8 `source` under `config`, writing a new instance to
- * `out_instance` on success (`DoodleStatus_Ok`). The host owns the returned instance and
- * frees it with [`doodle_free`]; `config` is not consumed (free it separately).
- *
- * On a lex/parse/resolve error the status is `DoodleStatus_ErrLoad` and the human-readable
- * error text is copied into `err_buf` (up to `err_buf_cap` bytes, always NUL-free UTF-8),
- * with the full byte length written to `out_err_len` (copy-out; a too-small buffer still
- * reports the needed length). `config` may be NULL (engine defaults).
- *
- * # Safety
- * `source` must point to `source_len` readable bytes; `out_instance` must be a writable
- * `*DoodleInstance`; `err_buf` may be NULL only if `err_buf_cap` is 0; `out_err_len` and
- * `config` may be NULL. Pointers must not alias in ways C forbids.
- */
-DoodleStatus doodle_load(const uint8_t *source,
-                         uintptr_t source_len,
-                         const struct DoodleConfig *config,
-                         struct DoodleInstance **out_instance,
-                         uint8_t *err_buf,
-                         uintptr_t err_buf_cap,
-                         uintptr_t *out_err_len);
-
-/**
- * Frees an instance from [`doodle_load`], running the finalizer of every live foreign value
- * (E§3.1/§4.5). NULL is a no-op. After this the pointer is invalid.
- *
- * # Safety
- * `instance` must be a pointer from `doodle_load` that has not already been freed.
- */
-void doodle_free(struct DoodleInstance *instance);
-
-/**
  * Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
  * (E§7.3). Unbounded (runs until a capability / pause / raise / fault / completion); use
  * [`doodle_drive_slice`] to bound the run with fuel.
@@ -577,6 +617,43 @@ DoodleStatus doodle_drive_slice(struct DoodleInstance *instance,
  * `instance` must be a live pointer from [`doodle_load`] (or NULL).
  */
 void doodle_cancel(const struct DoodleInstance *instance);
+
+/**
+ * Writes the `index`-th bound argument handle of the parked capability request (E§7.5) to
+ * `out_handle`. The handle is **host-owned** (S-17): read its value (`doodle_as_*` etc.) and
+ * `doodle_release` it. `ErrContract` if the instance is not suspended on a capability;
+ * `ErrIndexOutOfBounds` if `index >= DoodleOutcome::request_count`.
+ *
+ * # Safety
+ * `instance` must be a live pointer from [`doodle_load`]; `out_handle` must be writable.
+ */
+DoodleStatus doodle_capability_arg(const struct DoodleInstance *instance,
+                                   uint32_t index,
+                                   DoodleHandle *out_handle);
+
+/**
+ * Resolves a parked capability suspension (E§7.5) with `value` as its result, then drives on
+ * and writes the next stop to `out_outcome`. `value` becomes the capability call's result (a
+ * `to` capability ignores it, yielding Void). `ErrContract` if the instance is not suspended
+ * on a capability.
+ *
+ * # Safety
+ * `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
+ */
+DoodleStatus doodle_resolve(struct DoodleInstance *instance,
+                            DoodleHandle value,
+                            struct DoodleOutcome *out_outcome);
+
+/**
+ * Resolves a parked capability suspension (E§7.5) by **raising** `value` at the capability
+ * call site (E§9), then drives on. `ErrContract` if not suspended on a capability.
+ *
+ * # Safety
+ * As [`doodle_resolve`].
+ */
+DoodleStatus doodle_resolve_raise(struct DoodleInstance *instance,
+                                  DoodleHandle value,
+                                  struct DoodleOutcome *out_outcome);
 
 /**
  * Copies the described **kind** slug of the instance's most recent `Raised` outcome (E§9)
@@ -615,6 +692,84 @@ DoodleStatus doodle_output(const struct DoodleInstance *instance,
                            uint8_t *buf,
                            uintptr_t cap,
                            uintptr_t *out_len);
+
+/**
+ * Loads a program from UTF-8 `source` under `config`, writing a new instance to
+ * `out_instance` on success (`DoodleStatus_Ok`). The host owns the returned instance and
+ * frees it with [`doodle_free`]; `config` is not consumed (free it separately).
+ *
+ * On a lex/parse/resolve error the status is `DoodleStatus_ErrLoad` and the human-readable
+ * error text is copied into `err_buf` (up to `err_buf_cap` bytes, always NUL-free UTF-8),
+ * with the full byte length written to `out_err_len` (copy-out; a too-small buffer still
+ * reports the needed length). `config` may be NULL (engine defaults).
+ *
+ * # Safety
+ * `source` must point to `source_len` readable bytes; `out_instance` must be a writable
+ * `*DoodleInstance`; `err_buf` may be NULL only if `err_buf_cap` is 0; `out_err_len` and
+ * `config` may be NULL. Pointers must not alias in ways C forbids.
+ */
+DoodleStatus doodle_load(const uint8_t *source,
+                         uintptr_t source_len,
+                         const struct DoodleConfig *config,
+                         struct DoodleInstance **out_instance,
+                         uint8_t *err_buf,
+                         uintptr_t err_buf_cap,
+                         uintptr_t *out_err_len);
+
+/**
+ * Like [`doodle_load`] but with host extensions from `registry` (E§5.5) — capabilities and
+ * built-ins the program can call. **Consumes** `registry` (moved into the instance): the
+ * pointer is invalid after this call, whether it succeeds or fails; do not free or reuse it.
+ *
+ * # Safety
+ * As [`doodle_load`], plus `registry` must be a pointer from `doodle_registry_new` not
+ * already consumed/freed.
+ */
+DoodleStatus doodle_load_with_registry(const uint8_t *source,
+                                       uintptr_t source_len,
+                                       const struct DoodleConfig *config,
+                                       struct DoodleRegistry *registry,
+                                       struct DoodleInstance **out_instance,
+                                       uint8_t *err_buf,
+                                       uintptr_t err_buf_cap,
+                                       uintptr_t *out_err_len);
+
+/**
+ * Frees an instance from [`doodle_load`], running the finalizer of every live foreign value
+ * (E§3.1/§4.5). NULL is a no-op. After this the pointer is invalid.
+ *
+ * # Safety
+ * `instance` must be a pointer from `doodle_load` that has not already been freed.
+ */
+void doodle_free(struct DoodleInstance *instance);
+
+/**
+ * Creates an empty registry. Returns NULL only on allocation failure. Populate it in the
+ * order the host wants capability ids assigned (registration order is replay identity, §11),
+ * then pass it to `doodle_load_with_registry` (which consumes it) — or free an unused one
+ * with `doodle_registry_free`.
+ */
+struct DoodleRegistry *doodle_registry_new(void);
+
+/**
+ * Frees a registry created by `doodle_registry_new` that was **not** consumed by
+ * `doodle_load_with_registry`. NULL is a no-op. Do not call this on a registry already
+ * passed to `doodle_load_with_registry` (that consumed it).
+ *
+ * # Safety
+ * `registry` must be a pointer from `doodle_registry_new` not already freed or consumed.
+ */
+void doodle_registry_free(struct DoodleRegistry *registry);
+
+/**
+ * Registers an engine built-in by identity (E§5.5), appending it to the registry. Returns
+ * `DoodleStatus_ErrContract` if the name is already registered (a host bug — each built-in
+ * registers at most once). No-op returning `ErrNullPointer` on a NULL registry.
+ *
+ * # Safety
+ * `registry` must be a live pointer from `doodle_registry_new`.
+ */
+DoodleStatus doodle_registry_add_builtin(struct DoodleRegistry *registry, DoodleBuiltin builtin);
 
 /**
  * Makes an `Int` from an `int64_t` (E§4.3). Larger magnitudes use `doodle_make_int_decimal`.
