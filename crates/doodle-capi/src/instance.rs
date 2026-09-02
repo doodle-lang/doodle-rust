@@ -25,9 +25,18 @@ pub struct DoodleInstance {
     /// instance is `Suspended` on a capability, `None` otherwise. Each is a **host-owned**
     /// handle (S-17) the host reads via `doodle_capability_arg` and releases.
     pending_args: Option<Vec<Handle>>,
+    /// The requested dotted path segments of a parked `import` suspension (E§6): `Some` while
+    /// the instance is `SuspendedImport`, `None` otherwise. The host reads them via
+    /// `doodle_import_path_segment` and answers with a `doodle_resolve_import*`.
+    pending_import: Option<Vec<String>>,
 }
 
+mod import;
 mod load;
+pub use import::{
+    doodle_import_path_segment, doodle_resolve_import, doodle_resolve_import_not_found,
+    doodle_resolve_import_raise,
+};
 pub use load::{doodle_free, doodle_load, doodle_load_with_registry};
 
 /// Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
@@ -273,6 +282,7 @@ fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome) -> DoodleOutcome {
     let mut out = DoodleOutcome::blank();
     di.last_raised = None;
     di.pending_args = None;
+    di.pending_import = None;
     match outcome {
         // A module drive completes Void; a returning `fn`'s result (M2b.5) will populate
         // `value` once an intern-to-handle path exists on the boundary (M7.3).
@@ -289,6 +299,7 @@ fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome) -> DoodleOutcome {
             out.kind = DoodleOutcomeKind::SuspendedImport;
             out.capability = request.importer;
             out.request_count = request.path.len() as u32;
+            di.pending_import = Some(request.path);
         }
         Outcome::Paused(reason) => {
             out.kind = DoodleOutcomeKind::Paused;

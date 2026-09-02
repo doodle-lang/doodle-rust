@@ -16,6 +16,13 @@ pub type DoodleHandle = u64;
 /// The null handle: the absence of a value (a `to`/module result, an empty outcome slot).
 pub const DOODLE_NULL_HANDLE: DoodleHandle = 0;
 
+/// A foreign value's finalizer (E§4.5): run **exactly once** when the value dies (a GC that
+/// reclaims it, or `doodle_free`), given only the value's opaque `ptr` — never the instance,
+/// so it structurally cannot re-enter the engine (hence its timing never affects any result or
+/// determinism, §11). It **must not** unwind across the FFI boundary. `ptr` is the same
+/// `uint64_t` passed to `doodle_make_foreign` (a host casts its own pointer to/from it).
+pub type DoodleFinalizer = extern "C" fn(ptr: u64);
+
 /// The result of a fallible C-ABI call: `Ok` on success, else the reason. Fallible calls
 /// return this and write their result through an out-parameter (freeze convention 5).
 #[repr(u32)]

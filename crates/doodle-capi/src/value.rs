@@ -5,10 +5,10 @@
 //! across surfaces (E§4.3/§11). Byte/string results **copy out** into a caller buffer
 //! (freeze convention 4) — no interior pointer escapes the engine.
 
-use crate::abi::{self, DoodleHandle, DoodleKind, DoodleStatus};
+use crate::abi::{self, DoodleFinalizer, DoodleHandle, DoodleKind, DoodleStatus};
 use crate::guard::catch;
 use crate::instance::DoodleInstance;
-use doodle_core::machine::{Handle, Instance, ValueError};
+use doodle_core::machine::{Finalizer, Handle, Instance, ValueError};
 
 /// Copies `bytes` into the caller buffer `buf` of capacity `cap`, writing the full byte
 /// length to `out_len` (which may be NULL). Returns `Ok` on a full copy, or
@@ -201,6 +201,70 @@ pub unsafe extern "C" fn doodle_make_string(
             Err(err) => abi::value_error(err),
         }
     })
+}
+
+/// Makes a **foreign value** (E§4.5): an opaque host object Doodle can hold, pass, and store
+/// by identity but not inspect. `tag` is the host's type discriminator; `ptr` is an opaque
+/// token returned verbatim by `doodle_foreign_ptr` and handed to `finalizer`. A non-NULL
+/// `finalizer` runs **exactly once** when the value dies (E§4.5); it receives only `ptr`, so it
+/// cannot re-enter the engine, and must not unwind.
+///
+/// # Safety
+/// `instance` live; `out` writable; `finalizer` (if non-NULL) a valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn doodle_make_foreign(
+    instance: *mut DoodleInstance,
+    tag: u64,
+    ptr: u64,
+    finalizer: Option<DoodleFinalizer>,
+    out: *mut DoodleHandle,
+) -> DoodleStatus {
+    catch(|| {
+        let Some(inst) = instance_mut(instance) else {
+            return DoodleStatus::ErrNullPointer;
+        };
+        // Trampoline the C finalizer into the engine's `Finalizer` (captures only the fn
+        // pointer + is handed the `ptr`, so it is `Send` and cannot reach the instance).
+        let finalizer: Option<Finalizer> =
+            finalizer.map(|f| Box::new(move |ptr: u64| f(ptr)) as Finalizer);
+        emit(inst.make_foreign(tag, ptr, finalizer), out)
+    })
+}
+
+/// Writes a foreign value's host `tag` (E§4.5). `ErrWrongKind` if the handle is not a foreign
+/// value; `ErrStaleHandle` if freed.
+///
+/// # Safety
+/// `instance` live; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn doodle_foreign_tag(
+    instance: *const DoodleInstance,
+    handle: DoodleHandle,
+    out: *mut u64,
+) -> DoodleStatus {
+    read(
+        instance,
+        |inst| inst.foreign_tag(Handle::from_bits(handle)),
+        out,
+    )
+}
+
+/// Writes a foreign value's opaque host `ptr` (E§4.5), returned verbatim. `ErrWrongKind` if
+/// the handle is not a foreign value; `ErrStaleHandle` if freed.
+///
+/// # Safety
+/// `instance` live; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn doodle_foreign_ptr(
+    instance: *const DoodleInstance,
+    handle: DoodleHandle,
+    out: *mut u64,
+) -> DoodleStatus {
+    read(
+        instance,
+        |inst| inst.foreign_ptr(Handle::from_bits(handle)),
+        out,
+    )
 }
 
 /// Reads an `Int` as `int64_t` (E§4.3). `ErrIntOutOfRange` for a bignum (read it with

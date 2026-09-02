@@ -15,15 +15,27 @@ use doodle_capi::abi::{
 };
 use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_set_limits};
 use doodle_capi::instance::{
-    DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_load,
-    doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
+    DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_import_path_segment,
+    doodle_load, doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
+    doodle_resolve_import, doodle_resolve_import_not_found,
 };
 use doodle_capi::registry::{DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_new};
 use doodle_capi::value::{
-    doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_kind_of, doodle_make_int,
-    doodle_make_nil, doodle_make_string, doodle_release, doodle_string_bytes,
+    doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_foreign_ptr, doodle_foreign_tag,
+    doodle_kind_of, doodle_make_foreign, doodle_make_int, doodle_make_nil, doodle_make_string,
+    doodle_release, doodle_string_bytes,
 };
 use std::ptr;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+
+// Records the most recent foreign-value finalizer call (only the foreign-value test uses
+// these, so no cross-test race). `extern "C"` — the exact type a C host supplies.
+static FINALIZED_COUNT: AtomicU32 = AtomicU32::new(0);
+static FINALIZED_PTR: AtomicU64 = AtomicU64::new(0);
+extern "C" fn record_finalizer(ptr: u64) {
+    FINALIZED_PTR.store(ptr, Relaxed);
+    FINALIZED_COUNT.fetch_add(1, Relaxed);
+}
 
 /// Loads `source` with a registry of `builtins` (in order), asserting success.
 fn load_with(source: &str, builtins: &[DoodleBuiltin]) -> *mut DoodleInstance {
@@ -386,6 +398,108 @@ fn resolving_a_non_suspended_instance_is_a_contract_error() {
         DoodleStatus::ErrContract
     );
     unsafe { doodle_release(inst, nil) };
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn a_foreign_value_round_trips_and_finalizes_once_on_free() {
+    FINALIZED_COUNT.store(0, Relaxed);
+    FINALIZED_PTR.store(0, Relaxed);
+    let inst = load("1\n");
+    let mut h = 0u64;
+    assert_eq!(
+        unsafe { doodle_make_foreign(inst, 7, 42, Some(record_finalizer), &mut h) },
+        DoodleStatus::Ok
+    );
+    // Opaque to Doodle, recognized by tag + ptr.
+    let mut kind = DoodleKind::Nil;
+    assert_eq!(
+        unsafe { doodle_kind_of(inst, h, &mut kind) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(kind, DoodleKind::Foreign);
+    let mut tag = 0u64;
+    assert_eq!(
+        unsafe { doodle_foreign_tag(inst, h, &mut tag) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(tag, 7);
+    let mut p = 0u64;
+    assert_eq!(
+        unsafe { doodle_foreign_ptr(inst, h, &mut p) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(p, 42);
+    // A non-foreign reader on it is a wrong-kind error.
+    let mut n = 0i64;
+    assert_eq!(
+        unsafe { doodle_as_int(inst, h, &mut n) },
+        DoodleStatus::ErrWrongKind
+    );
+    // The handle keeps it live; freeing the instance finalizes it exactly once with its ptr.
+    assert_eq!(FINALIZED_COUNT.load(Relaxed), 0, "not finalized while live");
+    unsafe { doodle_free(inst) };
+    assert_eq!(FINALIZED_COUNT.load(Relaxed), 1, "finalized once at free");
+    assert_eq!(
+        FINALIZED_PTR.load(Relaxed),
+        42,
+        "finalizer received the ptr"
+    );
+}
+
+#[test]
+fn an_import_suspends_exposes_its_path_and_resolves_with_source() {
+    let inst = load("import shapes\n");
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::SuspendedImport);
+    assert_eq!(out.request_count, 1);
+    // Read the (single) path segment.
+    let mut len = 0usize;
+    let _ = unsafe { doodle_import_path_segment(inst, 0, ptr::null_mut(), 0, &mut len) };
+    let mut buf = vec![0u8; len];
+    assert_eq!(
+        unsafe { doodle_import_path_segment(inst, 0, buf.as_mut_ptr(), buf.len(), &mut len) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(std::str::from_utf8(&buf).unwrap(), "shapes");
+    // Resolve with a trivial module source: the module loads and the program completes.
+    let module_src = "let x = 1\n";
+    let canonical = "shapes";
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe {
+            doodle_resolve_import(
+                inst,
+                module_src.as_ptr(),
+                module_src.len(),
+                canonical.as_ptr(),
+                canonical.len(),
+                &mut done,
+            )
+        },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Completed);
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn an_unresolvable_import_raises_module_not_found() {
+    let inst = load("import missing\n");
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::SuspendedImport);
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve_import_not_found(inst, &mut done) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Raised);
+    // The described kind is `module-not-found`.
+    let mut len = 0usize;
+    let _ = unsafe { doodle_raised_kind(inst, ptr::null_mut(), 0, &mut len) };
+    let mut buf = vec![0u8; len];
+    let _ = unsafe { doodle_raised_kind(inst, buf.as_mut_ptr(), buf.len(), &mut len) };
+    assert_eq!(std::str::from_utf8(&buf).unwrap(), "module-not-found");
     unsafe { doodle_free(inst) };
 }
 

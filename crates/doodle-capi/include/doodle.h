@@ -440,6 +440,8 @@ typedef struct DoodleInstance DoodleInstance;
  */
 typedef struct DoodleRegistry DoodleRegistry;
 
+typedef struct Option_DoodleFinalizer Option_DoodleFinalizer;
+
 /**
  * An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
  * Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
@@ -694,6 +696,61 @@ DoodleStatus doodle_output(const struct DoodleInstance *instance,
                            uintptr_t *out_len);
 
 /**
+ * Copies the `index`-th dotted path segment of a parked `import` request (E§6) into `buf`
+ * (copy-out; `out_len` gets the full byte length). E.g. `import shapes.circle` exposes
+ * `"shapes"` at index 0 and `"circle"` at index 1 (`DoodleOutcome::request_count` segments).
+ * `ErrContract` if the instance is not suspended on an import; `ErrIndexOutOfBounds` past the
+ * last segment.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_import_path_segment(const struct DoodleInstance *instance,
+                                        uint32_t index,
+                                        uint8_t *buf,
+                                        uintptr_t cap,
+                                        uintptr_t *out_len);
+
+/**
+ * Resolves a parked `import` (E§6) with the module's `source` (UTF-8) under the host's
+ * `canonical_id` (its singleton-cache identity, L§11.3), then drives on — the module's top
+ * level runs before the importer continues. `ErrContract` if not suspended on an import;
+ * `ErrInvalidUtf8` if either buffer is not UTF-8.
+ *
+ * # Safety
+ * `instance` live; `source`/`canonical_id` point to their `*_len` readable bytes;
+ * `out_outcome` writable.
+ */
+DoodleStatus doodle_resolve_import(struct DoodleInstance *instance,
+                                   const uint8_t *source,
+                                   uintptr_t source_len,
+                                   const uint8_t *canonical_id,
+                                   uintptr_t canonical_id_len,
+                                   struct DoodleOutcome *out_outcome);
+
+/**
+ * Resolves a parked `import` (E§6) as **not found**: the engine raises `module-not-found` in
+ * the importer (a multi-segment path first falls back to a member import, S-7), then drives
+ * on. `ErrContract` if not suspended on an import.
+ *
+ * # Safety
+ * `instance` live; `out_outcome` writable.
+ */
+DoodleStatus doodle_resolve_import_not_found(struct DoodleInstance *instance,
+                                             struct DoodleOutcome *out_outcome);
+
+/**
+ * Resolves a parked `import` (E§6) by **raising** `value` at the `import` site (e.g. a failed
+ * fetch), then drives on. `ErrContract` if not suspended on an import.
+ *
+ * # Safety
+ * `instance` live; `out_outcome` writable.
+ */
+DoodleStatus doodle_resolve_import_raise(struct DoodleInstance *instance,
+                                         DoodleHandle value,
+                                         struct DoodleOutcome *out_outcome);
+
+/**
  * Loads a program from UTF-8 `source` under `config`, writing a new instance to
  * `out_instance` on success (`DoodleStatus_Ok`). The host owns the returned instance and
  * frees it with [`doodle_free`]; `config` is not consumed (free it separately).
@@ -826,6 +883,44 @@ DoodleStatus doodle_make_string(struct DoodleInstance *instance,
                                 const uint8_t *bytes,
                                 uintptr_t bytes_len,
                                 DoodleHandle *out);
+
+/**
+ * Makes a **foreign value** (E§4.5): an opaque host object Doodle can hold, pass, and store
+ * by identity but not inspect. `tag` is the host's type discriminator; `ptr` is an opaque
+ * token returned verbatim by `doodle_foreign_ptr` and handed to `finalizer`. A non-NULL
+ * `finalizer` runs **exactly once** when the value dies (E§4.5); it receives only `ptr`, so it
+ * cannot re-enter the engine, and must not unwind.
+ *
+ * # Safety
+ * `instance` live; `out` writable; `finalizer` (if non-NULL) a valid function pointer.
+ */
+DoodleStatus doodle_make_foreign(struct DoodleInstance *instance,
+                                 uint64_t tag,
+                                 uint64_t ptr,
+                                 struct Option_DoodleFinalizer finalizer,
+                                 DoodleHandle *out);
+
+/**
+ * Writes a foreign value's host `tag` (E§4.5). `ErrWrongKind` if the handle is not a foreign
+ * value; `ErrStaleHandle` if freed.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_foreign_tag(const struct DoodleInstance *instance,
+                                DoodleHandle handle,
+                                uint64_t *out);
+
+/**
+ * Writes a foreign value's opaque host `ptr` (E§4.5), returned verbatim. `ErrWrongKind` if
+ * the handle is not a foreign value; `ErrStaleHandle` if freed.
+ *
+ * # Safety
+ * `instance` live; `out` writable.
+ */
+DoodleStatus doodle_foreign_ptr(const struct DoodleInstance *instance,
+                                DoodleHandle handle,
+                                uint64_t *out);
 
 /**
  * Reads an `Int` as `int64_t` (E§4.3). `ErrIntOutOfRange` for a bignum (read it with

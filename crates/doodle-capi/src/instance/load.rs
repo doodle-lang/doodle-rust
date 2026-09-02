@@ -123,6 +123,7 @@ fn load_impl(
                 inner: instance,
                 last_raised: None,
                 pending_args: None,
+                pending_import: None,
             });
             // SAFETY: `out_instance` was null-checked above and is a writable
             // `*mut *mut DoodleInstance` by the caller's contract.
