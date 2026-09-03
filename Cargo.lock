@@ -171,6 +171,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "doodle-cli"
+version = "0.0.1"
+dependencies = [
+ "conformance-runner",
+ "doodle-core",
+]
+
+[[package]]
 name = "doodle-core"
 version = "0.0.1"
 dependencies = [

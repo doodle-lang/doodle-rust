@@ -1,0 +1,19 @@
+[package]
+name = "doodle-cli"
+description = "The `doodle` command-line host: run a program, or run the conformance suite."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "doodle"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+doodle-core = { path = "../doodle-core" }
+conformance-runner = { path = "../../tools/conformance-runner" }

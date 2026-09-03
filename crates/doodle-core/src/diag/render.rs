@@ -74,6 +74,23 @@ pub fn render_load_error(error: &LoadError, src: &SourceView<'_>) -> String {
     render_diagnostics(&error.diagnostics, src)
 }
 
+/// Renders an uncaught runtime raise (engine spec E§9) in the same snippet style as a static
+/// diagnostic, for a CLI/CI host displaying an [`Outcome::Raised`](crate::drive::Outcome::Raised).
+/// `kind`/`message` come from
+/// [`describe_raised`](crate::machine::Instance::describe_raised) and `span` from
+/// [`Trace::raised_at`](crate::machine::Trace::raised_at). An `error[<kind>]:` header, then (when
+/// `span` is `Some`) a `--> loc` line, the source line, and a `^` underline; the engine exposes
+/// positions, not source, so the caller injects it via [`SourceView`] (the module the span
+/// indexes). Trailing newline included.
+#[must_use]
+pub fn render_raise(kind: &str, message: &str, span: Option<Span>, src: &SourceView<'_>) -> String {
+    let mut out = format!("error[{kind}]: {message}\n");
+    if let Some(span) = span {
+        push_snippet(&mut out, src, &LineIndex::new(src.source), span, '^');
+    }
+    out
+}
+
 fn push_note(out: &mut String, src: &SourceView<'_>, index: &LineIndex, note: &Note) {
     match note.span {
         Some(span) => {
