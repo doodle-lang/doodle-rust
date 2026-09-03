@@ -339,5 +339,10 @@ pub use builtins::{cos, decode, each, encode, length, print, read_line, sin};
 mod platform;
 pub use platform::{clear_canvas, draw_line, set_turtle};
 
+/// The ambient nondeterministic capabilities `time`/`random` (E§5.3/§11) — clock/RNG reads
+/// that suspend so the host resolves them across the recordable boundary (S-19).
+mod ambient;
+pub use ambient::{random, time};
+
 #[cfg(test)]
 mod tests;

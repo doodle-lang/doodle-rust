@@ -15,6 +15,12 @@ use doodle_core::drive::Config;
 use doodle_core::machine::{Instance, Registry};
 use doodle_core::span::ModuleId;
 
+/// The entry-module canonical id (E§3.2) the C ABI loads under. The engine has no magic default
+/// (D-M7-17), so the ABI names its own: a C host that does not (yet) pass a path gets `"main"`, the
+/// conventional entry name. When the ABI grows a caller-supplied module-path parameter this becomes
+/// the fallback for a NULL argument.
+const DEFAULT_MODULE_PATH: &str = "main";
+
 /// Loads a program from UTF-8 `source` under `config`, writing a new instance to
 /// `out_instance` on success (`DoodleStatus_Ok`). The host owns the returned instance and
 /// frees it with [`doodle_free`]; `config` is not consumed (free it separately).
@@ -183,8 +189,12 @@ fn load_program(source: &str, config: Config, registry: Registry) -> Result<Inst
     {
         return Err(LoadFailure::UnsupportedUnicode);
     }
-    let mut instance =
-        Instance::load_with_intrinsics_and_limits(resolved.module, config.limits, registry);
+    let mut instance = Instance::load(
+        resolved.module,
+        config.limits,
+        registry,
+        DEFAULT_MODULE_PATH,
+    );
     instance.set_observation_mode(config.observation_mode);
     Ok(instance)
 }

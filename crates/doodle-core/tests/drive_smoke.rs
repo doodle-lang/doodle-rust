@@ -7,8 +7,8 @@
 //! which returned the last expression's value.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, Outcome, run};
-use doodle_core::machine::{ExceptionKind, Instance, InstanceState};
+use doodle_core::drive::{Directive, Limits, Outcome, run};
+use doodle_core::machine::{ExceptionKind, Instance, InstanceState, Registry};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::normalize;
@@ -33,7 +33,7 @@ fn instance(src: &str) -> Instance {
         "unexpected resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load(resolved.module)
+    Instance::load(resolved.module, Limits::default(), Registry::new(), "main")
 }
 
 /// A single literal expression statement drives to `Completed(None)` — the

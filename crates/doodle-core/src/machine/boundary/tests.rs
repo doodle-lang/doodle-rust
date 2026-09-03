@@ -3,6 +3,8 @@
 //! path that carries a bignum across the boundary without an `i64` ceiling.
 
 use super::*;
+use crate::drive::Limits;
+use crate::machine::Registry;
 use crate::span::ModuleId;
 
 /// A `Ready` instance over a trivial clean-loading program — the boundary API
@@ -25,7 +27,7 @@ fn instance() -> Instance {
         "unexpected resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load(resolved.module)
+    Instance::load(resolved.module, Limits::default(), Registry::new(), "main")
 }
 
 #[test]

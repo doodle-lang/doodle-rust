@@ -9,7 +9,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, run};
+use doodle_core::drive::{Directive, Limits, run};
 use doodle_core::machine::{Instance, Registry};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
@@ -36,7 +36,7 @@ fn run_program(src: &str) {
         "benchmark source must resolve cleanly: {:?}",
         resolved.diagnostics
     );
-    let mut instance = Instance::load_with_intrinsics(resolved.module, Registry::new());
+    let mut instance = Instance::load(resolved.module, Limits::default(), Registry::new(), "main");
     black_box(run(&mut instance, Directive::RunToCompletion));
 }
 

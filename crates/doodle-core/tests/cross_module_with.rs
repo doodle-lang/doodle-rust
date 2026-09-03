@@ -9,7 +9,7 @@
 //! miss, and an imported **non-parameter** a runtime `with-target-not-parameter`.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+use doodle_core::drive::{Directive, ImportResolution, Limits, Outcome, resolve_import, run};
 use doodle_core::machine::{
     Instance, NativeModule, Registry, print_intrinsic, read_line_intrinsic,
 };
@@ -67,7 +67,7 @@ fn run_bundled(main: &str) -> (Instance, Outcome) {
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
     registry.register_module(turtle_native()).unwrap();
-    let mut inst = Instance::load_with_intrinsics(resolved.module, registry);
+    let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
     let mut outcome = run(&mut inst, Directive::RunToCompletion);
     while let Outcome::SuspendedImport(req) = &outcome {
         let res = if req.path == ["turtle"] {

@@ -10,7 +10,7 @@
 
 use crate::model::{Expectation, Mode, Test};
 use doodle_core::diag::{Diagnostic, Severity};
-use doodle_core::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+use doodle_core::drive::{Directive, ImportResolution, Limits, Outcome, resolve_import, run};
 use doodle_core::machine::{
     Instance, Registry, decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic,
     print_intrinsic,
@@ -62,7 +62,9 @@ fn run_dynamic(test: &Test, source: &str, modules_dir: Option<&Path>) -> Result<
         return Err(resolve_errors);
     }
 
-    let mut instance = Instance::load_with_intrinsics(resolved.module, demo_registry());
+    // The entry id `main` matches the drive runner (E§3.2); it does not appear in program output,
+    // so a `run` fixture's transcript is unaffected by it.
+    let mut instance = Instance::load(resolved.module, Limits::default(), demo_registry(), "main");
     let outcome = match drive_to_terminal(&mut instance, modules_dir) {
         Ok(outcome) => outcome,
         Err(reason) => return Err(vec![reason]),

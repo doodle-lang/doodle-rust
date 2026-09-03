@@ -197,9 +197,11 @@ fn a_stepped_and_a_fast_demo_reach_the_same_output() {
 // --- the M6.9 debug + inspection surface (E§8) through the facade ---
 
 #[test]
-fn entry_module_is_the_default_canonical_id() {
+fn entry_module_is_the_playground_canonical_id() {
+    // The browser host names its entry explicitly (D-M7-17); doodle-web reads this to address
+    // breakpoints, so it must be the id the facade loaded under.
     let session = Session::demo("print(1)\n").unwrap();
-    assert_eq!(session.entry_module(), "main");
+    assert_eq!(session.entry_module(), "playground");
 }
 
 #[test]
@@ -218,7 +220,7 @@ fn a_breakpoint_pauses_continue_and_exposes_locals_and_inspection() {
         end\n\
         describe()\n";
     let mut session = Session::demo(source).unwrap();
-    let bp = session.set_breakpoint("main", 5);
+    let bp = session.set_breakpoint("playground", 5);
     assert!(
         session
             .breakpoints()
@@ -333,7 +335,7 @@ fn module_globals_read_through_the_session_with_generation_gating() {
     // A top-level program's variables are module globals (not frame locals), reachable through
     // the frame's home module. Reads are pause-generation gated like the frame bindings.
     let mut session = Session::demo("let count = 7\nconst name = \"hi\"\nprint(count)\n").unwrap();
-    session.set_breakpoint("main", 3);
+    session.set_breakpoint("playground", 3);
     assert_eq!(
         session.drive(Directive::Continue, None),
         DriveOutcome::Paused("breakpoint")

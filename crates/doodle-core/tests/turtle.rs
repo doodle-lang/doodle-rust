@@ -7,7 +7,7 @@
 //! headings), color parsing (named / hex-int / channels), the pen-up = alpha-0 rule, and
 //! that `repeat` runs its block per iteration. No canvas — rendering is M3.6.
 
-use doodle_core::drive::{CapabilityId, Directive, Outcome, Resolution, resolve, run};
+use doodle_core::drive::{CapabilityId, Directive, Limits, Outcome, Resolution, resolve, run};
 use doodle_core::machine::{
     Handle, Instance, Kind, Registry, clear_canvas_intrinsic, cos_intrinsic, draw_line_intrinsic,
     print_intrinsic, set_turtle_intrinsic, sin_intrinsic,
@@ -118,7 +118,12 @@ fn load_turtle(program: &str) -> Instance {
         "resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load_with_intrinsics(resolved.module, turtle_registry())
+    Instance::load(
+        resolved.module,
+        Limits::default(),
+        turtle_registry(),
+        "main",
+    )
 }
 
 /// Drives `program` (with the turtle library prepended) to completion, recording every

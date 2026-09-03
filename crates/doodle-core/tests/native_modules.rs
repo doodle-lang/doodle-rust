@@ -4,7 +4,7 @@
 //! wildcards, and cross-module calls. Foreign-value and record members are M5.4b.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, Outcome, run};
+use doodle_core::drive::{Directive, Limits, Outcome, run};
 use doodle_core::machine::{
     ConstValue, HostError, Instance, NativeModule, Registry, length_intrinsic, print_intrinsic,
 };
@@ -46,7 +46,7 @@ fn run_with_natives(main: &str, natives: Vec<NativeModule>) -> String {
     for native in natives {
         registry.register_module(native).unwrap();
     }
-    let mut inst = Instance::load_with_intrinsics(resolved.module, registry);
+    let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
     let outcome = run(&mut inst, Directive::RunToCompletion);
     assert!(
         matches!(outcome, Outcome::Completed(_)),
@@ -93,7 +93,7 @@ fn a_missing_member_of_a_native_module_raises() {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register_module(util_module()).unwrap();
-    let mut inst = Instance::load_with_intrinsics(resolved.module, registry);
+    let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
     let outcome = run(&mut inst, Directive::RunToCompletion);
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected a raise, got {outcome:?}");

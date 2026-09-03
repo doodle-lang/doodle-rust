@@ -1,5 +1,5 @@
-//! Instance construction (engine spec E§3.1): `create`/`load*`/`load_full` — building a
-//! `Ready` [`Instance`] from a resolved module, seeding its global namespace (S-43) and
+//! Instance construction (engine spec E§3.1): `load` and its config-validated wrapper `create`,
+//! building a `Ready` [`Instance`] from a resolved module, seeding its global namespace (S-43) and
 //! its module top-level frame. Split from `machine.rs` (the `Instance`/`Machine`
 //! definitions and lifecycle) so that file stays within the hygiene length limit; these
 //! carry their own `impl Instance` block, as `lifecycle.rs`/`boundary.rs` do.
@@ -15,28 +15,21 @@ use crate::heap::CellKind;
 use crate::span::ModuleId;
 
 impl Instance {
-    /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1).
-    /// Validates the config first (S-41): a requested Unicode version that is not the
-    /// engine's build-pinned one is rejected — the engine supports exactly its pinned
-    /// version, so a host or replay can assert the expected version at create time
-    /// rather than diverge silently on grapheme/normalization behavior (E§11). `None`
-    /// uses the pinned version.
-    pub fn create(module: ResolvedModule, config: Config) -> Result<Self, ConfigError> {
-        Self::create_with_module_path(module, config, Self::DEFAULT_MODULE_PATH)
-    }
-
-    /// The default canonical id for the entry module (E§3.2) when a host loads through an
-    /// entry point that does not name one. A host that shows filenames (the IDE) passes its
-    /// own path via [`create_with_module_path`](Self::create_with_module_path) so breakpoints
-    /// (E§8.6) and load diagnostics (S-63) address the entry module by that name.
-    pub const DEFAULT_MODULE_PATH: &str = "main";
-
-    /// Like [`create`](Self::create) but names the entry module's canonical id (E§3.2): the
-    /// host-owned identity the entry module is addressed by — for breakpoints (E§8.6), the
-    /// load-diagnostics schema (S-63), and singleton dedupe against a self-import (L§11.3).
-    pub fn create_with_module_path(
+    /// Creates a `Ready` instance for `module` under `config` (engine spec E§3.1), with the
+    /// host-registered `registry` (E§5.5, S-43) and the entry module's canonical id
+    /// `module_path` (E§3.2). Validates the config first (S-41): a requested Unicode version
+    /// that is not the engine's build-pinned one is rejected — the engine supports exactly its
+    /// pinned version, so a host or replay can assert the expected version at create time rather
+    /// than diverge silently on grapheme/normalization behavior (E§11). A `None`
+    /// [`unicode_version`](Config::unicode_version) uses the pinned version.
+    ///
+    /// This is the config-validated wrapper over [`load`](Self::load); a host that needs no
+    /// config validation (default limits, the [`Statement`](ObservationMode::Statement)
+    /// observation mode) calls `load` directly.
+    pub fn create(
         module: ResolvedModule,
         config: Config,
+        registry: intrinsic::Registry,
         module_path: &str,
     ) -> Result<Self, ConfigError> {
         if let Some(requested) = config.unicode_version
@@ -47,12 +40,7 @@ impl Instance {
                 pinned: UNICODE_VERSION,
             });
         }
-        let mut instance = Self::load_full(
-            module,
-            config.limits,
-            intrinsic::Registry::new(),
-            module_path,
-        );
+        let mut instance = Self::load(module, config.limits, registry, module_path);
         instance.set_observation_mode(config.observation_mode);
         Ok(instance)
     }
@@ -63,60 +51,27 @@ impl Instance {
         UNICODE_VERSION
     }
 
-    /// Loads a resolved module into a fresh `Ready` instance with the
-    /// [`Default`](Limits) resource limits and no intrinsics. See [`load_full`](Self::load_full).
-    pub fn load(module: ResolvedModule) -> Self {
-        Self::load_full(
-            module,
-            Limits::default(),
-            intrinsic::Registry::new(),
-            Self::DEFAULT_MODULE_PATH,
-        )
-    }
-
-    /// Loads a resolved module under the given resource limits (E§10.2), no
-    /// intrinsics. See [`load_full`](Self::load_full).
-    pub fn load_with_limits(module: ResolvedModule, limits: Limits) -> Self {
-        Self::load_full(
-            module,
-            limits,
-            intrinsic::Registry::new(),
-            Self::DEFAULT_MODULE_PATH,
-        )
-    }
-
-    /// Loads a resolved module with host-registered intrinsic foreign functions
-    /// (E§5.1, S-43) and the [`Default`](Limits) limits. `registry` holds the
-    /// intrinsics the host registered **before** this load (E§5.5); they seed as
-    /// read-only global names after the program's declarations and the built-in
-    /// type values, so a program's own declaration of the same name shadows one.
-    pub fn load_with_intrinsics(module: ResolvedModule, registry: intrinsic::Registry) -> Self {
-        Self::load_full(
-            module,
-            Limits::default(),
-            registry,
-            Self::DEFAULT_MODULE_PATH,
-        )
-    }
-
-    /// Loads a resolved module with host-registered intrinsics (S-43) under the given
-    /// resource limits (E§10.2) — [`load_with_intrinsics`](Self::load_with_intrinsics)
-    /// and [`load_with_limits`](Self::load_with_limits) combined.
-    pub fn load_with_intrinsics_and_limits(
-        module: ResolvedModule,
-        limits: Limits,
-        registry: intrinsic::Registry,
-    ) -> Self {
-        Self::load_full(module, limits, registry, Self::DEFAULT_MODULE_PATH)
-    }
-
-    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18)
-    /// under the given resource limits (E§10.2) and intrinsic registry (S-43). Each
-    /// module-level name gets an **uninitialized** binding cell (its `let`/`const`
-    /// fills it when it executes; a read before then is a use-before-defined error).
-    /// The module top level becomes an ordinary, drivable `ModuleTopLevel` frame
-    /// whose pending work sequences its statements.
-    fn load_full(
+    /// Loads a resolved module into a fresh `Ready` instance (machine-design §18): the engine's
+    /// one canonical loader (engine spec E§3.1/§3.2). Its inputs are orthogonal, mirroring the
+    /// spec's factoring:
+    ///
+    /// - `limits` — the resource limits (E§10.2);
+    /// - `registry` — the host-registered intrinsic foreign functions and native modules
+    ///   (E§5.1/§5.5, S-43), built **before** this load; the flat intrinsics seed as read-only
+    ///   global names after the program's declarations and the built-in type values, so a
+    ///   program's own declaration of the same name shadows one. Registration order is
+    ///   replay-identity input (E§11);
+    /// - `module_path` — the entry module's **canonical id** (E§3.2): the host-owned identity
+    ///   the entry module is addressed by, for breakpoints (E§8.6), the load-diagnostics schema
+    ///   (S-63), and singleton dedupe against a self-import (L§11.3). The engine has **no** magic
+    ///   default — each host supplies the id it shows the user (the CLI the entry file's path, an
+    ///   IDE its filename, a test whatever it asserts on).
+    ///
+    /// Each module-level name gets an **uninitialized** binding cell (its `let`/`const` fills it
+    /// when it executes; a read before then is a use-before-defined error). The module top level
+    /// becomes an ordinary, drivable `ModuleTopLevel` frame whose pending work sequences its
+    /// statements.
+    pub fn load(
         module: ResolvedModule,
         limits: Limits,
         intrinsics: intrinsic::Registry,

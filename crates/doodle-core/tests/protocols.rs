@@ -7,7 +7,7 @@
 //! observing `print` output and the raised `Error.kind`; static cases read `resolve_diags`.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, Outcome, run};
+use doodle_core::drive::{Directive, Limits, Outcome, run};
 use doodle_core::machine::{Instance, Registry, print_intrinsic, read_line_intrinsic};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -36,7 +36,7 @@ fn instance(main: &str) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    Instance::load(resolved.module, Limits::default(), registry, "main")
 }
 
 /// Runs `main` to completion, asserting it completes cleanly, and returns its output.

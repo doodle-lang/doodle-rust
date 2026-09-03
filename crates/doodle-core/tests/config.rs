@@ -4,7 +4,7 @@
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{Config, ConfigError};
-use doodle_core::machine::Instance;
+use doodle_core::machine::{Instance, Registry};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::{ResolvedModule, resolve};
 use doodle_core::source::normalize;
@@ -36,7 +36,15 @@ fn resolved_module(src: &str) -> ResolvedModule {
 /// engine's pinned version.
 #[test]
 fn create_with_default_config_succeeds() {
-    assert!(Instance::create(resolved_module("1\n"), Config::default()).is_ok());
+    assert!(
+        Instance::create(
+            resolved_module("1\n"),
+            Config::default(),
+            Registry::new(),
+            "main"
+        )
+        .is_ok()
+    );
 }
 
 /// Requesting exactly the engine's pinned version succeeds (S-41).
@@ -46,7 +54,7 @@ fn create_accepts_the_pinned_unicode_version() {
         unicode_version: Some(UNICODE_VERSION),
         ..Config::default()
     };
-    assert!(Instance::create(resolved_module("1\n"), config).is_ok());
+    assert!(Instance::create(resolved_module("1\n"), config, Registry::new(), "main").is_ok());
 }
 
 /// Requesting a version the engine does not support fails at create time with the
@@ -63,7 +71,7 @@ fn create_rejects_an_unsupported_unicode_version() {
         unicode_version: Some(wrong),
         ..Config::default()
     };
-    match Instance::create(resolved_module("1\n"), config) {
+    match Instance::create(resolved_module("1\n"), config, Registry::new(), "main") {
         Ok(_) => panic!("an unsupported Unicode version must be rejected"),
         Err(ConfigError::UnsupportedUnicodeVersion { requested, pinned }) => {
             assert_eq!(requested, wrong);

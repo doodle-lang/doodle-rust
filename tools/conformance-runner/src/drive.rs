@@ -7,7 +7,8 @@ use crate::matcher::{demo_registry, error_messages};
 use crate::model::{DriveAction, DriveScript, DriveStep, StackElem, StopAssertion, Test};
 use doodle_core::drive::ObservationMode;
 use doodle_core::drive::{
-    Directive, EngineFault, ImportResolution, LimitKind, Outcome, PauseReason, resolve_import, run,
+    Directive, EngineFault, ImportResolution, LimitKind, Limits, Outcome, PauseReason,
+    resolve_import, run,
 };
 use doodle_core::machine::{Instance, InstanceState};
 use doodle_core::parse::parse_program;
@@ -41,7 +42,9 @@ pub(crate) fn run_drive(
         return Err(resolve_errors);
     }
 
-    let mut instance = Instance::load_with_intrinsics(resolved.module, demo_registry());
+    // The entry id is `main` — the id a drive fixture's `break:` defaults to (drivescript.rs), so
+    // its breakpoints bind to this module (E§3.2).
+    let mut instance = Instance::load(resolved.module, Limits::default(), demo_registry(), "main");
     apply_setup(&mut instance, script);
 
     let mut reasons = Vec::new();

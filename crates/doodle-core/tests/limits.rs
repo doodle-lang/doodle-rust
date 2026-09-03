@@ -7,7 +7,7 @@
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{Directive, EngineFault, LimitKind, Limits, Outcome, run};
-use doodle_core::machine::Instance;
+use doodle_core::machine::{Instance, Registry};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::normalize;
@@ -32,7 +32,7 @@ fn instance_with_limits(src: &str, limits: Limits) -> Instance {
         "unexpected resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load_with_limits(resolved.module, limits)
+    Instance::load(resolved.module, limits, Registry::new(), "main")
 }
 
 /// Asserts driving `src` under `limits` faults with `LimitExceeded(kind)`.

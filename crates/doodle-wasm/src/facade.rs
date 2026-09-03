@@ -41,6 +41,13 @@ pub use debug::{AuxOutcomeData, CallableInfo, FrameData, GlobalBindingData, Stal
 /// facade's `turtle` constructor.
 const TURTLE_LIBRARY: &str = include_str!("../../../doodle/turtle.doodle");
 
+/// The playground's entry-module canonical id (E§3.2): the single file the user is editing. The
+/// engine has no magic default, so the browser host names its entry explicitly (D-M7-17); it
+/// surfaces as [`entry_module`](Session::entry_module), which doodle-web feeds to breakpoints. It
+/// does not appear in program output, so the conformance-parity `demo`/`turtle` configs stay
+/// bit-identical to the native runner regardless of this id (E§11).
+const ENTRY_MODULE_PATH: &str = "playground";
+
 /// Resource limits for the public browser demo (E§10.2), one per rail: **space** (a 64 MiB heap,
 /// vast headroom for kid turtle programs, KB–MB), **total work** (a large step budget, so a long
 /// animation is paced by the stop button and slice fuel, never cut off), and **single-op latency**
@@ -187,15 +194,11 @@ impl Session {
             return Err(err);
         }
         Ok(Session {
-            instance: Instance::load_with_intrinsics_and_limits(
-                resolved.module,
-                DEMO_LIMITS,
-                registry,
-            ),
+            instance: Instance::load(resolved.module, DEMO_LIMITS, registry, ENTRY_MODULE_PATH),
             source,
             prelude_bytes,
             pause_gen: 0,
-            module_path: Instance::DEFAULT_MODULE_PATH.to_string(),
+            module_path: ENTRY_MODULE_PATH.to_string(),
         })
     }
 

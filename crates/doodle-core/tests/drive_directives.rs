@@ -11,7 +11,8 @@ use doodle_core::drive::{
     resolve, run, run_slice,
 };
 use doodle_core::machine::{
-    Instance, InstanceState, Registry, each_intrinsic, print_intrinsic, read_line_intrinsic,
+    Instance, InstanceState, Registry, each_intrinsic, print_intrinsic, random_intrinsic,
+    read_line_intrinsic, time_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -42,7 +43,7 @@ fn load(src: &str, limits: Limits) -> Instance {
         "resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load_with_limits(resolved.module, limits)
+    Instance::load(resolved.module, limits, Registry::new(), "main")
 }
 
 /// Loads `src` with the `print` and `read_line` intrinsics registered — `print`
@@ -65,7 +66,7 @@ fn instance_with_caps(src: &str) -> Instance {
         "{:?}",
         resolved.diagnostics
     );
-    Instance::load_with_intrinsics(resolved.module, caps_registry())
+    Instance::load(resolved.module, Limits::default(), caps_registry(), "main")
 }
 
 /// print (0), read_line (1), each (2) — the demo intrinsics the drive tests use.
@@ -225,6 +226,57 @@ fn a_capability_suspends_with_its_identity_and_resolves_with_a_value() {
     assert!(matches!(resumed, Outcome::Completed(None)), "{resumed:?}");
     assert_eq!(inst.output(), b"hello\n");
     assert_eq!(inst.state(), InstanceState::Completed);
+}
+
+#[test]
+fn a_custom_entry_path_names_the_entry_module() {
+    // The engine has no magic entry id (D-M7-17): the host supplies it and it becomes the entry
+    // module's canonical id — what `module_canonical_id` reports and what a breakpoint addresses
+    // (E§3.2/§8.6). A breakpoint on that id binds and fires; one on a different id names no
+    // loaded module and stays pending, so it never fires.
+    let module = resolve_clean("let a = 1\nlet b = 2\nprint(b)\n");
+    let mut inst = Instance::load(module, Limits::default(), caps_registry(), "prog.doodle");
+    assert_eq!(inst.module_canonical_id(ModuleId(0)), Some("prog.doodle"));
+
+    inst.set_breakpoint("prog.doodle", 3); // binds: the entry is named prog.doodle
+    inst.set_breakpoint("main", 3); // a wrong id — no such loaded module, so it stays pending
+    let outcome = run(&mut inst, Directive::Continue);
+    let Outcome::Paused(PauseReason::Breakpoint(_)) = outcome else {
+        panic!("expected a breakpoint pause on prog.doodle:3, got {outcome:?}");
+    };
+    assert_eq!(inst.output(), b"", "paused before print(b) ran");
+}
+
+#[test]
+fn time_and_random_suspend_as_capabilities_and_resolve_to_values() {
+    // The ambient reads `time`/`random` are suspending capabilities (E§5.3, D-M7-16/S-19): each
+    // parks a request the host resolves across the recordable boundary, rather than reading a
+    // clock/RNG inline. Registration order fixes the ids — print(0), time(1), random(2) — so a
+    // recording replays each resolution against a stable identity (E§11).
+    let mut registry = Registry::new();
+    registry.register(print_intrinsic()).unwrap();
+    registry.register(time_intrinsic()).unwrap();
+    registry.register(random_intrinsic()).unwrap();
+    let module = resolve_clean("print(time())\nprint(random())\n");
+    let mut inst = Instance::load(module, Limits::default(), registry, "main");
+
+    // `time()` suspends first, naming its capability id and carrying no args.
+    let Outcome::Suspended(req) = run(&mut inst, Directive::RunToCompletion) else {
+        panic!("time() should suspend");
+    };
+    assert_eq!(req.capability, CapabilityId(1));
+    assert!(req.args.is_empty());
+    // The host supplies the clock reading; the program prints it and runs on to `random()`.
+    let clock = inst.make_int(7);
+    let Outcome::Suspended(req2) = resolve(&mut inst, Resolution::Value(clock)) else {
+        panic!("random() should suspend after time() resolves");
+    };
+    assert_eq!(req2.capability, CapabilityId(2));
+    assert!(req2.args.is_empty());
+    let draw = inst.make_int(3);
+    let done = resolve(&mut inst, Resolution::Value(draw));
+    assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
+    assert_eq!(inst.output(), b"7\n3\n");
 }
 
 #[test]
@@ -397,7 +449,7 @@ fn a_limit_tripped_inside_an_each_block_faults() {
         ..Limits::default()
     };
     let module = resolve_clean("each([1]) do (x)\nloop do\n1\nend\nend\n");
-    let mut inst = Instance::load_with_intrinsics_and_limits(module, limits, caps_registry());
+    let mut inst = Instance::load(module, limits, caps_registry(), "main");
     let outcome = run(&mut inst, Directive::RunToCompletion);
     assert!(
         matches!(

@@ -3,7 +3,7 @@
 //! file stays within the hygiene length limit.
 
 use super::*;
-use crate::drive::{Directive, Outcome, run};
+use crate::drive::{Directive, Limits, Outcome, run};
 use crate::machine::Instance;
 use crate::span::ModuleId;
 use std::sync::Arc;
@@ -97,7 +97,7 @@ fn run_with(src: &str, registry: Registry) -> (Instance, Outcome) {
         "resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    let mut inst = Instance::load_with_intrinsics(resolved.module, registry);
+    let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
     let outcome = run(&mut inst, Directive::RunToCompletion);
     (inst, outcome)
 }
@@ -436,9 +436,11 @@ fn a_materialized_foreign_default_survives_a_gc_during_the_call() {
         "{:?}",
         resolved.diagnostics
     );
-    let mut inst = Instance::load_with_intrinsics(
+    let mut inst = Instance::load(
         resolved.module,
+        Limits::default(),
         registry_with(vec![print(), greet_with_default()]),
+        "main",
     );
     inst.collect_at_every_safe_point();
     let outcome = run(&mut inst, Directive::RunToCompletion);

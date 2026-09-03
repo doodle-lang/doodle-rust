@@ -8,7 +8,7 @@
 //! only for its top-level effect.
 
 use doodle_core::drive::{
-    Directive, ImportResolution, Outcome, Resolution, resolve, resolve_import, run,
+    Directive, ImportResolution, Limits, Outcome, Resolution, resolve, resolve_import, run,
 };
 use doodle_core::machine::{
     Instance, InstanceState, Registry, print_intrinsic, read_line_intrinsic,
@@ -41,7 +41,7 @@ fn instance(main: &str) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    Instance::load(resolved.module, Limits::default(), registry, "main")
 }
 
 /// Drives `inst` to a terminal outcome as a **bundling host**: resolves each import

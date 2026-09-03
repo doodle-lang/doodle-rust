@@ -26,7 +26,7 @@ impl Machine {
             intrinsics: intrinsic::Registry::new(),
             output: Vec::new(),
             pending: None,
-            load: modload::ModuleLoad::new(Instance::DEFAULT_MODULE_PATH),
+            load: modload::ModuleLoad::new("main"),
             protocols: super::protocol::Registry::default(),
             // No modules in this bare machine; the prelude id is a placeholder never resolved.
             prelude: crate::span::ModuleId(0),
@@ -126,7 +126,7 @@ fn load_source(src: &str) -> Instance {
         "unexpected resolve diagnostic(s): {:?}",
         resolved.diagnostics
     );
-    Instance::load(resolved.module)
+    Instance::load(resolved.module, Limits::default(), Registry::new(), "main")
 }
 
 /// Advances until a value lands in the register or the machine halts.
@@ -1050,7 +1050,7 @@ fn load_source_with_print_and_limits(src: &str, limits: Limits) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(each_intrinsic()).unwrap();
-    Instance::load_with_intrinsics_and_limits(resolved.module, limits, registry)
+    Instance::load(resolved.module, limits, registry, "main")
 }
 
 // --- M6.7: auxiliary evaluation — host-driven `to_string` (E§8.4, S-22) ---
@@ -1895,7 +1895,7 @@ fn load_source_with_limits(src: &str, limits: Limits) -> Instance {
         resolved.diagnostics.is_empty(),
         "unexpected resolve diagnostic(s)"
     );
-    Instance::load_with_limits(resolved.module, limits)
+    Instance::load(resolved.module, limits, Registry::new(), "main")
 }
 
 /// Drives to halt, forcing a full collection **before every step** — maximal GC
@@ -2489,7 +2489,7 @@ fn load_source_with_print(src: &str) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(each_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    Instance::load(resolved.module, Limits::default(), registry, "main")
 }
 
 /// Drives a multi-module program to its terminal, resolving each `import name` from `mods`

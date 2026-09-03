@@ -5,7 +5,7 @@
 //! `no-such-field`); an `exports` naming an undeclared name is the static `undeclared-export`.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
+use doodle_core::drive::{Directive, ImportResolution, Limits, Outcome, resolve_import, run};
 use doodle_core::machine::{Instance, Registry, print_intrinsic, read_line_intrinsic};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -43,7 +43,7 @@ fn instance(main: &str) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    Instance::load(resolved.module, Limits::default(), registry, "main")
 }
 
 /// Drives `main` as a bundling host that resolves `import lib` to [`LIB`], to a terminal

@@ -46,7 +46,8 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Kind;
+    use crate::drive::Limits;
+    use crate::machine::{Kind, Registry};
     use crate::span::ModuleId;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -71,7 +72,7 @@ mod tests {
             "unexpected resolve diagnostic(s): {:?}",
             resolved.diagnostics
         );
-        Instance::load(resolved.module)
+        Instance::load(resolved.module, Limits::default(), Registry::new(), "main")
     }
 
     /// Wraps `f` as a boxed [`Finalizer`] (the coercion to `dyn FnOnce` needs the target

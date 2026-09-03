@@ -6,7 +6,7 @@
 //! rendering/hashing stays final; compound values keep the M9a placeholder text.
 
 use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, Outcome, run};
+use doodle_core::drive::{Directive, Limits, Outcome, run};
 use doodle_core::machine::{Instance, Registry, print_intrinsic, read_line_intrinsic};
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -35,7 +35,7 @@ fn instance(main: &str) -> Instance {
     let mut registry = Registry::new();
     registry.register(print_intrinsic()).unwrap();
     registry.register(read_line_intrinsic()).unwrap();
-    Instance::load_with_intrinsics(resolved.module, registry)
+    Instance::load(resolved.module, Limits::default(), registry, "main")
 }
 
 /// Runs `main` to completion, asserting clean completion, and returns its captured output.
