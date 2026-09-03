@@ -5,7 +5,8 @@
 //! [`DoodleOutcome::reserved`].
 
 use doodle_core::drive::{Directive, EngineFault, LimitKind, PauseReason};
-use doodle_core::machine::{Kind, ValueError};
+use doodle_core::machine::{BlockOutcome, Kind, ValueError};
+use doodle_core::resolve::BodyKind;
 
 /// An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
 /// Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
@@ -120,6 +121,35 @@ pub enum DoodleObservationMode {
     Statement = 0,
     /// Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
     Subexpression = 1,
+}
+
+/// Whether a host foreign function is a procedure (`to`, yields Void) or a function (`fn`,
+/// yields a value) — the C mirror of the core `BodyKind` a foreign descriptor takes
+/// (`doodle_foreign_desc_new`).
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoodleBodyKind {
+    /// A procedure (`to`): yields no value; its call is a statement (L§8.4).
+    Proc = 0,
+    /// A function (`fn`): yields a value the call consumes.
+    Func = 1,
+}
+
+/// The outcome of a host-invoked reentrant block (`doodle_call_block`, E§5.4/§7.6) — the C
+/// mirror of the core `BlockOutcome`. On `NonLocalExit` or `Halted` the host callback **must
+/// return promptly with no result**; the engine's apply-site backstop (S-46/S-15) faults a
+/// host that drives on regardless, so a violation is a defined `Faulted`, never UB.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoodleBlockOutcome {
+    /// The block completed (fell off its end, or `continue`d).
+    Completed = 0,
+    /// A `break`/`return`/raise exited the block across the host boundary; it is parked for
+    /// the call site to resume once the callback returns.
+    NonLocalExit = 1,
+    /// A fault parked (a limit, the S-15 `NestedSuspend`, or a stale block-argument handle);
+    /// the drive surfaces it once the callback returns.
+    Halted = 2,
 }
 
 /// Which kind of stop a drive reached (E§7.2) — the tag of [`DoodleOutcome`].
@@ -293,6 +323,23 @@ pub(crate) fn fault(fault: EngineFault) -> DoodleFault {
         EngineFault::Cancelled => DoodleFault::Cancelled,
         EngineFault::NestedSuspend => DoodleFault::NestedSuspend,
         EngineFault::Internal => DoodleFault::Internal,
+    }
+}
+
+/// Maps a [`DoodleBodyKind`] to the core [`BodyKind`].
+pub(crate) fn body_kind(k: DoodleBodyKind) -> BodyKind {
+    match k {
+        DoodleBodyKind::Proc => BodyKind::Proc,
+        DoodleBodyKind::Func => BodyKind::Func,
+    }
+}
+
+/// Maps a core [`BlockOutcome`] to its ABI mirror.
+pub(crate) fn block_outcome(outcome: BlockOutcome) -> DoodleBlockOutcome {
+    match outcome {
+        BlockOutcome::Completed => DoodleBlockOutcome::Completed,
+        BlockOutcome::NonLocalExit => DoodleBlockOutcome::NonLocalExit,
+        BlockOutcome::Halted => DoodleBlockOutcome::Halted,
     }
 }
 

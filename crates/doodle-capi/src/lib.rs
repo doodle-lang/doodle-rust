@@ -38,7 +38,11 @@ use std::ffi::{CString, c_char};
 use std::sync::OnceLock;
 
 pub mod abi;
+pub mod call;
+pub mod call_read;
+pub mod call_value;
 pub mod config;
+pub mod desc;
 pub mod guard;
 pub mod instance;
 pub mod registry;

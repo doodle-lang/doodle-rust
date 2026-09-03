@@ -100,13 +100,13 @@ fn make_float_canonicalizes_nan_and_passes_infinities_through() {
     let nan = inst.make_float(f64::NAN);
     assert_eq!(
         inst.as_float(nan).unwrap().to_bits(),
-        super::CANONICAL_NAN_BITS
+        crate::machine::values::CANONICAL_NAN_BITS
     );
     // A NaN with a different payload/sign is canonicalized to the same pattern.
     let other_nan = inst.make_float(f64::from_bits(0xFFF8_0000_0000_0001));
     assert_eq!(
         inst.as_float(other_nan).unwrap().to_bits(),
-        super::CANONICAL_NAN_BITS
+        crate::machine::values::CANONICAL_NAN_BITS
     );
     // ±∞ is inert data (S-56): stored, not canonicalized away.
     let inf = inst.make_float(f64::INFINITY);

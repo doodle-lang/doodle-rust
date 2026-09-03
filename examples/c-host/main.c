@@ -16,6 +16,22 @@ static int fail(const char *msg) {
     return 1;
 }
 
+/* A host foreign `to greet(who="world", body)` (M7.2b): reads its one bound argument as a
+ * handle and invokes the block with it, then frees the arg handle. The callback runs inside the
+ * drive and calls back in through the ctx — never reconstructing a DoodleInstance. */
+static DoodleStatus greet_cb(DoodleCallCtx *ctx, void *user_data) {
+    (void)user_data;
+    DoodleHandle who = DOODLE_NULL_HANDLE;
+    DoodleStatus status = doodle_call_arg(ctx, 0, &who);
+    if (status != DoodleStatus_Ok) {
+        return status;
+    }
+    DoodleBlockOutcome outcome = DoodleBlockOutcome_Completed;
+    status = doodle_call_block(ctx, &who, 1, &outcome);
+    doodle_call_release(ctx, who);
+    return status;
+}
+
 int main(void) {
     const char *version = doodle_version();
     if (version == NULL || strlen(version) == 0) {
@@ -92,6 +108,45 @@ int main(void) {
     }
     doodle_free(pinst);
 
-    printf("c-host smoke: load/drive/handle + registry/print round-trip OK\n");
+    /* Register a host foreign function and drive it: greet() defaults `who` to "world" (a
+     * string default) and invokes its block with it — the M7.2b control-inversion accept path,
+     * exercised from real C. */
+    DoodleRegistry *freg = doodle_registry_new();
+    if (freg == NULL
+        || doodle_registry_add_builtin(freg, DoodleBuiltin_Print) != DoodleStatus_Ok) {
+        return fail("registry for the foreign-fn smoke failed");
+    }
+    DoodleForeignDesc *desc =
+        doodle_foreign_desc_new((const uint8_t *)"greet", 5, DoodleBodyKind_Proc);
+    if (desc == NULL
+        || doodle_foreign_desc_default_string(desc, (const uint8_t *)"who", 3,
+                                              (const uint8_t *)"world", 5) != DoodleStatus_Ok
+        || doodle_foreign_desc_block_param(desc, (const uint8_t *)"body", 4) != DoodleStatus_Ok
+        || doodle_foreign_desc_set_callback(desc, greet_cb, NULL) != DoodleStatus_Ok
+        || doodle_registry_add_foreign(freg, desc) != DoodleStatus_Ok) {
+        return fail("building/registering the greet foreign function failed");
+    }
+    const char *greeter = "greet() do (who)\nprint(who)\nend\n";
+    DoodleInstance *ginst = NULL;
+    status = doodle_load_with_registry((const uint8_t *)greeter, strlen(greeter), NULL, freg,
+                                       &ginst, NULL, 0, NULL);
+    if (status != DoodleStatus_Ok || ginst == NULL) {
+        return fail("doodle_load_with_registry() for greet failed");
+    }
+    status = doodle_drive(ginst, DoodleDirective_RunToCompletion, &outcome);
+    if (status != DoodleStatus_Ok || outcome.kind != DoodleOutcomeKind_Completed) {
+        doodle_free(ginst);
+        return fail("the greet program did not complete");
+    }
+    char gout[8];
+    size_t gout_len = 0;
+    status = doodle_output(ginst, (uint8_t *)gout, sizeof gout, &gout_len);
+    if (status != DoodleStatus_Ok || gout_len != 6 || memcmp(gout, "world\n", 6) != 0) {
+        doodle_free(ginst);
+        return fail("greet output was not \"world\\n\"");
+    }
+    doodle_free(ginst);
+
+    printf("c-host smoke: load/drive/handle + registry/print + foreign-fn round-trip OK\n");
     return 0;
 }

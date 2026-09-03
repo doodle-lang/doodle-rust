@@ -144,12 +144,16 @@ impl NativeModule {
 
 /// Materializes a native constant onto the heap (E§5.5): a scalar is inline; a string/bytes
 /// value is allocated. String constants must already be NFC (L§4.4) — the host builds them
-/// from Rust `&str`, which the engine trusts here as it does a source literal. Also used to
-/// materialize a foreign-function default recipe per call (`intrinsic::binding`, S-42).
+/// from Rust `&str`, which the engine trusts here as it does a source literal (the C ABI, an
+/// untrusted boundary, NFC-normalizes before building the recipe). A `Float` **is**
+/// canonicalized here (S-28): a `make_float`'s NaN-canonicalization can't run on a recipe that
+/// predates the heap, so a non-canonical NaN default/constant would otherwise leak past the
+/// determinism gate (E§11). Also materializes a foreign-function default per call
+/// (`intrinsic::binding`, S-42).
 pub(crate) fn materialize_const(value: ConstValue, heap: &mut Heap) -> Value {
     match value {
         ConstValue::Int(n) => Value::Int(n),
-        ConstValue::Float(x) => Value::Float(x),
+        ConstValue::Float(x) => Value::Float(super::values::canonical_float(x)),
         ConstValue::Bool(b) => Value::Bool(b),
         ConstValue::Nil => Value::Nil,
         ConstValue::Str(s) => Value::Str(heap.alloc_string(s)),

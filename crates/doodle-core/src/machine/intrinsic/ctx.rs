@@ -19,19 +19,21 @@ use std::sync::Arc;
 
 /// The activation of a synchronous intrinsic call (E§5.2, MD §14): the bound
 /// arguments, the machine/heap state (to read arguments, emit output, and drive a
-/// received block **reentrantly**), and the received block argument, if any. Fields
-/// are private; a callback reaches them through the crate-internal methods.
+/// received block **reentrantly**), and the received block argument, if any. Fields are
+/// `pub(super)` so [`apply`](super::apply) constructs it and the value delegators
+/// ([`intrinsic::values`](super::values)) reach the machine/heap; a callback outside the crate
+/// reaches them only through the methods.
 pub struct IntrinsicCtx<'a> {
-    resolved: &'a ResolvedModule,
-    heap: &'a mut Heap,
-    machine: &'a mut Machine,
+    pub(super) resolved: &'a ResolvedModule,
+    pub(super) heap: &'a mut Heap,
+    pub(super) machine: &'a mut Machine,
     /// The module table (AD5): a reentrant nested drive ([`invoke_block`]) steps the
     /// machine, so it needs the same multi-module context the top drive has — deriving the
     /// executing frame's module's AST per step and reaching cross-module callees.
-    modules: &'a mut [LoadedModule],
-    args: Vec<Value>,
-    block: Option<BlockDescriptor>,
-    call_span: Span,
+    pub(super) modules: &'a mut [LoadedModule],
+    pub(super) args: Vec<Value>,
+    pub(super) block: Option<BlockDescriptor>,
+    pub(super) call_span: Span,
 }
 
 /// The outcome of one reentrant block invocation ([`IntrinsicCtx::invoke_block`]).
@@ -149,6 +151,15 @@ impl IntrinsicCtx<'_> {
                 BlockOutcome::NonLocalExit
             }
         }
+    }
+
+    /// Faults the drive with `Internal` (E§10): the host callback signalled an unrecoverable
+    /// error — it returned a non-`Ok` status, or a panic was caught crossing the C boundary.
+    /// A host *raise* is [`HostReply::Raise`](super::HostReply::Raise) instead; this is for
+    /// the ABI-level failures a raise can't express. `apply` surfaces the parked fault and
+    /// stops, superseding any reply — so the drive ends `Faulted`, never on torn state.
+    pub fn fault_host(&mut self) {
+        self.machine.pending_fault = Some(EngineFault::Internal);
     }
 
     /// **Test-only:** requests cancellation of the instance (E§10.1) from inside this
@@ -390,14 +401,19 @@ pub(crate) fn apply(
             }
             // No parked transfer: map the reply. A `to` yields Void; a `fn`'s value goes to
             // the register; a `Raise` arms the host's value at the call site (E§7.5), like a
-            // capability's `resolve(Raise)`. A stale result/raise handle is a host-contract
-            // violation → `Internal` fault.
+            // capability's `resolve(Raise)`. `set_result`/`set_raise` **consume** the handle —
+            // resolve it, then release it (the value stays rooted by `reg`/`unwind`, set before
+            // the next safe point), so the host never manages a result/raise handle's lifetime.
+            // A stale handle is a host-contract violation → `Internal` fault.
             match reply {
                 HostReply::Value(handle) => {
                     let value = match handle {
                         None => None,
                         Some(h) => match machine.handles.resolve(h) {
-                            Ok(v) => Some(v),
+                            Ok(v) => {
+                                machine.handles.release(h).ok();
+                                Some(v)
+                            }
                             Err(_) => {
                                 machine.pending_fault = Some(EngineFault::Internal);
                                 return Ok(());
@@ -413,7 +429,10 @@ pub(crate) fn apply(
                 }
                 HostReply::Raise(h) => {
                     let value = match machine.handles.resolve(h) {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            machine.handles.release(h).ok();
+                            v
+                        }
                         Err(_) => {
                             machine.pending_fault = Some(EngineFault::Internal);
                             return Ok(());

@@ -11,20 +11,34 @@
 #![allow(clippy::undocumented_unsafe_blocks)]
 
 use doodle_capi::abi::{
-    DoodleDirective, DoodleFault, DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
+    DOODLE_NULL_HANDLE, DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault,
+    DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
+use doodle_capi::call::{
+    DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_block, doodle_call_set_raise,
+    doodle_call_set_result,
+};
+use doodle_capi::call_read::{doodle_call_as_int, doodle_call_release};
+use doodle_capi::call_value::{doodle_call_make_int, doodle_call_make_string};
 use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_set_limits};
+use doodle_capi::desc::{
+    DoodleForeignDesc, doodle_foreign_desc_block_param, doodle_foreign_desc_default_string,
+    doodle_foreign_desc_new, doodle_foreign_desc_param, doodle_foreign_desc_set_callback,
+};
 use doodle_capi::instance::{
     DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_import_path_segment,
     doodle_load, doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
     doodle_resolve_import, doodle_resolve_import_not_found,
 };
-use doodle_capi::registry::{DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_new};
+use doodle_capi::registry::{
+    DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_new,
+};
 use doodle_capi::value::{
     doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_foreign_ptr, doodle_foreign_tag,
     doodle_kind_of, doodle_make_foreign, doodle_make_int, doodle_make_nil, doodle_make_string,
     doodle_release, doodle_string_bytes,
 };
+use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
@@ -516,4 +530,177 @@ fn output_is_empty_without_a_print_capability() {
     );
     assert_eq!(len, 0);
     unsafe { doodle_free(inst) };
+}
+
+// ---- M7.2b: host foreign functions through the C ABI ---------------------------------------
+
+/// A host `to` `greet(who="world", body)`: reads its one bound argument as a handle and invokes
+/// the block with it, then frees the arg handle. The accept criterion — a default + a block, both
+/// binding per L§8.3, registered and driven entirely across the C ABI.
+extern "C" fn greet_cb(ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    let mut who = DOODLE_NULL_HANDLE;
+    let status = unsafe { doodle_call_arg(ctx, 0, &mut who) };
+    if status != DoodleStatus::Ok {
+        return status;
+    }
+    let mut outcome = DoodleBlockOutcome::Completed;
+    let status = unsafe { doodle_call_block(ctx, &who, 1, &mut outcome) };
+    let _ = unsafe { doodle_call_release(ctx, who) };
+    status
+}
+
+/// A host `fn` `add(a, b)`: reads both integer args, constructs their sum through the ctx, and
+/// sets it as the result (which consumes that handle); frees the arg handles.
+extern "C" fn add_cb(ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    let (mut ha, mut hb) = (DOODLE_NULL_HANDLE, DOODLE_NULL_HANDLE);
+    if unsafe { doodle_call_arg(ctx, 0, &mut ha) } != DoodleStatus::Ok
+        || unsafe { doodle_call_arg(ctx, 1, &mut hb) } != DoodleStatus::Ok
+    {
+        return DoodleStatus::ErrContract;
+    }
+    let (mut a, mut b) = (0i64, 0i64);
+    if unsafe { doodle_call_as_int(ctx, ha, &mut a) } != DoodleStatus::Ok
+        || unsafe { doodle_call_as_int(ctx, hb, &mut b) } != DoodleStatus::Ok
+    {
+        return DoodleStatus::ErrWrongKind;
+    }
+    let mut sum = DOODLE_NULL_HANDLE;
+    if unsafe { doodle_call_make_int(ctx, a + b, &mut sum) } != DoodleStatus::Ok {
+        return DoodleStatus::ErrContract;
+    }
+    let status = unsafe { doodle_call_set_result(ctx, sum) }; // consumes `sum`
+    let _ = unsafe { doodle_call_release(ctx, ha) };
+    let _ = unsafe { doodle_call_release(ctx, hb) };
+    status
+}
+
+/// A host `to` `boom()`: constructs a string through the ctx and raises it at the call site.
+extern "C" fn boom_cb(ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    let msg = b"boom";
+    let mut handle = DOODLE_NULL_HANDLE;
+    let status = unsafe { doodle_call_make_string(ctx, msg.as_ptr(), msg.len(), &mut handle) };
+    if status != DoodleStatus::Ok {
+        return status;
+    }
+    unsafe { doodle_call_set_raise(ctx, handle) } // consumes `handle`
+}
+
+/// Registers `print` + a foreign function (named `name` of `kind`, its parameters built by
+/// `build`, its body `callback`), loads and drives `source`, asserts it completed, and returns
+/// the captured output.
+fn run_with_foreign(
+    source: &str,
+    name: &[u8],
+    kind: DoodleBodyKind,
+    build: impl FnOnce(*mut DoodleForeignDesc),
+    callback: DoodleForeignFn,
+) -> Vec<u8> {
+    let registry = doodle_registry_new();
+    assert_eq!(
+        unsafe { doodle_registry_add_builtin(registry, DoodleBuiltin::Print) },
+        DoodleStatus::Ok
+    );
+    let desc = unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), kind) };
+    assert!(!desc.is_null());
+    build(desc);
+    assert_eq!(
+        unsafe { doodle_foreign_desc_set_callback(desc, callback, ptr::null_mut()) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_registry_add_foreign(registry, desc) },
+        DoodleStatus::Ok
+    );
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            doodle_load_with_registry(
+                source.as_ptr(),
+                source.len(),
+                ptr::null(),
+                registry,
+                &mut inst,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        DoodleStatus::Ok
+    );
+    let outcome = drive(inst);
+    assert_eq!(outcome.kind, DoodleOutcomeKind::Completed, "{outcome:?}");
+    let out = read_output(inst);
+    unsafe { doodle_free(inst) };
+    out
+}
+
+#[test]
+fn a_host_foreign_to_with_default_and_block_binds_and_invokes_through_c() {
+    // The M7 accept criterion, end-to-end across the C ABI: an omitted argument binds the
+    // descriptor's string default ("world"); a passed argument overrides it ("moon"); the block
+    // is invoked reentrantly with the bound value each time.
+    let out = run_with_foreign(
+        "greet() do (who)\nprint(who)\nend\ngreet(\"moon\") do (who)\nprint(who)\nend\n",
+        b"greet",
+        DoodleBodyKind::Proc,
+        |desc| {
+            let (who, world, body) = (b"who".as_slice(), b"world".as_slice(), b"body".as_slice());
+            assert_eq!(
+                unsafe {
+                    doodle_foreign_desc_default_string(
+                        desc,
+                        who.as_ptr(),
+                        who.len(),
+                        world.as_ptr(),
+                        world.len(),
+                    )
+                },
+                DoodleStatus::Ok
+            );
+            assert_eq!(
+                unsafe { doodle_foreign_desc_block_param(desc, body.as_ptr(), body.len()) },
+                DoodleStatus::Ok
+            );
+        },
+        greet_cb,
+    );
+    assert_eq!(out, b"world\nmoon\n");
+}
+
+#[test]
+fn a_host_foreign_fn_reads_args_and_returns_a_constructed_result_through_c() {
+    // A `fn` foreign function that reads its integer args through the ctx value API and returns a
+    // freshly-constructed sum: add(2, 3) => 5.
+    let out = run_with_foreign(
+        "print(add(2, 3))\n",
+        b"add",
+        DoodleBodyKind::Func,
+        |desc| {
+            let (a, b) = (b"a".as_slice(), b"b".as_slice());
+            assert_eq!(
+                unsafe { doodle_foreign_desc_param(desc, a.as_ptr(), a.len()) },
+                DoodleStatus::Ok
+            );
+            assert_eq!(
+                unsafe { doodle_foreign_desc_param(desc, b.as_ptr(), b.len()) },
+                DoodleStatus::Ok
+            );
+        },
+        add_cb,
+    );
+    assert_eq!(out, b"5\n");
+}
+
+#[test]
+fn a_host_foreign_callback_raises_a_constructed_value_through_c() {
+    // `boom()` raises the string "boom" it builds through the ctx; a `try`/`rescue` binds `e` to
+    // that exact value and prints it — proving the raise path and in-callback construction.
+    let out = run_with_foreign(
+        "try\nboom()\nrescue e\nprint(e)\nend\n",
+        b"boom",
+        DoodleBodyKind::Proc,
+        |_desc| {},
+        boom_cb,
+    );
+    assert_eq!(out, b"boom\n");
 }

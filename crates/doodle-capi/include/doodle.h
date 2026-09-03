@@ -14,31 +14,6 @@
 
 
 /**
- * The observation-mode granularity (E§8.8): per-statement (default) or per-subexpression.
- */
-enum DoodleObservationMode
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * Per-statement safe points only (the default).
-   */
-  DoodleObservationMode_Statement = 0,
-  /**
-   * Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
-   */
-  DoodleObservationMode_Subexpression = 1,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleObservationMode DoodleObservationMode;
-#else
-typedef uint32_t DoodleObservationMode;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
  * The result of a fallible C-ABI call: `Ok` on success, else the reason. Fallible calls
  * return this and write their result through an out-parameter (freeze convention 5).
  */
@@ -111,6 +86,161 @@ enum DoodleStatus
 typedef enum DoodleStatus DoodleStatus;
 #else
 typedef uint32_t DoodleStatus;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * The outcome of a host-invoked reentrant block (`doodle_call_block`, E§5.4/§7.6) — the C
+ * mirror of the core `BlockOutcome`. On `NonLocalExit` or `Halted` the host callback **must
+ * return promptly with no result**; the engine's apply-site backstop (S-46/S-15) faults a
+ * host that drives on regardless, so a violation is a defined `Faulted`, never UB.
+ */
+enum DoodleBlockOutcome
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The block completed (fell off its end, or `continue`d).
+   */
+  DoodleBlockOutcome_Completed = 0,
+  /**
+   * A `break`/`return`/raise exited the block across the host boundary; it is parked for
+   * the call site to resume once the callback returns.
+   */
+  DoodleBlockOutcome_NonLocalExit = 1,
+  /**
+   * A fault parked (a limit, the S-15 `NestedSuspend`, or a stale block-argument handle);
+   * the drive surfaces it once the callback returns.
+   */
+  DoodleBlockOutcome_Halted = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleBlockOutcome DoodleBlockOutcome;
+#else
+typedef uint32_t DoodleBlockOutcome;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A value's kind (E§4.4), the C mirror of `doodle_core`'s `Kind`.
+ */
+enum DoodleKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * `nil` (L§4.9).
+   */
+  DoodleKind_Nil = 0,
+  /**
+   * A boolean (L§4.1).
+   */
+  DoodleKind_Bool = 1,
+  /**
+   * An integer of any magnitude (L§4.2).
+   */
+  DoodleKind_Int = 2,
+  /**
+   * A float (L§4.3).
+   */
+  DoodleKind_Float = 3,
+  /**
+   * A string (L§4.4).
+   */
+  DoodleKind_String = 4,
+  /**
+   * A byte string (L§4.5).
+   */
+  DoodleKind_Bytes = 5,
+  /**
+   * A list (L§4.6).
+   */
+  DoodleKind_List = 6,
+  /**
+   * A dict (L§4.7).
+   */
+  DoodleKind_Dict = 7,
+  /**
+   * A record (L§4.14).
+   */
+  DoodleKind_Record = 8,
+  /**
+   * A callable (L§6).
+   */
+  DoodleKind_Callable = 9,
+  /**
+   * A module value (L§9).
+   */
+  DoodleKind_Module = 10,
+  /**
+   * A type value (L§4.12).
+   */
+  DoodleKind_Type = 11,
+  /**
+   * A foreign (host) value (E§4.5).
+   */
+  DoodleKind_Foreign = 12,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleKind DoodleKind;
+#else
+typedef uint32_t DoodleKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * The observation-mode granularity (E§8.8): per-statement (default) or per-subexpression.
+ */
+enum DoodleObservationMode
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * Per-statement safe points only (the default).
+   */
+  DoodleObservationMode_Statement = 0,
+  /**
+   * Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
+   */
+  DoodleObservationMode_Subexpression = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleObservationMode DoodleObservationMode;
+#else
+typedef uint32_t DoodleObservationMode;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Whether a host foreign function is a procedure (`to`, yields Void) or a function (`fn`,
+ * yields a value) — the C mirror of the core `BodyKind` a foreign descriptor takes
+ * (`doodle_foreign_desc_new`).
+ */
+enum DoodleBodyKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * A procedure (`to`): yields no value; its call is a statement (L§8.4).
+   */
+  DoodleBodyKind_Proc = 0,
+  /**
+   * A function (`fn`): yields a value the call consumes.
+   */
+  DoodleBodyKind_Func = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleBodyKind DoodleBodyKind;
+#else
+typedef uint32_t DoodleBodyKind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -350,73 +480,12 @@ typedef uint32_t DoodleBuiltin;
 #endif // __cplusplus
 
 /**
- * A value's kind (E§4.4), the C mirror of `doodle_core`'s `Kind`.
+ * The re-entry context handed to a host foreign callback (opaque to C). Wraps the raw
+ * `&mut IntrinsicCtx` the engine threaded down, a one-shot liveness flag, and the callback's
+ * pending reply. **Valid only for the dynamic extent of the callback** — the `live` flag makes
+ * a stashed-and-reused ctx a defined `ErrContract`, never a dangling deref.
  */
-enum DoodleKind
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * `nil` (L§4.9).
-   */
-  DoodleKind_Nil = 0,
-  /**
-   * A boolean (L§4.1).
-   */
-  DoodleKind_Bool = 1,
-  /**
-   * An integer of any magnitude (L§4.2).
-   */
-  DoodleKind_Int = 2,
-  /**
-   * A float (L§4.3).
-   */
-  DoodleKind_Float = 3,
-  /**
-   * A string (L§4.4).
-   */
-  DoodleKind_String = 4,
-  /**
-   * A byte string (L§4.5).
-   */
-  DoodleKind_Bytes = 5,
-  /**
-   * A list (L§4.6).
-   */
-  DoodleKind_List = 6,
-  /**
-   * A dict (L§4.7).
-   */
-  DoodleKind_Dict = 7,
-  /**
-   * A record (L§4.14).
-   */
-  DoodleKind_Record = 8,
-  /**
-   * A callable (L§6).
-   */
-  DoodleKind_Callable = 9,
-  /**
-   * A module value (L§9).
-   */
-  DoodleKind_Module = 10,
-  /**
-   * A type value (L§4.12).
-   */
-  DoodleKind_Type = 11,
-  /**
-   * A foreign (host) value (E§4.5).
-   */
-  DoodleKind_Foreign = 12,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleKind DoodleKind;
-#else
-typedef uint32_t DoodleKind;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
+typedef struct DoodleCallCtx DoodleCallCtx;
 
 /**
  * An opaque instance configuration under construction. Built with `doodle_config_new`,
@@ -424,6 +493,14 @@ typedef uint32_t DoodleKind;
  * with `doodle_config_free`.
  */
 typedef struct DoodleConfig DoodleConfig;
+
+/**
+ * A host foreign-function descriptor under construction (E§5.1). Built with
+ * `doodle_foreign_desc_new`, filled with the `doodle_foreign_desc_*` builders, then
+ * **consumed** by `doodle_registry_add_foreign` (or discarded with `doodle_foreign_desc_free`).
+ * Opaque to C.
+ */
+typedef struct DoodleForeignDesc DoodleForeignDesc;
 
 /**
  * A loaded Doodle program: the engine [`Instance`] plus a little host-facing state — the
@@ -449,6 +526,15 @@ typedef struct Option_DoodleFinalizer Option_DoodleFinalizer;
  * reserved null handle (no value), never a live handle.
  */
 typedef uint64_t DoodleHandle;
+
+/**
+ * A C host foreign-function callback (E§5.2): given a [`DoodleCallCtx`] (valid only for the
+ * call's dynamic extent) and its registered `user_data`, it reads arguments, may invoke its
+ * block, and reports a result/raise via `doodle_call_set_result`/`doodle_call_set_raise`.
+ * Returns `DoodleStatus_Ok` on success; a non-`Ok` return (or a panic) faults the drive
+ * `Internal` — a Doodle-level error is a *raise* (`doodle_call_set_raise`), not a status.
+ */
+typedef DoodleStatus (*DoodleForeignFn)(struct DoodleCallCtx *ctx, void *user_data);
 
 /**
  * The result of a drive (E§7.2), written by `doodle_drive`/`doodle_resolve`. A flat
@@ -534,6 +620,295 @@ const char *doodle_version(void);
 uint32_t doodle_abi_version(void);
 
 /**
+ * Writes the number of bound (non-block) arguments this call received (E§5.2) — read each with
+ * [`doodle_call_arg`]. `ErrContract` if the ctx has outlived the callback.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`; `out` writable.
+ */
+DoodleStatus doodle_call_arg_count(struct DoodleCallCtx *ctx, uint32_t *out);
+
+/**
+ * Interns the `index`-th bound argument as a fresh **host-owned** handle (E§4.2) and writes it
+ * to `out`; the host reads it with the ordinary `doodle_as_*` and `doodle_release`s it.
+ * `ErrIndexOutOfBounds` past the last argument; `ErrContract` if the ctx has outlived the call.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`; `out` writable.
+ */
+DoodleStatus doodle_call_arg(struct DoodleCallCtx *ctx, uint32_t index, DoodleHandle *out);
+
+/**
+ * Invokes this call's received block **reentrantly** (E§5.4/§7.6) with the `n` argument handles
+ * at `args`, writing the [`DoodleBlockOutcome`] to `out`. On `NonLocalExit`/`Halted` the
+ * callback **must return promptly with no result**. Routes through
+ * [`IntrinsicCtx::invoke_block_handles`] (never a second `&mut Instance`). `ErrContract` if the
+ * ctx has outlived the callback.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`; `args` points to `n` readable handles (or
+ * NULL when `n` is 0); `out` writable.
+ */
+DoodleStatus doodle_call_block(struct DoodleCallCtx *ctx,
+                               const DoodleHandle *args,
+                               uint32_t n,
+                               DoodleBlockOutcome *out);
+
+/**
+ * Appends `len` bytes at `bytes` to the instance's output sink (the same sink `print` writes,
+ * read via `doodle_output`). `ErrContract` if the ctx has outlived the callback.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`; `bytes` points to `len` readable bytes (or
+ * NULL when `len` is 0).
+ */
+DoodleStatus doodle_call_emit(struct DoodleCallCtx *ctx, const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Sets this `fn` call's result to the value named by `handle` (E§5.2) — the value the call
+ * yields. A `to` sets nothing (leaving Void). **Consumes `handle`**: the engine resolves it and
+ * releases it after the callback returns, so the host must not release or reuse it afterward.
+ * `ErrContract` if the ctx has outlived the call.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`.
+ */
+DoodleStatus doodle_call_set_result(struct DoodleCallCtx *ctx, DoodleHandle handle);
+
+/**
+ * Raises the value named by `handle` at this call site (E§5.2/§7.5), like a capability's
+ * `resolve` raise — the value *is* the exception (a program `rescue e` binds it as-is). The
+ * callback should then return `DoodleStatus_Ok`. **Consumes `handle`** (as
+ * `doodle_call_set_result` does): do not release or reuse it. `ErrContract` if the ctx is dead.
+ *
+ * # Safety
+ * `ctx` must be the callback's live `DoodleCallCtx`.
+ */
+DoodleStatus doodle_call_set_raise(struct DoodleCallCtx *ctx, DoodleHandle handle);
+
+/**
+ * Writes the value's kind (E§4.4). `ErrStaleHandle` if the handle is freed.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_kind_of(struct DoodleCallCtx *ctx, DoodleHandle handle, DoodleKind *out);
+
+/**
+ * Reads an `Int` as `int64_t` (E§4.3). `ErrIntOutOfRange` for a bignum; `ErrWrongKind` otherwise.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_as_int(struct DoodleCallCtx *ctx, DoodleHandle handle, int64_t *out);
+
+/**
+ * Reads a `Float` as `double` (E§4.3).
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_as_float(struct DoodleCallCtx *ctx, DoodleHandle handle, double *out);
+
+/**
+ * Reads a `Bool` (E§4.1).
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_as_bool(struct DoodleCallCtx *ctx, DoodleHandle handle, bool *out);
+
+/**
+ * Writes whether the value is `nil` (E§4.9) — `ErrStaleHandle` if freed, never `ErrWrongKind`.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_is_nil(struct DoodleCallCtx *ctx, DoodleHandle handle, bool *out);
+
+/**
+ * Writes the number of elements in a list (E§4.6). `ErrWrongKind` if not a list.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_list_length(struct DoodleCallCtx *ctx,
+                                     DoodleHandle handle,
+                                     uintptr_t *out);
+
+/**
+ * Writes a foreign value's host `tag` (E§4.5). `ErrWrongKind` if not a foreign value.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_foreign_tag(struct DoodleCallCtx *ctx, DoodleHandle handle, uint64_t *out);
+
+/**
+ * Writes a foreign value's opaque host `ptr` (E§4.5), verbatim. `ErrWrongKind` if not a foreign.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_foreign_ptr(struct DoodleCallCtx *ctx, DoodleHandle handle, uint64_t *out);
+
+/**
+ * Copies an `Int`'s value as base-10 decimal into `buf` (copy-out; `out_len` gets the full
+ * length) — the arbitrary-precision counterpart of [`doodle_call_as_int`].
+ *
+ * # Safety
+ * `ctx` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_call_as_int_decimal(struct DoodleCallCtx *ctx,
+                                        DoodleHandle handle,
+                                        uint8_t *buf,
+                                        uintptr_t cap,
+                                        uintptr_t *out_len);
+
+/**
+ * Copies a `String`'s NFC UTF-8 bytes into `buf` (copy-out; `out_len` gets the full byte length).
+ *
+ * # Safety
+ * `ctx` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_call_string_bytes(struct DoodleCallCtx *ctx,
+                                      DoodleHandle handle,
+                                      uint8_t *buf,
+                                      uintptr_t cap,
+                                      uintptr_t *out_len);
+
+/**
+ * Copies a byte string's raw bytes into `buf` (copy-out; `out_len` gets the full length).
+ *
+ * # Safety
+ * `ctx` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_call_as_bytes(struct DoodleCallCtx *ctx,
+                                  DoodleHandle handle,
+                                  uint8_t *buf,
+                                  uintptr_t cap,
+                                  uintptr_t *out_len);
+
+/**
+ * Releases a handle the callback obtained (E§4.2): an arg handle from `doodle_call_arg` or a
+ * value it constructed. `ErrStaleHandle` if already freed. Release each exactly once.
+ *
+ * # Safety
+ * `ctx` the callback's live `DoodleCallCtx`.
+ */
+DoodleStatus doodle_call_release(struct DoodleCallCtx *ctx, DoodleHandle handle);
+
+/**
+ * Constructs an integer (E§4.3) on the callback's ctx.
+ *
+ * # Safety
+ * `ctx` the callback's live `DoodleCallCtx`; `out` writable.
+ */
+DoodleStatus doodle_call_make_int(struct DoodleCallCtx *ctx, int64_t value, DoodleHandle *out);
+
+/**
+ * Constructs an integer of any magnitude from base-10 `decimal` (E§4.3). `ErrMalformedInt` if
+ * the text is not a base-10 integer literal.
+ *
+ * # Safety
+ * `ctx` live; `decimal` points to `decimal_len` readable bytes; `out` writable.
+ */
+DoodleStatus doodle_call_make_int_decimal(struct DoodleCallCtx *ctx,
+                                          const uint8_t *decimal,
+                                          uintptr_t decimal_len,
+                                          DoodleHandle *out);
+
+/**
+ * Constructs a float (E§4.3); any NaN is canonicalized (E§11).
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_make_float(struct DoodleCallCtx *ctx, double value, DoodleHandle *out);
+
+/**
+ * Constructs a boolean (E§4.1).
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_make_bool(struct DoodleCallCtx *ctx, bool value, DoodleHandle *out);
+
+/**
+ * Constructs `nil` (E§4.9).
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_make_nil(struct DoodleCallCtx *ctx, DoodleHandle *out);
+
+/**
+ * Constructs a string from UTF-8 `bytes` (E§4.4): validated + NFC-normalized. `ErrInvalidUtf8`
+ * if the bytes are not well-formed UTF-8.
+ *
+ * # Safety
+ * `ctx` live; `bytes` points to `bytes_len` readable bytes (or NULL with 0); `out` writable.
+ */
+DoodleStatus doodle_call_make_string(struct DoodleCallCtx *ctx,
+                                     const uint8_t *bytes,
+                                     uintptr_t bytes_len,
+                                     DoodleHandle *out);
+
+/**
+ * Constructs a byte string (E§4.5): raw bytes, no encoding or normalization.
+ *
+ * # Safety
+ * `ctx` live; `bytes` points to `bytes_len` readable bytes (or NULL with 0); `out` writable.
+ */
+DoodleStatus doodle_call_make_bytes(struct DoodleCallCtx *ctx,
+                                    const uint8_t *bytes,
+                                    uintptr_t bytes_len,
+                                    DoodleHandle *out);
+
+/**
+ * Constructs an empty list (E§4.6); grow it with [`doodle_call_list_append`].
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_make_list(struct DoodleCallCtx *ctx, DoodleHandle *out);
+
+/**
+ * Appends the value `value` to the list `list` (E§4.6). `ErrWrongKind` if `list` is not a list.
+ *
+ * # Safety
+ * `ctx` the callback's live `DoodleCallCtx`.
+ */
+DoodleStatus doodle_call_list_append(struct DoodleCallCtx *ctx,
+                                     DoodleHandle list,
+                                     DoodleHandle value);
+
+/**
+ * Constructs a foreign (host) value (E§4.5): an opaque `tag`/`ptr` with an exactly-once
+ * `finalizer` (which receives only `ptr` and must not unwind).
+ *
+ * # Safety
+ * `ctx` live; `out` writable; `finalizer` (if non-NULL) a valid function pointer.
+ */
+DoodleStatus doodle_call_make_foreign(struct DoodleCallCtx *ctx,
+                                      uint64_t tag,
+                                      uint64_t ptr,
+                                      struct Option_DoodleFinalizer finalizer,
+                                      DoodleHandle *out);
+
+/**
+ * A fresh **host-owned** handle to the element at `index` of a list (E§4.6). `ErrWrongKind` if
+ * not a list; `ErrIndexOutOfBounds` past the end.
+ *
+ * # Safety
+ * `ctx` live; `out` writable.
+ */
+DoodleStatus doodle_call_list_get(struct DoodleCallCtx *ctx,
+                                  DoodleHandle list,
+                                  uintptr_t index,
+                                  DoodleHandle *out);
+
+/**
  * Creates a config with the engine defaults (E§3.1): default limits, statement-granularity
  * observation, and the engine's pinned Unicode version. Returns NULL only on allocation
  * failure. Free it with `doodle_config_free` (loading does not consume it).
@@ -584,6 +959,137 @@ void doodle_config_set_target_unicode(struct DoodleConfig *config,
                                       uint16_t major,
                                       uint16_t minor,
                                       uint16_t micro);
+
+/**
+ * Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind`. Returns
+ * NULL on allocation failure, a NULL name (with a non-zero length), or a non-UTF-8 name.
+ * Populate it with the `doodle_foreign_desc_*` builders (in the parameter order wanted), then
+ * pass it to `doodle_registry_add_foreign` (which consumes it) or free it with
+ * `doodle_foreign_desc_free`.
+ *
+ * # Safety
+ * `name` must point to `name_len` readable bytes (or be NULL with `name_len` 0).
+ */
+struct DoodleForeignDesc *doodle_foreign_desc_new(const uint8_t *name,
+                                                  uintptr_t name_len,
+                                                  DoodleBodyKind kind);
+
+/**
+ * Appends a **required** ordinary parameter `name` (L§8.3).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_param(struct DoodleForeignDesc *desc,
+                                       const uint8_t *name,
+                                       uintptr_t name_len);
+
+/**
+ * Appends the **trailing block** parameter `name` (L§8.2): a `do … end` the callback invokes
+ * reentrantly (`doodle_call_block`).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_block_param(struct DoodleForeignDesc *desc,
+                                             const uint8_t *name,
+                                             uintptr_t name_len);
+
+/**
+ * Appends an ordinary parameter `name` with an integer default (L§8.3, D-M7-8).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_default_int(struct DoodleForeignDesc *desc,
+                                             const uint8_t *name,
+                                             uintptr_t name_len,
+                                             int64_t value);
+
+/**
+ * Appends an ordinary parameter `name` with a float default (L§8.3, D-M7-8). Any NaN is
+ * canonicalized when the recipe materializes (S-28).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_default_float(struct DoodleForeignDesc *desc,
+                                               const uint8_t *name,
+                                               uintptr_t name_len,
+                                               double value);
+
+/**
+ * Appends an ordinary parameter `name` with a boolean default (L§8.3, D-M7-8).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_default_bool(struct DoodleForeignDesc *desc,
+                                              const uint8_t *name,
+                                              uintptr_t name_len,
+                                              bool value);
+
+/**
+ * Appends an ordinary parameter `name` with a `nil` default (L§8.3, D-M7-8).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name` points to `name_len` readable bytes (or NULL with 0).
+ */
+DoodleStatus doodle_foreign_desc_default_nil(struct DoodleForeignDesc *desc,
+                                             const uint8_t *name,
+                                             uintptr_t name_len);
+
+/**
+ * Appends an ordinary parameter `name` with a **string** default (L§8.3, D-M7-8) from UTF-8
+ * `value` bytes: validated (`ErrInvalidUtf8`) and NFC-normalized (the untrusted-boundary
+ * counterpart of `make_string`, upholding the NFC contract for `ConstValue::Str`).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name`/`value` point to their `*_len` readable bytes (NULL allowed
+ * only with a 0 length).
+ */
+DoodleStatus doodle_foreign_desc_default_string(struct DoodleForeignDesc *desc,
+                                                const uint8_t *name,
+                                                uintptr_t name_len,
+                                                const uint8_t *value,
+                                                uintptr_t value_len);
+
+/**
+ * Appends an ordinary parameter `name` with a **byte-string** default (L§8.3, D-M7-8) from the
+ * raw `value` bytes (no encoding or normalization).
+ *
+ * # Safety
+ * `desc` a live descriptor; `name`/`value` point to their `*_len` readable bytes (NULL allowed
+ * only with a 0 length).
+ */
+DoodleStatus doodle_foreign_desc_default_bytes(struct DoodleForeignDesc *desc,
+                                               const uint8_t *name,
+                                               uintptr_t name_len,
+                                               const uint8_t *value,
+                                               uintptr_t value_len);
+
+/**
+ * Sets the descriptor's callback (E§5.2): the C function the engine runs when the foreign
+ * function is called, and an opaque `user_data` passed to it verbatim. A foreign function must
+ * have a callback (else `doodle_registry_add_foreign` returns `ErrContract`).
+ *
+ * # Safety
+ * `desc` a live descriptor; `callback` a valid, non-NULL function pointer; `user_data` is
+ * opaque (never dereferenced by the engine).
+ */
+DoodleStatus doodle_foreign_desc_set_callback(struct DoodleForeignDesc *desc,
+                                              DoodleForeignFn callback,
+                                              void *user_data);
+
+/**
+ * Frees a descriptor from `doodle_foreign_desc_new` that was **not** consumed by
+ * `doodle_registry_add_foreign`. NULL is a no-op. Do not call this on a descriptor already
+ * passed to `doodle_registry_add_foreign` (that consumed it).
+ *
+ * # Safety
+ * `desc` must be a pointer from `doodle_foreign_desc_new` not already freed or consumed.
+ */
+void doodle_foreign_desc_free(struct DoodleForeignDesc *desc);
 
 /**
  * Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
@@ -827,6 +1333,20 @@ void doodle_registry_free(struct DoodleRegistry *registry);
  * `registry` must be a live pointer from `doodle_registry_new`.
  */
 DoodleStatus doodle_registry_add_builtin(struct DoodleRegistry *registry, DoodleBuiltin builtin);
+
+/**
+ * Registers a **host foreign function** from a descriptor (E§5.1/§5.2, M7.2b), appending it to
+ * the registry. **Consumes** `desc` (the pointer is invalid after this call, success or
+ * failure — do not free or reuse it). `ErrContract` if the descriptor has no callback set
+ * (`doodle_foreign_desc_set_callback`) or its name duplicates a prior registration/reserved
+ * name; `ErrNullPointer` on a NULL descriptor (nothing consumed) or a NULL registry.
+ *
+ * # Safety
+ * `registry` a live pointer from `doodle_registry_new` (not consumed); `desc` a live pointer
+ * from `doodle_foreign_desc_new` (not consumed).
+ */
+DoodleStatus doodle_registry_add_foreign(struct DoodleRegistry *registry,
+                                         struct DoodleForeignDesc *desc);
 
 /**
  * Makes an `Int` from an `int64_t` (E§4.3). Larger magnitudes use `doodle_make_int_decimal`.

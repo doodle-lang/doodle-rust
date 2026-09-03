@@ -8,8 +8,9 @@
 //! underlying host resource, and is never Doodle-observable (its effects cannot
 //! re-enter the instance, so determinism is preserved, E§11).
 
-use super::boundary::{Kind, ValueError, wrong_kind};
-use super::{Handle, Instance, Value};
+use super::boundary::ValueError;
+use super::values;
+use super::{Handle, Instance};
 use crate::heap::Finalizer;
 
 impl Instance {
@@ -20,32 +21,32 @@ impl Instance {
     /// or at [`destroy`](Self::destroy) if it is still live then — to release the
     /// underlying resource.
     pub fn make_foreign(&mut self, tag: u64, ptr: u64, finalizer: Option<Finalizer>) -> Handle {
-        let idx = self.heap.alloc_foreign(tag, ptr, finalizer);
-        self.intern(Value::Foreign(idx))
+        values::make_foreign(
+            &mut self.machine.handles,
+            &mut self.heap,
+            tag,
+            ptr,
+            finalizer,
+        )
     }
 
     /// The host type `tag` of a foreign value (E§4.5). Errors if the value is not a
     /// foreign value ([`ValueError::WrongKind`]) or its handle is stale.
     pub fn foreign_tag(&self, handle: Handle) -> Result<u64, ValueError> {
-        match self.value_of(handle)? {
-            Value::Foreign(idx) => Ok(self.heap.foreign(idx).tag),
-            other => Err(wrong_kind(other, Kind::Foreign)),
-        }
+        values::foreign_tag(&self.machine.handles, &self.heap, handle)
     }
 
     /// The opaque host `ptr` of a foreign value (E§4.5), returned verbatim. Errors if
     /// the value is not a foreign value ([`ValueError::WrongKind`]) or its handle is stale.
     pub fn foreign_ptr(&self, handle: Handle) -> Result<u64, ValueError> {
-        match self.value_of(handle)? {
-            Value::Foreign(idx) => Ok(self.heap.foreign(idx).ptr),
-            other => Err(wrong_kind(other, Kind::Foreign)),
-        }
+        values::foreign_ptr(&self.machine.handles, &self.heap, handle)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::Kind;
     use crate::span::ModuleId;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};

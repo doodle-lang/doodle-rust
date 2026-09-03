@@ -324,6 +324,10 @@ pub use ctx::{BlockOutcome, IntrinsicCtx};
 /// out for length.
 mod binding;
 
+/// The value/handle boundary methods on [`IntrinsicCtx`] (`make_*`/`as_*`/`release`) a host
+/// callback uses inside a synchronous call (M7.2b), split out for length.
+mod values;
+
 /// The provisional demo intrinsics (`print`, `each`, `read_line`) and the value
 /// renderer, built on the mechanism above. Split out for length.
 mod builtins;

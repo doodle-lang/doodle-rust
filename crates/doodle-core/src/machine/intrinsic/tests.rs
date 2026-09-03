@@ -477,6 +477,62 @@ fn a_host_callback_default_and_block_bind_per_l8_3() {
     assert_eq!(inst.output(), b"world\nmoon\n");
 }
 
+/// A **host** `fn` that reads its two integer args through the ctx value API and returns their
+/// sum as a freshly-constructed value — exercising in-callback reads (`as_int`) + construction
+/// (`make_int`) via `IntrinsicCtx`, the path the C ABI drives (M7.2b).
+fn add_host() -> Intrinsic {
+    ForeignBuilder::new("add", BodyKind::Func)
+        .param("a")
+        .param("b")
+        .host(Arc::new(|ctx: &mut IntrinsicCtx| {
+            let (Some(ha), Some(hb)) = (ctx.arg_handle(0), ctx.arg_handle(1)) else {
+                ctx.fault_host();
+                return HostReply::Value(None);
+            };
+            let (Ok(a), Ok(b)) = (ctx.as_int(ha), ctx.as_int(hb)) else {
+                ctx.fault_host();
+                return HostReply::Value(None);
+            };
+            let sum = ctx.make_int(a + b);
+            ctx.release(ha).ok();
+            ctx.release(hb).ok();
+            // `sum` is handed to the result (apply consumes it); the arg handles are ours to free.
+            HostReply::Value(Some(sum))
+        }))
+}
+
+#[test]
+fn a_host_fn_reads_args_and_constructs_a_result_via_the_ctx() {
+    let (inst, outcome) = run_with(
+        "print(add(2, 3))\n",
+        registry_with(vec![print(), add_host()]),
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"5\n");
+}
+
+/// A **host** `to` that raises a string it constructs through the ctx (M7.2b): the raise path
+/// (`HostReply::Raise`) carrying an in-callback value.
+fn boom_host() -> Intrinsic {
+    ForeignBuilder::new("boom", BodyKind::Proc).host(Arc::new(|ctx: &mut IntrinsicCtx| {
+        let msg = ctx.make_string(b"boom").expect("valid UTF-8");
+        HostReply::Raise(msg)
+    }))
+}
+
+#[test]
+fn a_host_callback_raises_a_ctx_constructed_value() {
+    // `boom()` raises the string "boom" it builds through the ctx; a `try`/`rescue` around it
+    // binds `e` to that exact value (a program `rescue e` binds a raised value as-is), and
+    // printing it yields "boom" — proving the raise path and `make_string` inside a callback.
+    let (inst, outcome) = run_with(
+        "try\nboom()\nrescue e\nprint(e)\nend\n",
+        registry_with(vec![print(), boom_host()]),
+    );
+    assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
+    assert_eq!(inst.output(), b"boom\n");
+}
+
 #[test]
 fn register_rejects_a_reserved_prelude_name() {
     // A host intrinsic may not shadow a fixed prelude name (M5.10): `Error` and the well-known

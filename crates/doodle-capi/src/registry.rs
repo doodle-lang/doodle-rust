@@ -1,11 +1,14 @@
 //! Host-extension registration (E§5.5): a [`DoodleRegistry`] the host builds **before**
 //! loading, then hands to `doodle_load_with_registry` (registration order is replay identity,
 //! §11). M7.2a registers the engine's **built-in** intrinsics (`print`, capabilities like
-//! `read_line`, …) — the set the wasm/native conformance hosts install, so a C host can run
-//! the same programs with the same namespace. Registering an arbitrary **host callback** (a C
-//! foreign function) is the control-inverting M7.2b work.
+//! `read_line`, …) — the set the wasm/native conformance hosts install, so a C host can run the
+//! same programs with the same namespace. `doodle_registry_add_foreign` registers an arbitrary
+//! **host callback** (a C foreign function, built as a [`DoodleForeignDesc`]) — the
+//! control-inverting M7.2b piece.
 
 use crate::abi::DoodleStatus;
+use crate::desc::DoodleForeignDesc;
+use crate::guard::catch;
 use doodle_core::machine::{
     Intrinsic, Registry, clear_canvas_intrinsic, cos_intrinsic, decode_intrinsic,
     draw_line_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic, print_intrinsic,
@@ -96,6 +99,45 @@ pub unsafe extern "C" fn doodle_registry_add_builtin(
         // The only registration failure is a duplicate/reserved name — a host setup bug.
         Err(_) => DoodleStatus::ErrContract,
     }
+}
+
+/// Registers a **host foreign function** from a descriptor (E§5.1/§5.2, M7.2b), appending it to
+/// the registry. **Consumes** `desc` (the pointer is invalid after this call, success or
+/// failure — do not free or reuse it). `ErrContract` if the descriptor has no callback set
+/// (`doodle_foreign_desc_set_callback`) or its name duplicates a prior registration/reserved
+/// name; `ErrNullPointer` on a NULL descriptor (nothing consumed) or a NULL registry.
+///
+/// # Safety
+/// `registry` a live pointer from `doodle_registry_new` (not consumed); `desc` a live pointer
+/// from `doodle_foreign_desc_new` (not consumed).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn doodle_registry_add_foreign(
+    registry: *mut DoodleRegistry,
+    desc: *mut DoodleForeignDesc,
+) -> DoodleStatus {
+    catch(|| {
+        if desc.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
+        // Consume the descriptor now (this call owns it, success or failure): dropping the `Box`
+        // frees it on any early return below, so the pointer is single-use as documented.
+        // SAFETY: non-null (checked); a `Box::into_raw` pointer from `doodle_foreign_desc_new`,
+        // not consumed/freed, by the caller's contract.
+        let desc = unsafe { Box::from_raw(desc) };
+        // SAFETY: `as_mut` returns None for NULL; a non-null `registry` is a live `DoodleRegistry`
+        // from `doodle_registry_new` (not consumed) by the caller's contract.
+        let Some(registry) = (unsafe { registry.as_mut() }) else {
+            return DoodleStatus::ErrNullPointer;
+        };
+        match desc.into_intrinsic() {
+            // The only registration failure is a duplicate/reserved name — a host setup bug.
+            Ok(intrinsic) => match registry.inner.register(intrinsic) {
+                Ok(()) => DoodleStatus::Ok,
+                Err(_) => DoodleStatus::ErrContract,
+            },
+            Err(status) => status,
+        }
+    })
 }
 
 /// The engine intrinsic for a built-in identity.

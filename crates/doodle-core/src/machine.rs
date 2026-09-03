@@ -60,6 +60,7 @@ mod strop;
 mod types;
 mod unwind;
 mod value;
+mod values;
 
 pub use crate::heap::Finalizer;
 pub use aux_eval::AuxOutcome;
@@ -443,7 +444,7 @@ impl Instance {
     /// Releases a reference to `handle` (engine spec E§4.2); at zero references its
     /// value stops being a GC root. Errors on a stale handle.
     pub fn release(&mut self, handle: Handle) -> Result<(), HandleError> {
-        self.machine.handles.release(handle)
+        values::release(&mut self.machine.handles, handle)
     }
 
     /// Sets the lifecycle state (the drive loop drives the transitions).
