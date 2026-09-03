@@ -1,0 +1,11 @@
+# A multi-file example. This program imports the sibling `sayings` module and
+# calls its members. The `doodle` CLI resolves `import sayings` to the file
+# `sayings.doodle` in this directory (E§6).
+#
+# Run it with:
+#   doodle run examples/gallery/hello_modules.doodle
+
+import sayings
+
+sayings.greet("world")
+print(sayings.cheer("Doodle"))

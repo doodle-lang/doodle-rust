@@ -131,6 +131,31 @@ fn test_subcommand_runs_the_suite_in_process() {
 }
 
 #[test]
+fn run_resolves_a_multi_file_import() {
+    // The gallery `hello_modules` imports its sibling `sayings` module; the CLI's resolver maps
+    // `import sayings` to `sayings.doodle` beside the entry file (E§6), independent of cwd.
+    let entry =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gallery/hello_modules.doodle");
+    let out = run_doodle(&["run", entry.to_str().unwrap()], b"");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "Hello, world!\nHooray for Doodle!\n");
+}
+
+#[test]
+fn a_missing_import_raises_module_not_found() {
+    // The resolver returns `NotFound` for an absent module file; the engine raises
+    // `module-not-found` at the `import` site (E§6, S-7).
+    let program = fixture("missing_import.doodle", "import no_such_module\n");
+    let out = run_doodle(&["run", program.to_str().unwrap()], b"");
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains("module-not-found"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
 fn no_command_is_a_usage_error() {
     let out = run_doodle(&[], b"");
     assert_eq!(out.code, 2);

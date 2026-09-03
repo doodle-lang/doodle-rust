@@ -7,15 +7,15 @@
 //! resolutions, so the engine stays deterministic and a recorded run replays bit-for-bit (E§11).
 //! `print` output streams to stdout as it is produced; an uncaught raise or an engine fault renders
 //! to stderr with a source snippet, and the process exit code reflects the outcome (0 completed,
-//! nonzero otherwise). Imports (`SuspendedImport`) resolve `NotFound` until M7.4d wires the
-//! filesystem module resolver; a program that imports meets `module-not-found` until then.
+//! nonzero otherwise). An `import` resolves against the filesystem ([`resolve_import_request`]):
+//! the dotted path maps to a `.doodle` file beside the importing module (E§6, S-7).
 
 use crate::rng::Rng;
 use doodle_core::diag::render::{SourceView, render_diagnostics, render_raise};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{
-    self, CapabilityRequest, Directive, EngineFault, ImportResolution, LimitKind, Limits, Outcome,
-    Resolution,
+    self, CapabilityRequest, Directive, EngineFault, ImportRequest, ImportResolution, LimitKind,
+    Limits, Outcome, Resolution,
 };
 use doodle_core::machine::{
     Instance, Registry, print_intrinsic, random_intrinsic, read_line_intrinsic, time_intrinsic,
@@ -25,6 +25,7 @@ use doodle_core::resolve::resolve;
 use doodle_core::source::normalize;
 use doodle_core::span::ModuleId;
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 /// The capability ids the CLI resolves, fixed by the registration order in [`build_registry`]:
 /// `print` is index 0 (a synchronous intrinsic that never suspends), then the three ambient
@@ -125,10 +126,9 @@ fn drive_to_terminal(inst: &mut Instance, view: &SourceView<'_>, seed: Option<u6
                 let resolution = resolve_capability(inst, &request, &mut rng);
                 outcome = drive::resolve(inst, resolution);
             }
-            // Imports are not yet supported (M7.4d): report the module missing, which the engine
-            // raises at the `import` site — surfaced on the next loop as a normal raise.
-            Outcome::SuspendedImport(_) => {
-                outcome = drive::resolve_import(inst, ImportResolution::NotFound);
+            Outcome::SuspendedImport(request) => {
+                let resolution = resolve_import_request(inst, &request);
+                outcome = drive::resolve_import(inst, resolution);
             }
             Outcome::Raised(value, trace) => {
                 let (kind, message) = inst.describe_raised(value);
@@ -147,6 +147,56 @@ fn drive_to_terminal(inst: &mut Instance, view: &SourceView<'_>, seed: Option<u6
             }
         }
     }
+}
+
+/// Resolves one `import` request against the filesystem (E§6, S-7): the dotted `path` maps to a
+/// `.doodle` file beside the **importing** module — its segments joined as directories under the
+/// importer's own directory (the parent of its canonical id,
+/// [`module_canonical_id`](Instance::module_canonical_id)), with `.doodle` on the last, so a module
+/// in a subdirectory resolves its own siblings. A missing file is `NotFound`, which the
+/// engine uses to drive the module-vs-member fallback (S-7: `import a.b` tries the module `a/b`
+/// first, then member `b` of module `a`); a present-but-unreadable file raises at the `import`.
+/// The resolved module's `canonical_id` is its normalized absolute path — the singleton-load key
+/// (L§11.3), so two import paths reaching one file load it once.
+fn resolve_import_request(inst: &mut Instance, request: &ImportRequest) -> ImportResolution {
+    let Some(importer_id) = inst.module_canonical_id(ModuleId(request.importer)) else {
+        // An importer with no recorded canonical id should not occur; treat it as unresolvable
+        // rather than guessing a directory.
+        return ImportResolution::NotFound;
+    };
+    let importer_id = importer_id.to_string();
+    let dir = Path::new(&importer_id)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = dir.to_path_buf();
+    for segment in &request.path {
+        file.push(segment);
+    }
+    file.set_extension("doodle");
+
+    match std::fs::read_to_string(&file) {
+        Ok(text) => {
+            let canonical_id = std::fs::canonicalize(&file)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+            ImportResolution::Source { text, canonical_id }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ImportResolution::NotFound,
+        Err(e) => raise_import_read_error(inst, &file, &e),
+    }
+}
+
+/// A read error on a module file that *does* exist (permissions, not-a-file): raise it at the
+/// `import` site rather than reporting `NotFound`, which would wrongly trigger the member fallback.
+fn raise_import_read_error(
+    inst: &mut Instance,
+    file: &Path,
+    error: &std::io::Error,
+) -> ImportResolution {
+    ImportResolution::Raise(raise_string(
+        inst,
+        &format!("cannot read module `{}`: {error}", file.display()),
+    ))
 }
 
 /// Writes the `print` output produced since the last flush to stdout, advancing the cursor. The

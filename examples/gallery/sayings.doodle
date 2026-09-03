@@ -1,0 +1,12 @@
+# A small greetings module, imported by `hello_modules.doodle` to show multi-file
+# programs. Only the names listed in `exports` are visible to importers.
+
+to greet(name)
+    print("Hello, {name}!")
+end
+
+fn cheer(name)
+    return "Hooray for {name}!"
+end
+
+exports greet, cheer
