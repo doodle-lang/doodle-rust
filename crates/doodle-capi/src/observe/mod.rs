@@ -6,8 +6,9 @@
 //! against a stack a drive has since replaced. A frame's callable is minted **lazily**
 //! (`doodle_frame_callable`, D-M7-13), so a host that only needs positions pays for no handles.
 //! Positions carry an **opaque module token** resolved to a canonical id by
-//! `doodle_module_canonical_id` (D-M7-14). Bindings/globals, inspection, breakpoints, aux eval,
-//! and diagnostics are later M7.3 chunks.
+//! `doodle_module_canonical_id` (D-M7-14). Frame bindings + module globals are in
+//! [`bindings`]; breakpoints, raise-trap, host pause, observation mode, tail-elided history, and
+//! load diagnostics in [`debug`]; structural value inspection + aux eval in [`crate::inspect`].
 
 use crate::abi::{
     self, DOODLE_NULL_HANDLE, DoodleFrame, DoodleHandle, DoodlePosition, DoodleStatus,
@@ -15,8 +16,58 @@ use crate::abi::{
 use crate::guard::catch;
 use crate::instance::{DoodleInstance, di_mut, di_ref};
 use crate::value::{copy_out, write_out};
-use doodle_core::machine::Position;
+use doodle_core::machine::{Handle, Position};
 use doodle_core::span::ModuleId;
+
+/// Borrows the instance and checks the pause `generation`, or maps to an error status
+/// (`ErrNullPointer`/`ErrStale`). Shared by the pause-scoped accessors ([`bindings`], [`debug`]).
+pub(super) fn checked_ref<'a>(
+    instance: *const DoodleInstance,
+    generation: u32,
+) -> Result<&'a DoodleInstance, DoodleStatus> {
+    let Some(di) = di_ref(instance) else {
+        return Err(DoodleStatus::ErrNullPointer);
+    };
+    if generation != di.generation {
+        return Err(DoodleStatus::ErrStale);
+    }
+    Ok(di)
+}
+
+/// Borrows the instance mutably (for the handle-minting accessors) with the same `generation`
+/// gate as [`checked_ref`].
+pub(super) fn checked_mut<'a>(
+    instance: *mut DoodleInstance,
+    generation: u32,
+) -> Result<&'a mut DoodleInstance, DoodleStatus> {
+    let Some(di) = di_mut(instance) else {
+        return Err(DoodleStatus::ErrNullPointer);
+    };
+    if generation != di.generation {
+        return Err(DoodleStatus::ErrStale);
+    }
+    Ok(di)
+}
+
+/// Writes a list length as a saturating `u32` count, or `ErrNullPointer`.
+pub(super) fn write_count(len: usize, out_count: *mut u32) -> DoodleStatus {
+    if write_out(out_count, u32::try_from(len).unwrap_or(u32::MAX)) {
+        DoodleStatus::Ok
+    } else {
+        DoodleStatus::ErrNullPointer
+    }
+}
+
+/// Writes a minted-or-absent value handle: `DOODLE_NULL_HANDLE` when `None`, the handle's bits
+/// otherwise.
+pub(super) fn write_value(value: Option<Handle>, out_handle: *mut DoodleHandle) -> DoodleStatus {
+    let bits = value.map_or(DOODLE_NULL_HANDLE, |h| h.bits());
+    if write_out(out_handle, bits) {
+        DoodleStatus::Ok
+    } else {
+        DoodleStatus::ErrNullPointer
+    }
+}
 
 /// Writes an optional [`Position`] to `out_pos` + `out_has` (a bare struct can't be `Option`):
 /// `has = true` and the mapped position when `Some`, `has = false` and a zeroed position when
@@ -247,3 +298,8 @@ pub unsafe extern "C" fn doodle_module_canonical_id(
 /// The frame-binding + module-global accessors (M7.3b), split out for length.
 mod bindings;
 pub use bindings::*;
+
+/// The debug-setup accessors — breakpoints, raise-trap, host pause, observation mode, tail-elided
+/// history, and load diagnostics (M7.3d) — split out for length.
+mod debug;
+pub use debug::*;

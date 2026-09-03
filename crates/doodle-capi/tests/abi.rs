@@ -15,8 +15,9 @@ use doodle_capi::abi::{
     DoodleHandle, DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
 use doodle_capi::abi::{
-    DoodleAuxOutcome, DoodleAuxOutcomeKind, DoodleFrame, DoodleGlobal, DoodleGlobalKind,
-    DoodlePosition,
+    DoodleAuxOutcome, DoodleAuxOutcomeKind, DoodleBreakpoint, DoodleDiagnostic, DoodleFrame,
+    DoodleGlobal, DoodleGlobalKind, DoodleObservationMode, DoodlePauseReason, DoodlePosition,
+    DoodleSeverity,
 };
 use doodle_capi::call::{
     DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_arg_count, doodle_call_block,
@@ -40,11 +41,15 @@ use doodle_capi::instance::{
     doodle_resolve_import, doodle_resolve_import_not_found,
 };
 use doodle_capi::observe::{
-    doodle_current_position, doodle_current_result, doodle_frame_at, doodle_frame_callable,
-    doodle_frame_dynamic_count, doodle_frame_local_count, doodle_frame_local_name,
-    doodle_frame_local_value, doodle_module_canonical_id, doodle_module_global,
-    doodle_module_global_count, doodle_module_global_name, doodle_module_global_value,
-    doodle_stack_frame_count,
+    doodle_breakpoint_at, doodle_breakpoint_canonical_id, doodle_breakpoint_count,
+    doodle_clear_breakpoint, doodle_current_position, doodle_current_result, doodle_diagnostic_at,
+    doodle_diagnostic_count, doodle_frame_at, doodle_frame_callable, doodle_frame_dynamic_count,
+    doodle_frame_local_count, doodle_frame_local_name, doodle_frame_local_value,
+    doodle_module_canonical_id, doodle_module_global, doodle_module_global_count,
+    doodle_module_global_name, doodle_module_global_value, doodle_observation_mode, doodle_pause,
+    doodle_raise_trapping, doodle_set_breakpoint, doodle_set_observation_mode,
+    doodle_set_raise_trapping, doodle_stack_frame_count, doodle_tail_history_count,
+    doodle_trapped_raise, doodle_trapped_raise_position,
 };
 use doodle_capi::registry::{
     DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_new,
@@ -1239,5 +1244,176 @@ fn inspection_reads_records_lists_dicts_and_renders() {
     assert_eq!(sbuf, b"42");
     let _ = unsafe { doodle_release(inst, aux.value) };
     let _ = unsafe { doodle_release(inst, n) };
+    unsafe { doodle_free(inst) };
+}
+
+// ---- M7.3d: debug setup (breakpoints, raise-trap, pause, mode, tail, diagnostics) ----------
+
+#[test]
+fn debug_breakpoint_set_hit_list_and_clear() {
+    let inst = load("let a = 1\nlet b = 2\nlet c = 3\n");
+    // The entry module's canonical id (breakpoints are addressed by canonical string).
+    let canonical = read_name(|buf, cap, out_len| unsafe {
+        doodle_module_canonical_id(inst, 0, buf, cap, out_len)
+    });
+    let mut id = 0u32;
+    assert_eq!(
+        unsafe { doodle_set_breakpoint(inst, canonical.as_ptr(), canonical.len(), 2, &mut id) },
+        DoodleStatus::Ok
+    );
+    // The breakpoint list reflects it.
+    let mut bc = 0u32;
+    assert_eq!(
+        unsafe { doodle_breakpoint_count(inst, &mut bc) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(bc, 1);
+    let mut bp = DoodleBreakpoint {
+        id: 0,
+        line: 0,
+        resolved: false,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        unsafe { doodle_breakpoint_at(inst, 0, &mut bp) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(bp.id, id);
+    assert_eq!(bp.line, 2);
+    assert!(
+        bp.resolved,
+        "the entry module is loaded, so the breakpoint resolves"
+    );
+    let bp_canonical = read_name(|buf, cap, out_len| unsafe {
+        doodle_breakpoint_canonical_id(inst, 0, buf, cap, out_len)
+    });
+    assert_eq!(bp_canonical, canonical);
+    // Driving under `Continue` stops at the breakpoint (RunToCompletion would ignore it).
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, DoodleDirective::Continue, &mut out) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(out.kind, DoodleOutcomeKind::Paused);
+    assert_eq!(out.pause_reason, DoodlePauseReason::Breakpoint);
+    assert_eq!(out.breakpoint_id, id);
+    // Clear it and confirm the list empties.
+    assert_eq!(
+        unsafe { doodle_clear_breakpoint(inst, id) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_breakpoint_count(inst, &mut bc) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(bc, 0);
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn debug_raise_trap_pauses_and_exposes_the_trapped_value() {
+    let inst = load("1 / 0\n");
+    assert_eq!(
+        unsafe { doodle_set_raise_trapping(inst, true) },
+        DoodleStatus::Ok
+    );
+    let mut on = false;
+    assert_eq!(
+        unsafe { doodle_raise_trapping(inst, &mut on) },
+        DoodleStatus::Ok
+    );
+    assert!(on);
+    // Under `Continue`, the armed raise pauses before propagating.
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, DoodleDirective::Continue, &mut out) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(out.kind, DoodleOutcomeKind::Paused);
+    assert_eq!(out.pause_reason, DoodlePauseReason::RaiseTrap);
+    // The trapped value + its position are exposed.
+    let mut h = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_trapped_raise(inst, &mut h) },
+        DoodleStatus::Ok
+    );
+    assert_ne!(h, DOODLE_NULL_HANDLE, "a trapped raise has a value");
+    let _ = unsafe { doodle_release(inst, h) };
+    let (mut pos, mut has) = (
+        DoodlePosition {
+            span_start: 0,
+            span_end: 0,
+            module: 0,
+        },
+        false,
+    );
+    assert_eq!(
+        unsafe { doodle_trapped_raise_position(inst, &mut pos, &mut has) },
+        DoodleStatus::Ok
+    );
+    assert!(has, "the trapped raise has a position");
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn debug_mode_pause_tail_and_diagnostics() {
+    let inst = load("let a = 1\nlet b = 2\n");
+    // Observation mode round-trips at runtime.
+    assert_eq!(
+        unsafe { doodle_set_observation_mode(inst, DoodleObservationMode::Subexpression) },
+        DoodleStatus::Ok
+    );
+    let mut mode = DoodleObservationMode::Statement;
+    assert_eq!(
+        unsafe { doodle_observation_mode(inst, &mut mode) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(mode, DoodleObservationMode::Subexpression);
+
+    // A host pause stops the next drive at a safe point, regardless of directive.
+    unsafe { doodle_pause(inst) };
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion, &mut out) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(out.kind, DoodleOutcomeKind::Paused);
+    assert_eq!(out.pause_reason, DoodlePauseReason::HostPause);
+
+    // Tail-elided history is pause-scoped: the accessor works at a pause, and rejects a stale gen.
+    let (mut count, mut walk_gen) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count, &mut walk_gen) },
+        DoodleStatus::Ok
+    );
+    let mut tail = 99u32;
+    assert_eq!(
+        unsafe { doodle_tail_history_count(inst, walk_gen, &mut tail) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(tail, 0, "no tail recursion in this program");
+    assert_eq!(
+        unsafe { doodle_tail_history_count(inst, walk_gen.wrapping_add(1), &mut tail) },
+        DoodleStatus::ErrStale
+    );
+
+    // The load-diagnostics record reads (clean program → 0); out-of-range is a bounds error.
+    let mut diags = 7u32;
+    assert_eq!(
+        unsafe { doodle_diagnostic_count(inst, 0, &mut diags) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(diags, 0, "a clean program has no diagnostics");
+    let mut diag = DoodleDiagnostic {
+        severity: DoodleSeverity::Error,
+        has_span: false,
+        span_start: 0,
+        span_end: 0,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        unsafe { doodle_diagnostic_at(inst, 0, 0, &mut diag) },
+        DoodleStatus::ErrIndexOutOfBounds
+    );
     unsafe { doodle_free(inst) };
 }

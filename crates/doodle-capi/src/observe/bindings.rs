@@ -11,52 +11,12 @@
 //! absent/uninitialized binding (the null handle is never a live handle), so a temporal-dead-zone
 //! local reads cleanly as "unbound".
 
-use crate::abi::{
-    self, DOODLE_NULL_HANDLE, DoodleGlobal, DoodleHandle, DoodlePosition, DoodleStatus,
-};
+use super::{checked_mut, checked_ref, write_count, write_value};
+use crate::abi::{self, DoodleGlobal, DoodleHandle, DoodlePosition, DoodleStatus};
 use crate::guard::catch;
-use crate::instance::{DoodleInstance, di_mut, di_ref};
+use crate::instance::DoodleInstance;
 use crate::value::{copy_out, write_out};
-use doodle_core::machine::Handle;
 use doodle_core::span::Span;
-
-/// Borrows the instance and checks the pause `generation`, or maps to an error status.
-fn checked_ref<'a>(
-    instance: *const DoodleInstance,
-    generation: u32,
-) -> Result<&'a DoodleInstance, DoodleStatus> {
-    let Some(di) = di_ref(instance) else {
-        return Err(DoodleStatus::ErrNullPointer);
-    };
-    if generation != di.generation {
-        return Err(DoodleStatus::ErrStale);
-    }
-    Ok(di)
-}
-
-/// Borrows the instance mutably (for the value accessors, which mint handles) with the same
-/// `generation` gate as [`checked_ref`].
-fn checked_mut<'a>(
-    instance: *mut DoodleInstance,
-    generation: u32,
-) -> Result<&'a mut DoodleInstance, DoodleStatus> {
-    let Some(di) = di_mut(instance) else {
-        return Err(DoodleStatus::ErrNullPointer);
-    };
-    if generation != di.generation {
-        return Err(DoodleStatus::ErrStale);
-    }
-    Ok(di)
-}
-
-/// Writes a list length as a `u32` count (saturating), or `ErrNullPointer`.
-fn write_count(len: usize, out_count: *mut u32) -> DoodleStatus {
-    if write_out(out_count, u32::try_from(len).unwrap_or(u32::MAX)) {
-        DoodleStatus::Ok
-    } else {
-        DoodleStatus::ErrNullPointer
-    }
-}
 
 /// A `DoodlePosition` for `span` in the module named by `module_token`.
 fn pos_in(span: Span, module_token: u32) -> DoodlePosition {
@@ -64,17 +24,6 @@ fn pos_in(span: Span, module_token: u32) -> DoodlePosition {
         span_start: span.start,
         span_end: span.end,
         module: module_token,
-    }
-}
-
-/// Writes a minted-or-absent value handle: `DOODLE_NULL_HANDLE` when `None` (absent / temporal
-/// dead zone), the handle's bits otherwise.
-fn write_value(value: Option<Handle>, out_handle: *mut DoodleHandle) -> DoodleStatus {
-    let bits = value.map_or(DOODLE_NULL_HANDLE, |h| h.bits());
-    if write_out(out_handle, bits) {
-        DoodleStatus::Ok
-    } else {
-        DoodleStatus::ErrNullPointer
     }
 }
 

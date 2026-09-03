@@ -505,6 +505,31 @@ typedef uint32_t DoodleGlobalKind;
 #endif // __cplusplus
 
 /**
+ * A load/exec diagnostic's severity (E§3.2/§8, S-63), the C mirror of `diag::Severity`.
+ */
+enum DoodleSeverity
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * An error (fails the load / import).
+   */
+  DoodleSeverity_Error = 0,
+  /**
+   * A warning (does not fail the load).
+   */
+  DoodleSeverity_Warning = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleSeverity DoodleSeverity;
+#else
+typedef uint32_t DoodleSeverity;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * An engine-provided built-in intrinsic a host can register by identity (E§5.5), without
  * supplying a callback. The synchronous ones (`Print`/`Length`/…) run inline; the
  * capabilities (`ReadLine`/`DrawLine`/`SetTurtle`/`ClearCanvas`) suspend to the host.
@@ -784,6 +809,61 @@ typedef struct DoodleGlobal {
    */
   uint64_t reserved[2];
 } DoodleGlobal;
+
+/**
+ * One breakpoint (E§8.6), filled by `doodle_breakpoint_at`: its `id`, source `line`, and whether
+ * it is currently `resolved` (its canonical module is loaded and the line maps to a stoppable
+ * construct). Its canonical id copies out separately (`doodle_breakpoint_canonical_id`). The
+ * `reserved` tail is additive growth room.
+ */
+typedef struct DoodleBreakpoint {
+  /**
+   * The breakpoint id (from `doodle_set_breakpoint`).
+   */
+  uint32_t id;
+  /**
+   * The 1-based source line it is set on.
+   */
+  uint32_t line;
+  /**
+   * Whether it is resolved (its module is loaded and the line is stoppable).
+   */
+  bool resolved;
+  /**
+   * Reserved for additive growth; always written as `0`.
+   */
+  uint64_t reserved[2];
+} DoodleBreakpoint;
+
+/**
+ * One load/exec diagnostic (E§3.2/§8, S-63), filled by `doodle_diagnostic_at` — its `severity`
+ * and byte `span` (when it has one). Its message copies out separately
+ * (`doodle_diagnostic_message`). The span has no module token: a `Diagnostic` records only a byte
+ * range (unambiguous for a single-module program; a host correlates multi-module diagnostics by
+ * load order). The `reserved` tail is additive growth room.
+ */
+typedef struct DoodleDiagnostic {
+  /**
+   * Error (failed the load) or Warning (did not).
+   */
+  DoodleSeverity severity;
+  /**
+   * Whether `span_start`/`span_end` name a source range.
+   */
+  bool has_span;
+  /**
+   * The diagnostic's start byte offset (when `has_span`).
+   */
+  uint32_t span_start;
+  /**
+   * The diagnostic's end byte offset (when `has_span`).
+   */
+  uint32_t span_end;
+  /**
+   * Reserved for additive growth; always written as `0`.
+   */
+  uint64_t reserved[2];
+} DoodleDiagnostic;
 
 /**
  * The null handle: the absence of a value (a `to`/module result, an empty outcome slot).
@@ -1929,6 +2009,190 @@ DoodleStatus doodle_module_global_value(struct DoodleInstance *instance,
                                         uint32_t module_token,
                                         uint32_t index,
                                         DoodleHandle *out_handle);
+
+/**
+ * Sets a breakpoint at (`canonical_id`, `line`) (E§8.6, 1-based line) and writes its id to
+ * `out_id`. It resolves if the canonical module is loaded; an unresolved breakpoint re-resolves
+ * when that module loads. `ErrInvalidUtf8` if `canonical_id` is not UTF-8.
+ *
+ * # Safety
+ * `instance` live; `canonical_id` points to `canonical_len` readable bytes (or NULL with 0);
+ * `out_id` writable.
+ */
+DoodleStatus doodle_set_breakpoint(struct DoodleInstance *instance,
+                                   const uint8_t *canonical_id,
+                                   uintptr_t canonical_len,
+                                   uint32_t line,
+                                   uint32_t *out_id);
+
+/**
+ * Clears the breakpoint with `id` (E§8.6). Clearing an unknown id is a no-op.
+ *
+ * # Safety
+ * `instance` live.
+ */
+DoodleStatus doodle_clear_breakpoint(struct DoodleInstance *instance, uint32_t id);
+
+/**
+ * Writes the number of set breakpoints (E§8.6).
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_breakpoint_count(const struct DoodleInstance *instance, uint32_t *out_count);
+
+/**
+ * Fills `out_breakpoint` with the `index`-th breakpoint (E§8.6): its id, line, and resolved flag.
+ * Its canonical id copies out via [`doodle_breakpoint_canonical_id`]. `ErrIndexOutOfBounds` past
+ * the last breakpoint.
+ *
+ * # Safety
+ * `instance` live; `out_breakpoint` writable.
+ */
+DoodleStatus doodle_breakpoint_at(const struct DoodleInstance *instance,
+                                  uint32_t index,
+                                  struct DoodleBreakpoint *out_breakpoint);
+
+/**
+ * Copies the `index`-th breakpoint's canonical module id (E§8.6) into `buf` (copy-out).
+ * `ErrIndexOutOfBounds` past the last breakpoint.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_breakpoint_canonical_id(const struct DoodleInstance *instance,
+                                            uint32_t index,
+                                            uint8_t *buf,
+                                            uintptr_t cap,
+                                            uintptr_t *out_len);
+
+/**
+ * Enables or disables the raise-trap (E§8.7): when on, a drive under `Continue` pauses
+ * `Paused(RaiseTrap)` at each armed raise before it propagates.
+ *
+ * # Safety
+ * `instance` live.
+ */
+DoodleStatus doodle_set_raise_trapping(struct DoodleInstance *instance, bool enabled);
+
+/**
+ * Writes whether the raise-trap is enabled (E§8.7).
+ *
+ * # Safety
+ * `instance` live; `out_enabled` writable.
+ */
+DoodleStatus doodle_raise_trapping(const struct DoodleInstance *instance, bool *out_enabled);
+
+/**
+ * A fresh **host-owned** handle to the value of the currently trapped raise (E§8.7), or
+ * `DOODLE_NULL_HANDLE` if not paused on a raise-trap. A non-null value is host-owned.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_trapped_raise(struct DoodleInstance *instance, DoodleHandle *out_handle);
+
+/**
+ * Writes the position of the currently trapped raise (E§8.7) to `out_position` + `out_has`;
+ * `out_has` is `false` if not paused on a raise-trap.
+ *
+ * # Safety
+ * `instance` live; `out_position`/`out_has` writable.
+ */
+DoodleStatus doodle_trapped_raise_position(const struct DoodleInstance *instance,
+                                           struct DoodlePosition *out_position,
+                                           bool *out_has);
+
+/**
+ * Requests a pause (E§8.8): the drive stops `Paused(HostPause)` at its next safe point.
+ * Idempotent; callable from another thread while a drive runs (the flag is atomic, like
+ * `doodle_cancel`). No-op on NULL.
+ *
+ * # Safety
+ * `instance` must be a live pointer from `doodle_load` (or NULL).
+ */
+void doodle_pause(const struct DoodleInstance *instance);
+
+/**
+ * Sets the observation-mode granularity at runtime (E§8.8, S-62), between drives — the
+ * runtime counterpart of `doodle_config_set_observation_mode`.
+ *
+ * # Safety
+ * `instance` live.
+ */
+DoodleStatus doodle_set_observation_mode(struct DoodleInstance *instance,
+                                         DoodleObservationMode mode);
+
+/**
+ * Writes the current observation-mode granularity (E§8.8).
+ *
+ * # Safety
+ * `instance` live; `out_mode` writable.
+ */
+DoodleStatus doodle_observation_mode(const struct DoodleInstance *instance,
+                                     DoodleObservationMode *out_mode);
+
+/**
+ * Writes the number of tail-elided history entries (E§8.3). `ErrStale` on a stale `generation`.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_tail_history_count(const struct DoodleInstance *instance,
+                                       uint32_t generation,
+                                       uint32_t *out_count);
+
+/**
+ * Writes the `index`-th tail-elided entry (most recent first, E§8.3): its declaration position to
+ * `out_decl` and a fresh **host-owned** handle to the elided callable to `out_callable`
+ * (release it). `ErrStale` on a stale `generation`; `ErrIndexOutOfBounds` past the last entry.
+ *
+ * # Safety
+ * `instance` live; `out_decl`/`out_callable` writable.
+ */
+DoodleStatus doodle_tail_frame_at(struct DoodleInstance *instance,
+                                  uint32_t generation,
+                                  uint32_t index,
+                                  struct DoodlePosition *out_decl,
+                                  DoodleHandle *out_callable);
+
+/**
+ * Writes the number of load/exec diagnostics from cursor `since` onward (E§3.2/§8, S-63). A host
+ * tracks its cursor as `since + count` to poll incrementally.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_diagnostic_count(const struct DoodleInstance *instance,
+                                     uintptr_t since,
+                                     uint32_t *out_count);
+
+/**
+ * Fills `out_diagnostic` with the `index`-th diagnostic from cursor `since` (E§3.2/§8): its
+ * severity and byte span. Its message copies out via [`doodle_diagnostic_message`].
+ * `ErrIndexOutOfBounds` past the last diagnostic.
+ *
+ * # Safety
+ * `instance` live; `out_diagnostic` writable.
+ */
+DoodleStatus doodle_diagnostic_at(const struct DoodleInstance *instance,
+                                  uintptr_t since,
+                                  uint32_t index,
+                                  struct DoodleDiagnostic *out_diagnostic);
+
+/**
+ * Copies the `index`-th diagnostic's message (from cursor `since`) into `buf` (copy-out).
+ * `ErrIndexOutOfBounds` past the last diagnostic.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_diagnostic_message(const struct DoodleInstance *instance,
+                                       uintptr_t since,
+                                       uint32_t index,
+                                       uint8_t *buf,
+                                       uintptr_t cap,
+                                       uintptr_t *out_len);
 
 /**
  * Creates an empty registry. Returns NULL only on allocation failure. Populate it in the

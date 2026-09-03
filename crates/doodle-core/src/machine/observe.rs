@@ -248,6 +248,32 @@ impl Instance {
         self.machine.load.canonical_of(module)
     }
 
+    /// The number of **tail-elided** history entries (E§8.3), for the C surface's per-entry
+    /// accessor ([`tail_history_entry`](Self::tail_history_entry)) — read one at a time so the
+    /// callable handle is minted lazily rather than eagerly like [`tail_elided_history`](Self::
+    /// tail_elided_history). Bounded by the ring capacity.
+    pub fn tail_history_count(&self) -> usize {
+        self.machine.ring.most_recent_first().count()
+    }
+
+    /// The `index`-th tail-elided entry (most recent first, E§8.3): a fresh **host-owned** handle
+    /// to the elided callable + its declaration [`Position`], or `None` if out of range. Mints
+    /// like [`stack_walk`](Self::stack_walk) — the host releases the handle.
+    pub fn tail_history_entry(&mut self, index: usize) -> Option<(Handle, Position)> {
+        let cal = self.machine.ring.most_recent_first().nth(index)?;
+        let position = {
+            let obj = self.heap.callable(cal);
+            let resolved = &self.modules[obj.module.0 as usize].resolved;
+            Position {
+                module: obj.module,
+                span: resolved
+                    .ast
+                    .span(resolved.callables[obj.source_id() as usize].decl),
+            }
+        };
+        Some((self.intern(Value::Callable(cal)), position))
+    }
+
     /// The call-site spans of the active callable frames (E§8.2), innermost first — like
     /// [`stack_walk`](Self::stack_walk) but returning only source positions, minting no
     /// callable handles. Frames with no call site (a block, the module top) are skipped. A

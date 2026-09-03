@@ -4,7 +4,8 @@
 //! contract, so **only append** variants (never renumber) and put new struct fields in
 //! [`DoodleOutcome::reserved`].
 
-use doodle_core::drive::{Directive, EngineFault, LimitKind, PauseReason};
+use doodle_core::diag::Severity;
+use doodle_core::drive::{Directive, EngineFault, LimitKind, ObservationMode, PauseReason};
 use doodle_core::machine::{BlockOutcome, Kind, Position, ValueError};
 use doodle_core::resolve::{BodyKind, GlobalKind};
 
@@ -393,6 +394,77 @@ pub(crate) fn global_kind(k: GlobalKind) -> DoodleGlobalKind {
         GlobalKind::Record => DoodleGlobalKind::Record,
         GlobalKind::Protocol => DoodleGlobalKind::Protocol,
         GlobalKind::Module => DoodleGlobalKind::Module,
+    }
+}
+
+/// A load/exec diagnostic's severity (E§3.2/§8, S-63), the C mirror of `diag::Severity`.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoodleSeverity {
+    /// An error (fails the load / import).
+    Error = 0,
+    /// A warning (does not fail the load).
+    Warning = 1,
+}
+
+/// One breakpoint (E§8.6), filled by `doodle_breakpoint_at`: its `id`, source `line`, and whether
+/// it is currently `resolved` (its canonical module is loaded and the line maps to a stoppable
+/// construct). Its canonical id copies out separately (`doodle_breakpoint_canonical_id`). The
+/// `reserved` tail is additive growth room.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodleBreakpoint {
+    /// The breakpoint id (from `doodle_set_breakpoint`).
+    pub id: u32,
+    /// The 1-based source line it is set on.
+    pub line: u32,
+    /// Whether it is resolved (its module is loaded and the line is stoppable).
+    pub resolved: bool,
+    /// Reserved for additive growth; always written as `0`.
+    pub reserved: [u64; 2],
+}
+
+/// One load/exec diagnostic (E§3.2/§8, S-63), filled by `doodle_diagnostic_at` — its `severity`
+/// and byte `span` (when it has one). Its message copies out separately
+/// (`doodle_diagnostic_message`). The span has no module token: a `Diagnostic` records only a byte
+/// range (unambiguous for a single-module program; a host correlates multi-module diagnostics by
+/// load order). The `reserved` tail is additive growth room.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodleDiagnostic {
+    /// Error (failed the load) or Warning (did not).
+    pub severity: DoodleSeverity,
+    /// Whether `span_start`/`span_end` name a source range.
+    pub has_span: bool,
+    /// The diagnostic's start byte offset (when `has_span`).
+    pub span_start: u32,
+    /// The diagnostic's end byte offset (when `has_span`).
+    pub span_end: u32,
+    /// Reserved for additive growth; always written as `0`.
+    pub reserved: [u64; 2],
+}
+
+/// Maps a core [`Severity`] to its ABI mirror.
+pub(crate) fn severity(s: Severity) -> DoodleSeverity {
+    match s {
+        Severity::Error => DoodleSeverity::Error,
+        Severity::Warning => DoodleSeverity::Warning,
+    }
+}
+
+/// Maps a [`DoodleObservationMode`] to the core [`ObservationMode`].
+pub(crate) fn observation_mode(mode: DoodleObservationMode) -> ObservationMode {
+    match mode {
+        DoodleObservationMode::Statement => ObservationMode::Statement,
+        DoodleObservationMode::Subexpression => ObservationMode::Subexpression,
+    }
+}
+
+/// Maps a core [`ObservationMode`] to its ABI mirror.
+pub(crate) fn observation_mode_of(mode: ObservationMode) -> DoodleObservationMode {
+    match mode {
+        ObservationMode::Statement => DoodleObservationMode::Statement,
+        ObservationMode::Subexpression => DoodleObservationMode::Subexpression,
     }
 }
 
