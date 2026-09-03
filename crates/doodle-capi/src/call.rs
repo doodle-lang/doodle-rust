@@ -188,10 +188,10 @@ pub(crate) fn engine_of<'a>(
 }
 
 /// Writes the number of bound (non-block) arguments this call received (E§5.2) — read each with
-/// [`doodle_call_arg`]. `ErrContract` if the ctx has outlived the callback.
+/// [`doodle_call_arg`]. `ErrContract` unless `ctx` is the innermost active callback.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`; `out` writable.
+/// `ctx` must be the callback's current `DoodleCallCtx`; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_arg_count(
     ctx: *mut DoodleCallCtx,
@@ -212,10 +212,10 @@ pub unsafe extern "C" fn doodle_call_arg_count(
 
 /// Interns the `index`-th bound argument as a fresh **host-owned** handle (E§4.2) and writes it
 /// to `out`; the host reads it with the ordinary `doodle_as_*` and `doodle_release`s it.
-/// `ErrIndexOutOfBounds` past the last argument; `ErrContract` if the ctx has outlived the call.
+/// `ErrIndexOutOfBounds` past the last argument; `ErrContract` unless `ctx` is the innermost call.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`; `out` writable.
+/// `ctx` must be the callback's current `DoodleCallCtx`; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_arg(
     ctx: *mut DoodleCallCtx,
@@ -238,11 +238,11 @@ pub unsafe extern "C" fn doodle_call_arg(
 /// Invokes this call's received block **reentrantly** (E§5.4/§7.6) with the `n` argument handles
 /// at `args`, writing the [`DoodleBlockOutcome`] to `out`. On `NonLocalExit`/`Halted` the
 /// callback **must return promptly with no result**. Routes through
-/// [`IntrinsicCtx::invoke_block_handles`] (never a second `&mut Instance`). `ErrContract` if the
-/// ctx has outlived the callback.
+/// [`IntrinsicCtx::invoke_block_handles`] (never a second `&mut Instance`). `ErrContract` unless
+/// `ctx` is the innermost active callback.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`; `args` points to `n` readable handles (or
+/// `ctx` must be the callback's current `DoodleCallCtx`; `args` points to `n` readable handles (or
 /// NULL when `n` is 0); `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_block(
@@ -276,10 +276,10 @@ pub unsafe extern "C" fn doodle_call_block(
 }
 
 /// Appends `len` bytes at `bytes` to the instance's output sink (the same sink `print` writes,
-/// read via `doodle_output`). `ErrContract` if the ctx has outlived the callback.
+/// read via `doodle_output`). `ErrContract` unless `ctx` is the innermost active callback.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`; `bytes` points to `len` readable bytes (or
+/// `ctx` must be the callback's current `DoodleCallCtx`; `bytes` points to `len` readable bytes (or
 /// NULL when `len` is 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_emit(
@@ -310,10 +310,10 @@ pub unsafe extern "C" fn doodle_call_emit(
 /// Sets this `fn` call's result to the value named by `handle` (E§5.2) — the value the call
 /// yields. A `to` sets nothing (leaving Void). **Consumes `handle`**: the engine resolves it and
 /// releases it after the callback returns, so the host must not release or reuse it afterward.
-/// `ErrContract` if the ctx has outlived the call.
+/// `ErrContract` unless `ctx` is the innermost active callback.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`.
+/// `ctx` must be the callback's current `DoodleCallCtx`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_set_result(
     ctx: *mut DoodleCallCtx,
@@ -331,10 +331,11 @@ pub unsafe extern "C" fn doodle_call_set_result(
 /// Raises the value named by `handle` at this call site (E§5.2/§7.5), like a capability's
 /// `resolve` raise — the value *is* the exception (a program `rescue e` binds it as-is). The
 /// callback should then return `DoodleStatus_Ok`. **Consumes `handle`** (as
-/// `doodle_call_set_result` does): do not release or reuse it. `ErrContract` if the ctx is dead.
+/// `doodle_call_set_result` does): do not release or reuse it. `ErrContract` unless `ctx` is
+/// the innermost active callback.
 ///
 /// # Safety
-/// `ctx` must be the callback's live `DoodleCallCtx`.
+/// `ctx` must be the callback's current `DoodleCallCtx`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_set_raise(
     ctx: *mut DoodleCallCtx,

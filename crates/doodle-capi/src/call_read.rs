@@ -2,7 +2,7 @@
 //! `doodle_call_as_*`/`doodle_call_kind_of`/`doodle_call_release` a host uses to inspect its
 //! argument handles and free the handles it minted — the counterparts of the instance-based
 //! `doodle_as_*`, routed through the callback's [`DoodleCallCtx`]. Split from `call_value.rs` (the
-//! constructors) for length; shares its `engine_of` liveness gate.
+//! constructors) for length; shares its `engine_of` innermost-ctx gate.
 
 use crate::abi::{self, DoodleHandle, DoodleKind, DoodleStatus};
 use crate::call::{DoodleCallCtx, engine_of};
@@ -237,7 +237,7 @@ pub unsafe extern "C" fn doodle_call_as_bytes(
 /// value it constructed. `ErrStaleHandle` if already freed. Release each exactly once.
 ///
 /// # Safety
-/// `ctx` the callback's live `DoodleCallCtx`.
+/// `ctx` the callback's current `DoodleCallCtx`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_release(
     ctx: *mut DoodleCallCtx,

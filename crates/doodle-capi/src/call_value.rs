@@ -85,7 +85,7 @@ fn bytes_arg<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 /// Constructs an integer (E§4.3) on the callback's ctx.
 ///
 /// # Safety
-/// `ctx` the callback's live `DoodleCallCtx`; `out` writable.
+/// `ctx` the callback's current `DoodleCallCtx`; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_make_int(
     ctx: *mut DoodleCallCtx,
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn doodle_call_make_list(
 /// Appends the value `value` to the list `list` (E§4.6). `ErrWrongKind` if `list` is not a list.
 ///
 /// # Safety
-/// `ctx` the callback's live `DoodleCallCtx`.
+/// `ctx` the callback's current `DoodleCallCtx`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_call_list_append(
     ctx: *mut DoodleCallCtx,
