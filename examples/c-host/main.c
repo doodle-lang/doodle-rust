@@ -147,6 +147,45 @@ int main(void) {
     }
     doodle_free(ginst);
 
-    printf("c-host smoke: load/drive/handle + registry/print + foreign-fn round-trip OK\n");
+    /* Observation surface (M7.3): Step to a pause, walk the stack, and read the current
+     * position — the debugger's pull view, exercised from real C. */
+    const char *stepper = "let a = 1\nlet b = 2\n";
+    DoodleInstance *sinst = NULL;
+    status = doodle_load((const uint8_t *)stepper, strlen(stepper), NULL, &sinst, NULL, 0, NULL);
+    if (status != DoodleStatus_Ok || sinst == NULL) {
+        return fail("doodle_load() for the observation walk failed");
+    }
+    status = doodle_drive(sinst, DoodleDirective_Step, &outcome);
+    if (status != DoodleStatus_Ok || outcome.kind != DoodleOutcomeKind_Paused) {
+        doodle_free(sinst);
+        return fail("the Step drive did not pause");
+    }
+    uint32_t frame_count = 0, generation = 0;
+    if (doodle_stack_frame_count(sinst, &frame_count, &generation) != DoodleStatus_Ok
+        || frame_count < 1) {
+        doodle_free(sinst);
+        return fail("stack walk reported no frames");
+    }
+    DoodleFrame frame;
+    if (doodle_frame_at(sinst, generation, frame_count - 1, &frame) != DoodleStatus_Ok
+        || frame.has_callable) {
+        doodle_free(sinst);
+        return fail("the outermost frame should be the module top (no callable)");
+    }
+    /* A stale generation is a benign, distinct error (not a contract violation). */
+    if (doodle_frame_at(sinst, generation + 1, 0, &frame) != DoodleStatus_ErrStale) {
+        doodle_free(sinst);
+        return fail("a stale generation should report DoodleStatus_ErrStale");
+    }
+    DoodlePosition position;
+    bool has_position = false;
+    if (doodle_current_position(sinst, &position, &has_position) != DoodleStatus_Ok
+        || !has_position) {
+        doodle_free(sinst);
+        return fail("a paused instance should have a current position");
+    }
+    doodle_free(sinst);
+
+    printf("c-host smoke: load/drive/handle + registry/print + foreign-fn + observation OK\n");
     return 0;
 }

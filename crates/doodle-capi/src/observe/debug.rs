@@ -231,9 +231,15 @@ pub unsafe extern "C" fn doodle_trapped_raise(
     instance: *mut DoodleInstance,
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
-    catch(|| match di_mut(instance) {
-        Some(di) => write_value(di.inner.trapped_raise(), out_handle),
-        None => DoodleStatus::ErrNullPointer,
+    catch(|| {
+        // Validate the out-param before minting, so a NULL out never orphans the trapped value.
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
+        match di_mut(instance) {
+            Some(di) => write_value(di.inner.trapped_raise(), out_handle),
+            None => DoodleStatus::ErrNullPointer,
+        }
     })
 }
 
@@ -346,6 +352,11 @@ pub unsafe extern "C" fn doodle_tail_frame_at(
     out_callable: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Validate both out-params before minting: `tail_history_entry` mints the callable handle,
+        // so a NULL out (either one) would orphan it.
+        if out_decl.is_null() || out_callable.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let di = match checked_mut(instance, generation) {
             Ok(di) => di,
             Err(status) => return status,

@@ -53,6 +53,12 @@ fn minted(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Validate the out-param **before** minting: `write_out` is the null check, but a mint
+        // that then fails to write would orphan a host-owned handle (a leak that roots its value
+        // for the instance's life). Checking first means a NULL out never mints.
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let Some(inst) = inst_mut(instance) else {
             return DoodleStatus::ErrNullPointer;
         };
@@ -463,6 +469,11 @@ pub unsafe extern "C" fn doodle_eval_to_string(
     out_outcome: *mut DoodleAuxOutcome,
 ) -> DoodleStatus {
     catch(|| {
+        // Validate the out-param before the (effectful, handle-minting) eval, so a NULL out never
+        // orphans the Rendered/Raised handle.
+        if out_outcome.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let Some(inst) = inst_mut(instance) else {
             return DoodleStatus::ErrNullPointer;
         };

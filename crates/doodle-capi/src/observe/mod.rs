@@ -9,6 +9,11 @@
 //! `doodle_module_canonical_id` (D-M7-14). Frame bindings + module globals are in
 //! [`bindings`]; breakpoints, raise-trap, host pause, observation mode, tail-elided history, and
 //! load diagnostics in [`debug`]; structural value inspection + aux eval in [`crate::inspect`].
+//!
+//! **Contract: call these on a stopped instance, never reentrantly during a drive.** They take a
+//! `*mut DoodleInstance` and form `&mut Instance`; calling one from inside a foreign callback
+//! (M7.2b) — which already holds the drive's `&mut Instance` — would form a second and is UB. A
+//! callback inspects values through its [`DoodleCallCtx`](crate::call::DoodleCallCtx) instead.
 
 use crate::abi::{
     self, DOODLE_NULL_HANDLE, DoodleFrame, DoodleHandle, DoodlePosition, DoodleStatus,
@@ -142,6 +147,10 @@ pub unsafe extern "C" fn doodle_current_result(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Validate the out-param before minting, so a NULL out never orphans the result handle.
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let Some(di) = di_mut(instance) else {
             return DoodleStatus::ErrNullPointer;
         };
@@ -248,6 +257,10 @@ pub unsafe extern "C" fn doodle_frame_callable(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Validate the out-param before minting, so a NULL out never orphans the callable handle.
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let Some(di) = di_mut(instance) else {
             return DoodleStatus::ErrNullPointer;
         };

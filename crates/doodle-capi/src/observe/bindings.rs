@@ -94,6 +94,9 @@ pub unsafe extern "C" fn doodle_frame_local_value(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let di = match checked_mut(instance, generation) {
             Ok(di) => di,
             Err(status) => return status,
@@ -174,6 +177,9 @@ pub unsafe extern "C" fn doodle_frame_dynamic_value(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let di = match checked_mut(instance, generation) {
             Ok(di) => di,
             Err(status) => return status,
@@ -291,6 +297,9 @@ pub unsafe extern "C" fn doodle_module_global_value(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        if out_handle.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let di = match checked_mut(instance, generation) {
             Ok(di) => di,
             Err(status) => return status,
