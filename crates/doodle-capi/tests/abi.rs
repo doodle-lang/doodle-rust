@@ -12,9 +12,12 @@
 
 use doodle_capi::abi::{
     DOODLE_NULL_HANDLE, DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault,
-    DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
+    DoodleHandle, DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
-use doodle_capi::abi::{DoodleFrame, DoodleGlobal, DoodleGlobalKind, DoodlePosition};
+use doodle_capi::abi::{
+    DoodleAuxOutcome, DoodleAuxOutcomeKind, DoodleFrame, DoodleGlobal, DoodleGlobalKind,
+    DoodlePosition,
+};
 use doodle_capi::call::{
     DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_arg_count, doodle_call_block,
     doodle_call_set_raise, doodle_call_set_result,
@@ -25,6 +28,11 @@ use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_s
 use doodle_capi::desc::{
     DoodleForeignDesc, doodle_foreign_desc_block_param, doodle_foreign_desc_default_string,
     doodle_foreign_desc_new, doodle_foreign_desc_param, doodle_foreign_desc_set_callback,
+};
+use doodle_capi::inspect::{
+    doodle_dict_key, doodle_dict_length, doodle_dict_value, doodle_eval_to_string, doodle_list_get,
+    doodle_list_length, doodle_record_field, doodle_record_field_name, doodle_record_length,
+    doodle_record_type_name,
 };
 use doodle_capi::instance::{
     DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_import_path_segment,
@@ -1081,5 +1089,155 @@ fn observation_frame_locals_and_module_globals() {
         },
         DoodleStatus::ErrStale
     );
+    unsafe { doodle_free(inst) };
+}
+
+// ---- M7.3c: structural value inspection + aux eval ------------------------------------------
+
+/// The value handle of the entry module's global named `target` (found by scanning), asserting it
+/// exists. `walk_gen` is the current pause generation; the entry module's token is 0.
+fn global_handle(inst: *mut DoodleInstance, walk_gen: u32, target: &str) -> DoodleHandle {
+    let mut count = 0u32;
+    assert_eq!(
+        unsafe { doodle_module_global_count(inst, walk_gen, 0, &mut count) },
+        DoodleStatus::Ok
+    );
+    for i in 0..count {
+        let name = read_name(|buf, cap, out_len| unsafe {
+            doodle_module_global_name(inst, walk_gen, 0, i, buf, cap, out_len)
+        });
+        if name == target {
+            let mut h = DOODLE_NULL_HANDLE;
+            assert_eq!(
+                unsafe { doodle_module_global_value(inst, walk_gen, 0, i, &mut h) },
+                DoodleStatus::Ok
+            );
+            assert_ne!(h, DOODLE_NULL_HANDLE, "global {target} is defined");
+            return h;
+        }
+    }
+    panic!("global {target} not found");
+}
+
+fn as_int(inst: *const DoodleInstance, h: DoodleHandle) -> i64 {
+    let mut n = 0i64;
+    assert_eq!(unsafe { doodle_as_int(inst, h, &mut n) }, DoodleStatus::Ok);
+    n
+}
+
+#[test]
+fn inspection_reads_records_lists_dicts_and_renders() {
+    let inst = load(concat!(
+        "record Point with x, y end\n",
+        "let p = Point(x: 1, y: 2)\n",
+        "let xs = [10, 20, 30]\n",
+        "let d = {a: 7}\n",
+        "let n = 42\n",
+    ));
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Completed);
+    // The module completed; its globals persist. Read the current generation to address them.
+    let (mut count, mut walk_gen) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count, &mut walk_gen) },
+        DoodleStatus::Ok
+    );
+
+    // Record: type name, field count, field names + values.
+    let p = global_handle(inst, walk_gen, "p");
+    let type_name = read_name(|buf, cap, out_len| unsafe {
+        doodle_record_type_name(inst, p, buf, cap, out_len)
+    });
+    assert_eq!(type_name, "Point");
+    let mut fields = 0u32;
+    assert_eq!(
+        unsafe { doodle_record_length(inst, p, &mut fields) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(fields, 2);
+    let f0 = read_name(|buf, cap, out_len| unsafe {
+        doodle_record_field_name(inst, p, 0, buf, cap, out_len)
+    });
+    assert_eq!(f0, "x");
+    let mut fv = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_record_field(inst, p, 0, &mut fv) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(as_int(inst, fv), 1);
+    let _ = unsafe { doodle_release(inst, fv) };
+    let _ = unsafe { doodle_release(inst, p) };
+
+    // List: length + element.
+    let xs = global_handle(inst, walk_gen, "xs");
+    let mut len = 0u32;
+    assert_eq!(
+        unsafe { doodle_list_length(inst, xs, &mut len) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(len, 3);
+    let mut e1 = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_list_get(inst, xs, 1, &mut e1) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(as_int(inst, e1), 20);
+    let _ = unsafe { doodle_release(inst, e1) };
+    let _ = unsafe { doodle_release(inst, xs) };
+
+    // Dict: length + key/value in insertion order.
+    let d = global_handle(inst, walk_gen, "d");
+    let mut dlen = 0u32;
+    assert_eq!(
+        unsafe { doodle_dict_length(inst, d, &mut dlen) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(dlen, 1);
+    let mut key = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_dict_key(inst, d, 0, &mut key) },
+        DoodleStatus::Ok
+    );
+    let mut klen = 0usize;
+    let _ = unsafe { doodle_string_bytes(inst, key, ptr::null_mut(), 0, &mut klen) };
+    let mut kbuf = vec![0u8; klen];
+    assert_eq!(
+        unsafe { doodle_string_bytes(inst, key, kbuf.as_mut_ptr(), kbuf.len(), &mut klen) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(kbuf, b"a");
+    let mut val = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_dict_value(inst, d, 0, &mut val) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(as_int(inst, val), 7);
+    let _ = unsafe { doodle_release(inst, key) };
+    let _ = unsafe { doodle_release(inst, val) };
+    let _ = unsafe { doodle_release(inst, d) };
+
+    // Auxiliary evaluation: render n (42) to its to_string.
+    let n = global_handle(inst, walk_gen, "n");
+    let mut aux = DoodleAuxOutcome {
+        kind: DoodleAuxOutcomeKind::Faulted,
+        value: DOODLE_NULL_HANDLE,
+        fault: DoodleFault::Internal,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        unsafe { doodle_eval_to_string(inst, n, 100_000, &mut aux) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(aux.kind, DoodleAuxOutcomeKind::Rendered);
+    let mut slen = 0usize;
+    let _ = unsafe { doodle_string_bytes(inst, aux.value, ptr::null_mut(), 0, &mut slen) };
+    let mut sbuf = vec![0u8; slen];
+    assert_eq!(
+        unsafe { doodle_string_bytes(inst, aux.value, sbuf.as_mut_ptr(), sbuf.len(), &mut slen) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(sbuf, b"42");
+    let _ = unsafe { doodle_release(inst, aux.value) };
+    let _ = unsafe { doodle_release(inst, n) };
     unsafe { doodle_free(inst) };
 }

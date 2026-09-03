@@ -252,6 +252,87 @@ typedef uint32_t DoodleBodyKind;
 #endif // __cplusplus
 
 /**
+ * Which arm an auxiliary evaluation (`doodle_eval_to_string`) took (E§8.4) — the tag of
+ * [`DoodleAuxOutcome`].
+ */
+enum DoodleAuxOutcomeKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * `to_string` returned a String — `DoodleAuxOutcome::value` is a host-owned handle to it.
+   */
+  DoodleAuxOutcomeKind_Rendered = 0,
+  /**
+   * The rendering raised (a non-String result, or a `raise` inside `to_string`) —
+   * `DoodleAuxOutcome::value` is a host-owned handle to the raised value.
+   */
+  DoodleAuxOutcomeKind_Raised = 1,
+  /**
+   * The rendering hit an engine fault (e.g. its own fuel ran out) — `DoodleAuxOutcome::fault`.
+   */
+  DoodleAuxOutcomeKind_Faulted = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleAuxOutcomeKind DoodleAuxOutcomeKind;
+#else
+typedef uint32_t DoodleAuxOutcomeKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A non-resumable engine fault (E§7.2/§10). The core's `LimitExceeded(LimitKind)` is
+ * flattened into distinct `Limit*` codes (as the wasm surface flattens to string tags).
+ */
+enum DoodleFault
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The step budget was exhausted (E§10.2).
+   */
+  DoodleFault_LimitStepBudget = 0,
+  /**
+   * The heap-byte ceiling was exceeded (E§10.2).
+   */
+  DoodleFault_LimitHeap = 1,
+  /**
+   * The non-tail stack-depth limit was exceeded (E§10.2).
+   */
+  DoodleFault_LimitStackDepth = 2,
+  /**
+   * The tail-history bound was exceeded (E§8.3).
+   */
+  DoodleFault_LimitTailHistory = 3,
+  /**
+   * A single op's result would exceed the per-op result cap (the latency rail, E§10.2).
+   */
+  DoodleFault_LimitOpResult = 4,
+  /**
+   * The host cancelled the drive (E§10.1).
+   */
+  DoodleFault_Cancelled = 5,
+  /**
+   * A suspending capability was reached inside a foreign/native callback (E§5.4, S-15).
+   */
+  DoodleFault_NestedSuspend = 6,
+  /**
+   * An internal invariant was violated (an engine bug).
+   */
+  DoodleFault_Internal = 7,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleFault DoodleFault;
+#else
+typedef uint32_t DoodleFault;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * A driving directive (E§7.3): how far to run before returning to the host.
  */
 enum DoodleDirective
@@ -370,56 +451,6 @@ enum DoodlePauseReason
 typedef enum DoodlePauseReason DoodlePauseReason;
 #else
 typedef uint32_t DoodlePauseReason;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
- * A non-resumable engine fault (E§7.2/§10). The core's `LimitExceeded(LimitKind)` is
- * flattened into distinct `Limit*` codes (as the wasm surface flattens to string tags).
- */
-enum DoodleFault
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * The step budget was exhausted (E§10.2).
-   */
-  DoodleFault_LimitStepBudget = 0,
-  /**
-   * The heap-byte ceiling was exceeded (E§10.2).
-   */
-  DoodleFault_LimitHeap = 1,
-  /**
-   * The non-tail stack-depth limit was exceeded (E§10.2).
-   */
-  DoodleFault_LimitStackDepth = 2,
-  /**
-   * The tail-history bound was exceeded (E§8.3).
-   */
-  DoodleFault_LimitTailHistory = 3,
-  /**
-   * A single op's result would exceed the per-op result cap (the latency rail, E§10.2).
-   */
-  DoodleFault_LimitOpResult = 4,
-  /**
-   * The host cancelled the drive (E§10.1).
-   */
-  DoodleFault_Cancelled = 5,
-  /**
-   * A suspending capability was reached inside a foreign/native callback (E§5.4, S-15).
-   */
-  DoodleFault_NestedSuspend = 6,
-  /**
-   * An internal invariant was violated (an engine bug).
-   */
-  DoodleFault_Internal = 7,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleFault DoodleFault;
-#else
-typedef uint32_t DoodleFault;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -594,6 +625,53 @@ typedef uint64_t DoodleHandle;
 typedef DoodleStatus (*DoodleForeignFn)(struct DoodleCallCtx *ctx, void *user_data);
 
 /**
+ * A source position (E§8.1): a byte span into a module's NFC source plus an **opaque
+ * instance-scoped module token** (D-M7-14). Equal `module` tokens ⇔ the same module within one
+ * instance (stable for its lifetime), and nothing more — it is **not** a documented index;
+ * resolve it to the host's canonical id with `doodle_module_canonical_id`. The host maps the
+ * byte span to 1-based line/column using the source it holds (the engine exposes positions, not
+ * text).
+ */
+typedef struct DoodlePosition {
+  /**
+   * The construct's start byte offset into the module's NFC source.
+   */
+  uint32_t span_start;
+  /**
+   * The construct's end byte offset.
+   */
+  uint32_t span_end;
+  /**
+   * The opaque module token (see the type doc).
+   */
+  uint32_t module;
+} DoodlePosition;
+
+/**
+ * The result of an auxiliary evaluation (E§8.4), written by `doodle_eval_to_string`: rendering a
+ * value to its `to_string` **without disturbing the instance's pause** (S-22). A `#[repr(C)]`
+ * struct like [`DoodleOutcome`], with a `reserved` tail for additive growth.
+ */
+typedef struct DoodleAuxOutcome {
+  /**
+   * Which arm the evaluation took.
+   */
+  DoodleAuxOutcomeKind kind;
+  /**
+   * `Rendered`/`Raised`: a **host-owned** handle (release it), `0` on `Faulted`.
+   */
+  DoodleHandle value;
+  /**
+   * `Faulted`: which fault (unused otherwise).
+   */
+  DoodleFault fault;
+  /**
+   * Reserved for additive growth; always written as `0`.
+   */
+  uint64_t reserved[2];
+} DoodleAuxOutcome;
+
+/**
  * The result of a drive (E§7.2), written by `doodle_drive`/`doodle_resolve`. A flat
  * `#[repr(C)]` struct (not a union — a union in a frozen header cannot grow safely): each
  * field is meaningful only for the `kind`s named in its doc, others are `0`/false. The
@@ -650,29 +728,6 @@ typedef struct DoodleOutcome {
    */
   uint64_t reserved[4];
 } DoodleOutcome;
-
-/**
- * A source position (E§8.1): a byte span into a module's NFC source plus an **opaque
- * instance-scoped module token** (D-M7-14). Equal `module` tokens ⇔ the same module within one
- * instance (stable for its lifetime), and nothing more — it is **not** a documented index;
- * resolve it to the host's canonical id with `doodle_module_canonical_id`. The host maps the
- * byte span to 1-based line/column using the source it holds (the engine exposes positions, not
- * text).
- */
-typedef struct DoodlePosition {
-  /**
-   * The construct's start byte offset into the module's NFC source.
-   */
-  uint32_t span_start;
-  /**
-   * The construct's end byte offset.
-   */
-  uint32_t span_end;
-  /**
-   * The opaque module token (see the type doc).
-   */
-  uint32_t module;
-} DoodlePosition;
 
 /**
  * One live stack frame (E§8.2), filled by `doodle_frame_at` — pure data; the callable is minted
@@ -1227,6 +1282,213 @@ DoodleStatus doodle_foreign_desc_set_callback(struct DoodleForeignDesc *desc,
  * `desc` must be a pointer from `doodle_foreign_desc_new` not already freed or consumed.
  */
 void doodle_foreign_desc_free(struct DoodleForeignDesc *desc);
+
+/**
+ * Copies a record's **type name** (L§9) into `buf` (copy-out). `ErrWrongKind` if not a record.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_record_type_name(const struct DoodleInstance *instance,
+                                     DoodleHandle handle,
+                                     uint8_t *buf,
+                                     uintptr_t cap,
+                                     uintptr_t *out_len);
+
+/**
+ * Writes a record's field count (L§9). `ErrWrongKind` if not a record.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_record_length(const struct DoodleInstance *instance,
+                                  DoodleHandle handle,
+                                  uint32_t *out_count);
+
+/**
+ * Copies the name of a record's `index`-th field (declaration order) into `buf` (copy-out).
+ * `ErrWrongKind` if not a record; `ErrIndexOutOfBounds` past the last field.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_record_field_name(const struct DoodleInstance *instance,
+                                      DoodleHandle handle,
+                                      uint32_t index,
+                                      uint8_t *buf,
+                                      uintptr_t cap,
+                                      uintptr_t *out_len);
+
+/**
+ * A fresh **host-owned** handle to a record's `index`-th field value (L§9). `ErrWrongKind` if
+ * not a record; `ErrIndexOutOfBounds` past the last field.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_record_field(struct DoodleInstance *instance,
+                                 DoodleHandle handle,
+                                 uint32_t index,
+                                 DoodleHandle *out_handle);
+
+/**
+ * Writes a dict's entry count (L§4.7). `ErrWrongKind` if not a dict.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_dict_length(const struct DoodleInstance *instance,
+                                DoodleHandle handle,
+                                uint32_t *out_count);
+
+/**
+ * A fresh **host-owned** handle to a dict's `index`-th key, in insertion order (L§4.7).
+ * `ErrWrongKind` if not a dict; `ErrIndexOutOfBounds` past the last entry.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_dict_key(struct DoodleInstance *instance,
+                             DoodleHandle handle,
+                             uint32_t index,
+                             DoodleHandle *out_handle);
+
+/**
+ * A fresh **host-owned** handle to a dict's `index`-th value, in insertion order (L§4.7).
+ * `ErrWrongKind` if not a dict; `ErrIndexOutOfBounds` past the last entry.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_dict_value(struct DoodleInstance *instance,
+                               DoodleHandle handle,
+                               uint32_t index,
+                               DoodleHandle *out_handle);
+
+/**
+ * Writes a list's length (L§4.6). `ErrWrongKind` if not a list.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_list_length(const struct DoodleInstance *instance,
+                                DoodleHandle handle,
+                                uint32_t *out_count);
+
+/**
+ * A fresh **host-owned** handle to a list's `index`-th element (L§4.6). `ErrWrongKind` if not a
+ * list; `ErrIndexOutOfBounds` past the end.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_list_get(struct DoodleInstance *instance,
+                             DoodleHandle handle,
+                             uint32_t index,
+                             DoodleHandle *out_handle);
+
+/**
+ * Copies a callable's name into `buf` (copy-out) when it has one; `out_has` reports whether it
+ * does (an anonymous `fn` has none). `ErrWrongKind` if the value is not a callable.
+ *
+ * # Safety
+ * `instance` live; `out_has` writable; `buf` readable for `cap` (or NULL with `cap` 0);
+ * `out_len` may be NULL.
+ */
+DoodleStatus doodle_callable_name(const struct DoodleInstance *instance,
+                                  DoodleHandle handle,
+                                  bool *out_has,
+                                  uint8_t *buf,
+                                  uintptr_t cap,
+                                  uintptr_t *out_len);
+
+/**
+ * Writes whether a callable is a function (`fn`, yields a value) vs a procedure (`to`) into
+ * `out_is_function`; `out_has` is `false` if the kind is indeterminate. `ErrWrongKind` if not a
+ * callable.
+ *
+ * # Safety
+ * `instance` live; `out_has`/`out_is_function` writable.
+ */
+DoodleStatus doodle_callable_is_function(const struct DoodleInstance *instance,
+                                         DoodleHandle handle,
+                                         bool *out_has,
+                                         bool *out_is_function);
+
+/**
+ * Writes a callable's definition position into `out_position` when known; `out_has` reports
+ * whether it is. `ErrWrongKind` if not a callable.
+ *
+ * # Safety
+ * `instance` live; `out_position`/`out_has` writable.
+ */
+DoodleStatus doodle_callable_position(const struct DoodleInstance *instance,
+                                      DoodleHandle handle,
+                                      struct DoodlePosition *out_position,
+                                      bool *out_has);
+
+/**
+ * Writes a callable's **docstring** position into `out_position` when it has one; `out_has`
+ * reports whether it does. `ErrWrongKind` if not a callable.
+ *
+ * # Safety
+ * `instance` live; `out_position`/`out_has` writable.
+ */
+DoodleStatus doodle_callable_docstring(const struct DoodleInstance *instance,
+                                       DoodleHandle handle,
+                                       struct DoodlePosition *out_position,
+                                       bool *out_has);
+
+/**
+ * Copies a type value's name (L§4.12) into `buf` (copy-out). `ErrWrongKind` if not a type value.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_type_name(const struct DoodleInstance *instance,
+                              DoodleHandle handle,
+                              uint8_t *buf,
+                              uintptr_t cap,
+                              uintptr_t *out_len);
+
+/**
+ * Writes a module value's public member count (L§9). `ErrWrongKind` if not a module value.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_module_member_count(const struct DoodleInstance *instance,
+                                        DoodleHandle handle,
+                                        uint32_t *out_count);
+
+/**
+ * Copies the name of a module value's `index`-th public member into `buf` (copy-out).
+ * `ErrWrongKind` if not a module value; `ErrIndexOutOfBounds` past the last member.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_module_member_name(const struct DoodleInstance *instance,
+                                       DoodleHandle handle,
+                                       uint32_t index,
+                                       uint8_t *buf,
+                                       uintptr_t cap,
+                                       uintptr_t *out_len);
+
+/**
+ * Renders `handle`'s value to its `to_string` (E§8.4) with its **own** `fuel` budget, writing
+ * the result to `out_outcome` — **without disturbing the instance's pause** (S-22). It runs
+ * Doodle code, so it may render, raise, or fault (see [`DoodleAuxOutcome`]); breakpoints and the
+ * raise-trap are suppressed, and the pause generation is **not** bumped (frame addressing stays
+ * valid across it). `Rendered`/`Raised` carry host-owned handles the host releases.
+ *
+ * # Safety
+ * `instance` live; `out_outcome` writable.
+ */
+DoodleStatus doodle_eval_to_string(struct DoodleInstance *instance,
+                                   DoodleHandle handle,
+                                   uint64_t fuel,
+                                   struct DoodleAuxOutcome *out_outcome);
 
 /**
  * Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`

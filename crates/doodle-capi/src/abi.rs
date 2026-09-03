@@ -314,6 +314,36 @@ pub struct DoodleFrame {
     pub reserved: [u64; 4],
 }
 
+/// Which arm an auxiliary evaluation (`doodle_eval_to_string`) took (E§8.4) — the tag of
+/// [`DoodleAuxOutcome`].
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoodleAuxOutcomeKind {
+    /// `to_string` returned a String — `DoodleAuxOutcome::value` is a host-owned handle to it.
+    Rendered = 0,
+    /// The rendering raised (a non-String result, or a `raise` inside `to_string`) —
+    /// `DoodleAuxOutcome::value` is a host-owned handle to the raised value.
+    Raised = 1,
+    /// The rendering hit an engine fault (e.g. its own fuel ran out) — `DoodleAuxOutcome::fault`.
+    Faulted = 2,
+}
+
+/// The result of an auxiliary evaluation (E§8.4), written by `doodle_eval_to_string`: rendering a
+/// value to its `to_string` **without disturbing the instance's pause** (S-22). A `#[repr(C)]`
+/// struct like [`DoodleOutcome`], with a `reserved` tail for additive growth.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodleAuxOutcome {
+    /// Which arm the evaluation took.
+    pub kind: DoodleAuxOutcomeKind,
+    /// `Rendered`/`Raised`: a **host-owned** handle (release it), `0` on `Faulted`.
+    pub value: DoodleHandle,
+    /// `Faulted`: which fault (unused otherwise).
+    pub fault: DoodleFault,
+    /// Reserved for additive growth; always written as `0`.
+    pub reserved: [u64; 2],
+}
+
 /// What a module-level global is (L§5), the C mirror of the resolver's `GlobalKind` — so a host
 /// filters a module's globals (e.g. show `Let`/`Const`/`Parameter` as data, hide `Proc`/`Fn`).
 #[repr(u32)]
