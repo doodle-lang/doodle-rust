@@ -79,7 +79,7 @@ pub use intrinsic::{
     read_line as read_line_intrinsic, set_turtle as set_turtle_intrinsic, sin as sin_intrinsic,
 };
 pub use native::{ConstValue, NativeMember, NativeModule};
-pub use observe::{Binding, ElidedFrameObservation, FrameObservation, Position};
+pub use observe::{Binding, ElidedFrameObservation, FrameInfo, FrameObservation, Position};
 pub use pause::PauseToken;
 pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{

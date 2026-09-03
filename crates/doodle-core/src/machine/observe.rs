@@ -55,6 +55,25 @@ pub struct Position {
     pub span: Span,
 }
 
+/// Per-frame data read **one frame at a time** (E§8.2), for a pull surface that mints the
+/// callable handle lazily ([`frame_callable`](Instance::frame_callable)) rather than eagerly
+/// like the bulk [`stack_walk`](Instance::stack_walk) — the granularity the C ABI observation
+/// surface wants (D-M7-13). Innermost-first `index`, matching `stack_walk`'s order.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameInfo {
+    /// Whether this frame runs a callable value (fetch it with
+    /// [`frame_callable`](Instance::frame_callable)); `false` for the module top level and
+    /// `do … end` block frames.
+    pub has_callable: bool,
+    /// Where this frame was entered — the call site's [`Span`]. `None` for the module top level
+    /// and a block invoked by a native consumer (as [`FrameObservation::call_site`]).
+    pub call_site: Option<Span>,
+    /// Tail-iterations absorbed into this frame by proper-tail-call reuse (E§8.3).
+    pub tail_count: u64,
+    /// The frame's home module (E§8.2), as [`FrameObservation::module`].
+    pub module: ModuleId,
+}
+
 /// One frame in a [`stack_walk`](Instance::stack_walk) (E§8.2), innermost first.
 #[derive(Clone, Debug)]
 pub struct FrameObservation {
@@ -181,6 +200,52 @@ impl Instance {
                 module,
             })
             .collect()
+    }
+
+    /// The number of live frames (E§8.2) — the innermost-first index space the per-frame
+    /// accessors ([`frame_info`](Self::frame_info)/[`frame_callable`](Self::frame_callable))
+    /// address, for a host that reads the stack one frame at a time rather than via the bulk
+    /// [`stack_walk`](Self::stack_walk).
+    pub fn frame_count(&self) -> usize {
+        self.machine.frames.len()
+    }
+
+    /// The [`FrameInfo`] for innermost-first `index` (E§8.2), minting no handle, or `None` if
+    /// out of range. The callable is fetched separately ([`frame_callable`](Self::frame_callable)),
+    /// so a host that only needs positions/counts pays for no handles (D-M7-13). Matches
+    /// [`stack_walk`](Self::stack_walk)'s per-frame fields.
+    pub fn frame_info(&self, index: usize) -> Option<FrameInfo> {
+        let actual = self.frame_at(index)?;
+        let frame = &self.machine.frames[actual];
+        Some(FrameInfo {
+            has_callable: matches!(frame.kind, FrameKind::Callable { .. }),
+            call_site: frame
+                .call_site
+                .map(|node| self.current_resolved().ast.span(node)),
+            tail_count: frame.tail_count,
+            module: frame.module,
+        })
+    }
+
+    /// A fresh **host-owned** handle to frame `index`'s callable (E§8.2), or `None` for a block /
+    /// module-top frame (no callable value) or an out-of-range index. Mints like
+    /// [`stack_walk`](Self::stack_walk); the host releases it. Once minted the handle is an
+    /// ordinary handle (valid across resumes) — only the `index` addressing is pause-scoped
+    /// (D-M7-13).
+    pub fn frame_callable(&mut self, index: usize) -> Option<Handle> {
+        let actual = self.frame_at(index)?;
+        let cal = match self.machine.frames[actual].kind {
+            FrameKind::Callable { cal } => cal,
+            FrameKind::Block { .. } | FrameKind::ModuleTopLevel => return None,
+        };
+        Some(self.intern(Value::Callable(cal)))
+    }
+
+    /// The host canonical id a module was loaded under (E§6), or `None` for an unknown token —
+    /// the reverse of the load-time string→id mapping, so a host resolves a [`Position`]'s opaque
+    /// module token to the source it holds (D-M7-14).
+    pub fn module_canonical_id(&self, module: ModuleId) -> Option<&str> {
+        self.machine.load.canonical_of(module)
     }
 
     /// The call-site spans of the active callable frames (E§8.2), innermost first — like

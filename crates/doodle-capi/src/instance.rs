@@ -6,7 +6,8 @@
 //! M7.2 work.
 
 use crate::abi::{
-    self, DoodleDirective, DoodleHandle, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
+    self, DOODLE_NULL_HANDLE, DoodleDirective, DoodleHandle, DoodleOutcome, DoodleOutcomeKind,
+    DoodleStatus,
 };
 use crate::guard::catch;
 use crate::value::copy_out;
@@ -19,6 +20,12 @@ use doodle_core::machine::{Handle, Instance};
 /// Opaque to C.
 pub struct DoodleInstance {
     pub(crate) inner: Instance,
+    /// The **pause generation** (D-M7-12): bumped by every state-advancing drive (`fill_outcome`,
+    /// so `drive`/`resolve`/`resolve_import`), **not** by auxiliary evaluation (which restores the
+    /// paused stack, S-22). The pause-scoped observation accessors ([`crate::observe`]) take a
+    /// generation token from the stack walk and reject a stale one with `ErrStale`, so a debugger
+    /// never resolves a frame index against a stack that a drive has since replaced.
+    pub(crate) generation: u32,
     /// `(kind, message)` of the last `Raised` outcome (E§9), for the describe accessors.
     last_raised: Option<(String, String)>,
     /// The bound argument handles of a parked capability suspension (E§7.5): `Some` while the
@@ -216,8 +223,9 @@ pub unsafe extern "C" fn doodle_output(
 // --- internals ---
 
 /// Borrows the `DoodleInstance` behind a raw pointer, or `None` if NULL — the one documented
-/// mutable deref the drive/handle entry points share.
-fn di_mut<'a>(instance: *mut DoodleInstance) -> Option<&'a mut DoodleInstance> {
+/// mutable deref the drive/handle entry points share (also the observation surface,
+/// [`crate::observe`]).
+pub(crate) fn di_mut<'a>(instance: *mut DoodleInstance) -> Option<&'a mut DoodleInstance> {
     // SAFETY: `as_mut` returns None for NULL; a non-null `instance` is a live `DoodleInstance`
     // from `doodle_load` (not freed) by the caller's `# Safety` contract, and the host drives
     // one instance from one thread at a time (`!Sync`), so a `&mut` for `'a` is sound.
@@ -225,7 +233,7 @@ fn di_mut<'a>(instance: *mut DoodleInstance) -> Option<&'a mut DoodleInstance> {
 }
 
 /// Borrows the `DoodleInstance` behind a raw pointer for a shared read, or `None` if NULL.
-fn di_ref<'a>(instance: *const DoodleInstance) -> Option<&'a DoodleInstance> {
+pub(crate) fn di_ref<'a>(instance: *const DoodleInstance) -> Option<&'a DoodleInstance> {
     // SAFETY: as `di_mut`, for a shared borrow.
     unsafe { instance.as_ref() }
 }
@@ -280,13 +288,23 @@ fn resolve_and_fill(
 /// Fills a [`DoodleOutcome`] from a core [`Outcome`], stashing a raise's described form.
 fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome) -> DoodleOutcome {
     let mut out = DoodleOutcome::blank();
+    // A state-advancing drive replaced the stack: bump the pause generation (D-M7-12), so a
+    // frame index a debugger obtained before this drive is now stale (`ErrStale`). Auxiliary
+    // evaluation restores the paused stack (S-22) and does not route here, so it never bumps.
+    di.generation = di.generation.wrapping_add(1);
     di.last_raised = None;
     di.pending_args = None;
     di.pending_import = None;
     match outcome {
-        // A module drive completes Void; a returning `fn`'s result (M2b.5) will populate
-        // `value` once an intern-to-handle path exists on the boundary (M7.3).
-        Outcome::Completed(_) => out.kind = DoodleOutcomeKind::Completed,
+        // A module drive completes Void; a reentrant `fn`'s result (M2b.5) rides in the result
+        // register — intern it to a host-owned handle for `value` (`0`/Void otherwise, D-M7-15).
+        Outcome::Completed(_) => {
+            out.kind = DoodleOutcomeKind::Completed;
+            out.value = di
+                .inner
+                .result_handle()
+                .map_or(DOODLE_NULL_HANDLE, |h| h.bits());
+        }
         Outcome::Suspended(request) => {
             out.kind = DoodleOutcomeKind::Suspended;
             out.capability = request.capability.0;

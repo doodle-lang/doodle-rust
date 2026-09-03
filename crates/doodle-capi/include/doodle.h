@@ -80,6 +80,13 @@ enum DoodleStatus
    * [`crate::guard`]). The instance should be considered unusable.
    */
   DoodleStatus_ErrPanic = 12,
+  /**
+   * A pause-scoped observation read used a **stale generation** token: a `drive`/`resolve`
+   * advanced the stack since the token was obtained (D-M7-12). **Benign and expected** — the
+   * host re-walks the stack (`doodle_stack_frame_count`) and retries — NOT a contract
+   * violation (`ErrContract`) and distinct from `ErrStaleHandle` (a released/forged handle).
+   */
+  DoodleStatus_ErrStale = 13,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -593,6 +600,64 @@ typedef struct DoodleOutcome {
    */
   uint64_t reserved[4];
 } DoodleOutcome;
+
+/**
+ * A source position (E§8.1): a byte span into a module's NFC source plus an **opaque
+ * instance-scoped module token** (D-M7-14). Equal `module` tokens ⇔ the same module within one
+ * instance (stable for its lifetime), and nothing more — it is **not** a documented index;
+ * resolve it to the host's canonical id with `doodle_module_canonical_id`. The host maps the
+ * byte span to 1-based line/column using the source it holds (the engine exposes positions, not
+ * text).
+ */
+typedef struct DoodlePosition {
+  /**
+   * The construct's start byte offset into the module's NFC source.
+   */
+  uint32_t span_start;
+  /**
+   * The construct's end byte offset.
+   */
+  uint32_t span_end;
+  /**
+   * The opaque module token (see the type doc).
+   */
+  uint32_t module;
+} DoodlePosition;
+
+/**
+ * One live stack frame (E§8.2), filled by `doodle_frame_at` — pure data; the callable is minted
+ * separately by `doodle_frame_callable` (D-M7-13). Innermost frame is index 0. The `reserved`
+ * tail is additive growth room (freeze convention 2).
+ */
+typedef struct DoodleFrame {
+  /**
+   * Whether this frame runs a callable value (get it via `doodle_frame_callable`); `false` for
+   * the module top level and `do … end` block frames.
+   */
+  bool has_callable;
+  /**
+   * Whether `call_site` names where this frame was entered (`false` for the module top level
+   * or a block invoked by native host code).
+   */
+  bool has_call_site;
+  /**
+   * Where this frame was entered — meaningful only when `has_call_site`.
+   */
+  struct DoodlePosition call_site;
+  /**
+   * Tail-iterations absorbed into this frame by proper-tail-call reuse (E§8.3): `0` for a
+   * fresh frame, `n` after `n` tail calls reused the same slot.
+   */
+  uint64_t tail_count;
+  /**
+   * The frame's home module, as an opaque module token (see [`DoodlePosition::module`]).
+   */
+  uint32_t module;
+  /**
+   * Reserved for additive growth (freeze convention 2); always written as `0`.
+   */
+  uint64_t reserved[4];
+} DoodleFrame;
 
 /**
  * The null handle: the absence of a value (a `to`/module result, an empty outcome slot).
@@ -1306,6 +1371,94 @@ DoodleStatus doodle_load_with_registry(const uint8_t *source,
  * `instance` must be a pointer from `doodle_load` that has not already been freed.
  */
 void doodle_free(struct DoodleInstance *instance);
+
+/**
+ * The current source position (E§8.1): the span the active frame is about to execute. `has` is
+ * `false` (position zeroed) when the instance is terminal (no active frame).
+ *
+ * # Safety
+ * `instance` live; `out_position`/`out_has` writable.
+ */
+DoodleStatus doodle_current_position(const struct DoodleInstance *instance,
+                                     struct DoodlePosition *out_position,
+                                     bool *out_has);
+
+/**
+ * The position of the subexpression just completed at a **fine** safe point (E§8.4, S-62) —
+ * together with `doodle_current_result`, the "watch your expression evaluate" primitive. `has`
+ * is `false` at a statement stop or when not stopped at a fine point.
+ *
+ * # Safety
+ * `instance` live; `out_position`/`out_has` writable.
+ */
+DoodleStatus doodle_completed_position(const struct DoodleInstance *instance,
+                                       struct DoodlePosition *out_position,
+                                       bool *out_has);
+
+/**
+ * A fresh **host-owned** handle to the current result-register value (E§8.4), or
+ * `DOODLE_NULL_HANDLE` when the register is empty (Void). At a fine safe point this is the
+ * subexpression's value (S-62). Non-null results are host-owned — `doodle_release` them.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_current_result(struct DoodleInstance *instance, DoodleHandle *out_handle);
+
+/**
+ * Writes the number of live stack frames (E§8.2) to `out_count` and the current **pause
+ * generation** to `out_generation` — the token every per-frame accessor validates (D-M7-12).
+ * Frames are addressed innermost-0. Re-read (and re-walk) after any drive/resolve.
+ *
+ * # Safety
+ * `instance` live; `out_count`/`out_generation` writable.
+ */
+DoodleStatus doodle_stack_frame_count(const struct DoodleInstance *instance,
+                                      uint32_t *out_count,
+                                      uint32_t *out_generation);
+
+/**
+ * Fills `out_frame` with innermost-first frame `index` (E§8.2), pure data (the callable is minted
+ * separately by `doodle_frame_callable`). `generation` must be the token from
+ * `doodle_stack_frame_count`; a stale one → `ErrStale` (checked **before** bounds, D-M7-12), a
+ * live one with `index` past the top → `ErrIndexOutOfBounds`.
+ *
+ * # Safety
+ * `instance` live; `out_frame` writable.
+ */
+DoodleStatus doodle_frame_at(const struct DoodleInstance *instance,
+                             uint32_t generation,
+                             uint32_t index,
+                             struct DoodleFrame *out_frame);
+
+/**
+ * A fresh **host-owned** handle to frame `index`'s callable (E§8.2, D-M7-13), or
+ * `DOODLE_NULL_HANDLE` for a module-top / block frame (no callable — `has_callable` said so).
+ * `generation` gates the `index` addressing (stale → `ErrStale`), **not** the returned handle:
+ * once minted it is an ordinary host-owned handle (valid across resumes) — `doodle_release` it.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_frame_callable(struct DoodleInstance *instance,
+                                   uint32_t generation,
+                                   uint32_t index,
+                                   DoodleHandle *out_handle);
+
+/**
+ * Copies the host **canonical id** a position's opaque module `token` was loaded under (E§6,
+ * D-M7-14) into `buf` (copy-out; `out_len` gets the full byte length) — the host resolves a
+ * `DoodlePosition::module` to the source it holds. `ErrContract` if `token` names no loaded
+ * module (a fabricated token; tokens come from positions/frames).
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_module_canonical_id(const struct DoodleInstance *instance,
+                                        uint32_t token,
+                                        uint8_t *buf,
+                                        uintptr_t cap,
+                                        uintptr_t *out_len);
 
 /**
  * Creates an empty registry. Returns NULL only on allocation failure. Populate it in the

@@ -121,6 +121,7 @@ fn load_impl(
         Ok(instance) => {
             let boxed = Box::new(DoodleInstance {
                 inner: instance,
+                generation: 0,
                 last_raised: None,
                 pending_args: None,
                 pending_import: None,

@@ -134,6 +134,16 @@ impl ModuleLoad {
             .map(|(_, id)| *id)
     }
 
+    /// The canonical id module `id` was loaded under, if any (the reverse of
+    /// [`by_canonical`](Self::by_canonical)) — for a host resolving an engine→host module token
+    /// to its source (E§6, D-M7-14).
+    pub(crate) fn canonical_of(&self, id: ModuleId) -> Option<&str> {
+        self.by_canonical
+            .iter()
+            .find(|(_, m)| *m == id)
+            .map(|(c, _)| c.as_ref())
+    }
+
     /// Registers a freshly pushed module (table index `id`) as `Loading`, keyed by the
     /// requested `path` and the host `canonical` id. `states` must be extended in lockstep
     /// with the instance's module table, so `id.0` equals the current `states` length.

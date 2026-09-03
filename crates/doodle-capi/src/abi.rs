@@ -5,7 +5,7 @@
 //! [`DoodleOutcome::reserved`].
 
 use doodle_core::drive::{Directive, EngineFault, LimitKind, PauseReason};
-use doodle_core::machine::{BlockOutcome, Kind, ValueError};
+use doodle_core::machine::{BlockOutcome, Kind, Position, ValueError};
 use doodle_core::resolve::BodyKind;
 
 /// An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
@@ -61,6 +61,11 @@ pub enum DoodleStatus {
     /// A Rust panic was caught at the boundary (an engine bug; the firewall of last resort,
     /// [`crate::guard`]). The instance should be considered unusable.
     ErrPanic = 12,
+    /// A pause-scoped observation read used a **stale generation** token: a `drive`/`resolve`
+    /// advanced the stack since the token was obtained (D-M7-12). **Benign and expected** — the
+    /// host re-walks the stack (`doodle_stack_frame_count`) and retries — NOT a contract
+    /// violation (`ErrContract`) and distinct from `ErrStaleHandle` (a released/forged handle).
+    ErrStale = 13,
 }
 
 /// A value's kind (E§4.4), the C mirror of `doodle_core`'s `Kind`.
@@ -266,6 +271,55 @@ impl DoodleOutcome {
             value: DOODLE_NULL_HANDLE,
             reserved: [0; 4],
         }
+    }
+}
+
+/// A source position (E§8.1): a byte span into a module's NFC source plus an **opaque
+/// instance-scoped module token** (D-M7-14). Equal `module` tokens ⇔ the same module within one
+/// instance (stable for its lifetime), and nothing more — it is **not** a documented index;
+/// resolve it to the host's canonical id with `doodle_module_canonical_id`. The host maps the
+/// byte span to 1-based line/column using the source it holds (the engine exposes positions, not
+/// text).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodlePosition {
+    /// The construct's start byte offset into the module's NFC source.
+    pub span_start: u32,
+    /// The construct's end byte offset.
+    pub span_end: u32,
+    /// The opaque module token (see the type doc).
+    pub module: u32,
+}
+
+/// One live stack frame (E§8.2), filled by `doodle_frame_at` — pure data; the callable is minted
+/// separately by `doodle_frame_callable` (D-M7-13). Innermost frame is index 0. The `reserved`
+/// tail is additive growth room (freeze convention 2).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodleFrame {
+    /// Whether this frame runs a callable value (get it via `doodle_frame_callable`); `false` for
+    /// the module top level and `do … end` block frames.
+    pub has_callable: bool,
+    /// Whether `call_site` names where this frame was entered (`false` for the module top level
+    /// or a block invoked by native host code).
+    pub has_call_site: bool,
+    /// Where this frame was entered — meaningful only when `has_call_site`.
+    pub call_site: DoodlePosition,
+    /// Tail-iterations absorbed into this frame by proper-tail-call reuse (E§8.3): `0` for a
+    /// fresh frame, `n` after `n` tail calls reused the same slot.
+    pub tail_count: u64,
+    /// The frame's home module, as an opaque module token (see [`DoodlePosition::module`]).
+    pub module: u32,
+    /// Reserved for additive growth (freeze convention 2); always written as `0`.
+    pub reserved: [u64; 4],
+}
+
+/// Maps a core [`Position`] to its ABI mirror (the module id becomes the opaque token).
+pub(crate) fn position(pos: Position) -> DoodlePosition {
+    DoodlePosition {
+        span_start: pos.span.start,
+        span_end: pos.span.end,
+        module: pos.module.0,
     }
 }
 

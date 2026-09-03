@@ -14,6 +14,7 @@ use doodle_capi::abi::{
     DOODLE_NULL_HANDLE, DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault,
     DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
+use doodle_capi::abi::{DoodleFrame, DoodlePosition};
 use doodle_capi::call::{
     DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_arg_count, doodle_call_block,
     doodle_call_set_raise, doodle_call_set_result,
@@ -29,6 +30,10 @@ use doodle_capi::instance::{
     DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_import_path_segment,
     doodle_load, doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
     doodle_resolve_import, doodle_resolve_import_not_found,
+};
+use doodle_capi::observe::{
+    doodle_current_position, doodle_current_result, doodle_frame_at, doodle_frame_callable,
+    doodle_module_canonical_id, doodle_stack_frame_count,
 };
 use doodle_capi::registry::{
     DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_new,
@@ -786,4 +791,157 @@ fn touching_an_ancestor_ctx_from_a_reentrant_call_is_rejected_not_ub() {
         DoodleStatus::ErrContract as u32,
         "touching the ancestor ctx mid-drive must be rejected"
     );
+}
+
+// ---- M7.3a: observation surface (positions, stack walk, generation) ------------------------
+
+fn zero_pos() -> DoodlePosition {
+    DoodlePosition {
+        span_start: 0,
+        span_end: 0,
+        module: 0,
+    }
+}
+
+fn zero_frame() -> DoodleFrame {
+    DoodleFrame {
+        has_callable: false,
+        has_call_site: false,
+        call_site: zero_pos(),
+        tail_count: 0,
+        module: 0,
+        reserved: [0; 4],
+    }
+}
+
+/// Loads `source` and drives one `Step`, asserting it paused at a safe point; returns the instance.
+fn load_and_pause(source: &str) -> *mut DoodleInstance {
+    let inst = load(source);
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, DoodleDirective::Step, &mut out) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(out.kind, DoodleOutcomeKind::Paused, "expected a Step pause");
+    inst
+}
+
+#[test]
+fn observation_stack_walk_positions_and_generation_staleness() {
+    let inst = load_and_pause("let x = 1\nlet y = 2\n");
+    // The stack has at least the module top-level frame; the walk hands back the generation token.
+    let (mut count, mut walk_gen) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count, &mut walk_gen) },
+        DoodleStatus::Ok
+    );
+    assert!(count >= 1, "at least the module-top frame");
+    // The outermost frame is the module top: no callable value.
+    let mut frame = zero_frame();
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, walk_gen, count - 1, &mut frame) },
+        DoodleStatus::Ok
+    );
+    assert!(!frame.has_callable, "the module top has no callable");
+    let mut handle = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_frame_callable(inst, walk_gen, count - 1, &mut handle) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        handle, DOODLE_NULL_HANDLE,
+        "no callable handle for the module top"
+    );
+    // A wrong generation is a benign ErrStale (re-walk), not a contract error.
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, walk_gen.wrapping_add(1), 0, &mut frame) },
+        DoodleStatus::ErrStale
+    );
+    // A live generation with an out-of-range index is a bounds error (checked AFTER the walk_gen).
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, walk_gen, count + 10, &mut frame) },
+        DoodleStatus::ErrIndexOutOfBounds
+    );
+    // A paused instance has a current position; its module token resolves to a canonical id.
+    let (mut pos, mut has) = (zero_pos(), false);
+    assert_eq!(
+        unsafe { doodle_current_position(inst, &mut pos, &mut has) },
+        DoodleStatus::Ok
+    );
+    assert!(has, "a paused instance has a current position");
+    let mut buf = [0u8; 256];
+    let mut len = 0usize;
+    assert_eq!(
+        unsafe {
+            doodle_module_canonical_id(inst, pos.module, buf.as_mut_ptr(), buf.len(), &mut len)
+        },
+        DoodleStatus::Ok,
+        "the position's module token resolves"
+    );
+    // A fabricated module token is a contract error, not a resolve.
+    assert_eq!(
+        unsafe { doodle_module_canonical_id(inst, 9999, buf.as_mut_ptr(), buf.len(), &mut len) },
+        DoodleStatus::ErrContract
+    );
+    // The result register reads cleanly (Void or a value) at a pause.
+    let mut result = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_current_result(inst, &mut result) },
+        DoodleStatus::Ok
+    );
+    // Advancing the drive bumps the generation → the old token is now stale.
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Completed);
+    assert_eq!(out.value, 0, "a module drive completes Void");
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, walk_gen, 0, &mut frame) },
+        DoodleStatus::ErrStale,
+        "the pre-drive generation is stale after a drive"
+    );
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn observation_frame_callable_for_a_function_frame() {
+    // StepInto descends into f(); its frame is a callable frame with a mintable callable handle.
+    let inst = load("to f()\nlet z = 1\nend\nf()\n");
+    let mut out = DoodleOutcome::blank();
+    let mut reached = false;
+    for _ in 0..20 {
+        assert_eq!(
+            unsafe { doodle_drive(inst, DoodleDirective::StepInto, &mut out) },
+            DoodleStatus::Ok
+        );
+        if out.kind != DoodleOutcomeKind::Paused {
+            break;
+        }
+        let (mut count, mut walk_gen) = (0u32, 0u32);
+        assert_eq!(
+            unsafe { doodle_stack_frame_count(inst, &mut count, &mut walk_gen) },
+            DoodleStatus::Ok
+        );
+        if count >= 2 {
+            // Frame 0 (innermost) is f's callable frame.
+            let mut frame = zero_frame();
+            assert_eq!(
+                unsafe { doodle_frame_at(inst, walk_gen, 0, &mut frame) },
+                DoodleStatus::Ok
+            );
+            assert!(frame.has_callable, "the innermost frame runs f");
+            let mut handle = DOODLE_NULL_HANDLE;
+            assert_eq!(
+                unsafe { doodle_frame_callable(inst, walk_gen, 0, &mut handle) },
+                DoodleStatus::Ok
+            );
+            assert_ne!(
+                handle, DOODLE_NULL_HANDLE,
+                "f's frame yields a callable handle"
+            );
+            let _ = unsafe { doodle_release(inst, handle) };
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "StepInto reached f's callable frame");
+    unsafe { doodle_free(inst) };
 }

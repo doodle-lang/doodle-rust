@@ -109,12 +109,16 @@ impl HandleTable {
             None => {
                 let index = u32::try_from(self.slots.len())
                     .expect("handle table exceeds the u32 index space");
+                // Generations are **1-based** so a live handle never encodes to `0`: slot 0 at
+                // generation 0 would pack to `0`, which the host boundary reserves as the null
+                // handle (E§4.2). Starting at 1 (and skipping 0 on the wrap-reuse in `release`)
+                // keeps `0` reserved, so the first minted handle differs from "no value".
                 self.slots.push(Slot::Occupied {
                     value,
-                    generation: 0,
+                    generation: 1,
                     refs: 1,
                 });
-                Handle::new(index, 0)
+                Handle::new(index, 1)
             }
         }
     }
@@ -153,7 +157,13 @@ impl HandleTable {
         };
         *refs -= 1;
         if *refs == 0 {
-            let next_generation = generation.wrapping_add(1);
+            // Bump the generation so any handle still naming this slot goes stale; skip `0` on
+            // the (astronomically rare) 2^32 wrap so generations stay 1-based and no reused slot
+            // 0 ever encodes a live handle to the reserved null value (see `intern`).
+            let next_generation = match generation.wrapping_add(1) {
+                0 => 1,
+                n => n,
+            };
             self.slots[index] = Slot::Free {
                 generation: next_generation,
                 next_free: self.free_head,
@@ -226,6 +236,32 @@ mod tests {
         assert_eq!(t.retain(old), Err(HandleError::Stale));
         assert_eq!(t.release(old), Err(HandleError::Stale));
         assert_eq!(t.resolve(new).unwrap().as_int(), Some(2));
+    }
+
+    #[test]
+    fn no_live_handle_encodes_to_zero() {
+        // `0` is the reserved null handle at the host boundary (E§4.2, `DOODLE_NULL_HANDLE`), so
+        // no *live* handle may pack to `0` — else the first minted handle (slot 0) would read as
+        // "no value". The first intern must not be `0`, and a re-used slot 0 must not either.
+        let mut t = HandleTable::new();
+        let first = t.intern(int(1));
+        assert_ne!(
+            first.bits(),
+            0,
+            "the first handle must not collide with the null handle"
+        );
+        t.release(first).unwrap();
+        let reused = t.intern(int(2)); // reuses slot 0 under a bumped generation
+        assert_ne!(
+            reused.bits(),
+            0,
+            "a re-used slot 0 must not encode to the null handle"
+        );
+        // A handle rebuilt from the reserved null bits is stale, never a live value.
+        assert_eq!(
+            t.resolve(Handle::from_bits(0)).err(),
+            Some(HandleError::Stale)
+        );
     }
 
     #[test]
