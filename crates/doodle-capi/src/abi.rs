@@ -6,7 +6,7 @@
 
 use doodle_core::drive::{Directive, EngineFault, LimitKind, PauseReason};
 use doodle_core::machine::{BlockOutcome, Kind, Position, ValueError};
-use doodle_core::resolve::BodyKind;
+use doodle_core::resolve::{BodyKind, GlobalKind};
 
 /// An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
 /// Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
@@ -312,6 +312,58 @@ pub struct DoodleFrame {
     pub module: u32,
     /// Reserved for additive growth (freeze convention 2); always written as `0`.
     pub reserved: [u64; 4],
+}
+
+/// What a module-level global is (L§5), the C mirror of the resolver's `GlobalKind` — so a host
+/// filters a module's globals (e.g. show `Let`/`Const`/`Parameter` as data, hide `Proc`/`Fn`).
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoodleGlobalKind {
+    /// A mutable binding (`let`).
+    Let = 0,
+    /// A non-reassignable binding (`const`).
+    Const = 1,
+    /// A dynamic parameter (`parameter`).
+    Parameter = 2,
+    /// A procedure (`to`).
+    Proc = 3,
+    /// A function (`fn`).
+    Func = 4,
+    /// A record type (`record`/`ref record`).
+    Record = 5,
+    /// A protocol (`protocol`).
+    Protocol = 6,
+    /// A nested module (`module`).
+    Module = 7,
+}
+
+/// One module-level global (E§8.2, L§5), filled by `doodle_module_global` — its `kind` and the
+/// `decl_span` of its declaration. Its name copies out separately (`doodle_module_global_name`)
+/// and its current value is fetched by the same index (`doodle_module_global_value`). The
+/// `reserved` tail is additive growth room (freeze convention 2).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DoodleGlobal {
+    /// What kind of declaration the global is.
+    pub kind: DoodleGlobalKind,
+    /// The source position of the declaration.
+    pub decl_span: DoodlePosition,
+    /// Reserved for additive growth; always written as `0`.
+    pub reserved: [u64; 2],
+}
+
+/// Maps a core [`GlobalKind`] to its ABI mirror.
+pub(crate) fn global_kind(k: GlobalKind) -> DoodleGlobalKind {
+    match k {
+        GlobalKind::Let => DoodleGlobalKind::Let,
+        GlobalKind::Const => DoodleGlobalKind::Const,
+        GlobalKind::Parameter => DoodleGlobalKind::Parameter,
+        GlobalKind::Proc => DoodleGlobalKind::Proc,
+        GlobalKind::Fn => DoodleGlobalKind::Func,
+        GlobalKind::Record => DoodleGlobalKind::Record,
+        GlobalKind::Protocol => DoodleGlobalKind::Protocol,
+        GlobalKind::Module => DoodleGlobalKind::Module,
+    }
 }
 
 /// Maps a core [`Position`] to its ABI mirror (the module id becomes the opaque token).

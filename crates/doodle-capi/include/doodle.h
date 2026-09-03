@@ -424,6 +424,56 @@ typedef uint32_t DoodleFault;
 #endif // __cplusplus
 
 /**
+ * What a module-level global is (L§5), the C mirror of the resolver's `GlobalKind` — so a host
+ * filters a module's globals (e.g. show `Let`/`Const`/`Parameter` as data, hide `Proc`/`Fn`).
+ */
+enum DoodleGlobalKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * A mutable binding (`let`).
+   */
+  DoodleGlobalKind_Let = 0,
+  /**
+   * A non-reassignable binding (`const`).
+   */
+  DoodleGlobalKind_Const = 1,
+  /**
+   * A dynamic parameter (`parameter`).
+   */
+  DoodleGlobalKind_Parameter = 2,
+  /**
+   * A procedure (`to`).
+   */
+  DoodleGlobalKind_Proc = 3,
+  /**
+   * A function (`fn`).
+   */
+  DoodleGlobalKind_Func = 4,
+  /**
+   * A record type (`record`/`ref record`).
+   */
+  DoodleGlobalKind_Record = 5,
+  /**
+   * A protocol (`protocol`).
+   */
+  DoodleGlobalKind_Protocol = 6,
+  /**
+   * A nested module (`module`).
+   */
+  DoodleGlobalKind_Module = 7,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleGlobalKind DoodleGlobalKind;
+#else
+typedef uint32_t DoodleGlobalKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * An engine-provided built-in intrinsic a host can register by identity (E§5.5), without
  * supplying a callback. The synchronous ones (`Print`/`Length`/…) run inline; the
  * capabilities (`ReadLine`/`DrawLine`/`SetTurtle`/`ClearCanvas`) suspend to the host.
@@ -658,6 +708,27 @@ typedef struct DoodleFrame {
    */
   uint64_t reserved[4];
 } DoodleFrame;
+
+/**
+ * One module-level global (E§8.2, L§5), filled by `doodle_module_global` — its `kind` and the
+ * `decl_span` of its declaration. Its name copies out separately (`doodle_module_global_name`)
+ * and its current value is fetched by the same index (`doodle_module_global_value`). The
+ * `reserved` tail is additive growth room (freeze convention 2).
+ */
+typedef struct DoodleGlobal {
+  /**
+   * What kind of declaration the global is.
+   */
+  DoodleGlobalKind kind;
+  /**
+   * The source position of the declaration.
+   */
+  struct DoodlePosition decl_span;
+  /**
+   * Reserved for additive growth; always written as `0`.
+   */
+  uint64_t reserved[2];
+} DoodleGlobal;
 
 /**
  * The null handle: the absence of a value (a `to`/module result, an empty outcome slot).
@@ -1459,6 +1530,143 @@ DoodleStatus doodle_module_canonical_id(const struct DoodleInstance *instance,
                                         uint8_t *buf,
                                         uintptr_t cap,
                                         uintptr_t *out_len);
+
+/**
+ * Writes the number of local bindings in scope in frame `index` (E§8.2). `ErrStale` on a stale
+ * `generation`; `ErrIndexOutOfBounds` if `index` is past the top frame.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_frame_local_count(const struct DoodleInstance *instance,
+                                      uint32_t generation,
+                                      uint32_t index,
+                                      uint32_t *out_count);
+
+/**
+ * Copies the name of frame `index`'s `slot`-th local (E§8.2) into `buf` (copy-out). `ErrStale`
+ * on a stale `generation`; `ErrIndexOutOfBounds` if `slot` is past the frame's locals.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_frame_local_name(const struct DoodleInstance *instance,
+                                     uint32_t generation,
+                                     uint32_t index,
+                                     uint32_t slot,
+                                     uint8_t *buf,
+                                     uintptr_t cap,
+                                     uintptr_t *out_len);
+
+/**
+ * A fresh **host-owned** handle to frame `index`'s `slot`-th local's value (E§8.2), or
+ * `DOODLE_NULL_HANDLE` if it is not yet initialized (the temporal dead zone) or the slot is
+ * absent. `ErrStale` on a stale `generation`. Non-null values are host-owned — release them.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_frame_local_value(struct DoodleInstance *instance,
+                                      uint32_t generation,
+                                      uint32_t index,
+                                      uint32_t slot,
+                                      DoodleHandle *out_handle);
+
+/**
+ * Writes the number of `with` dynamic-parameter bindings in frame `index` (E§8.2, L§5.5).
+ * `ErrStale`/`ErrIndexOutOfBounds` as [`doodle_frame_local_count`].
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_frame_dynamic_count(const struct DoodleInstance *instance,
+                                        uint32_t generation,
+                                        uint32_t index,
+                                        uint32_t *out_count);
+
+/**
+ * Copies the name of frame `index`'s `slot`-th dynamic-parameter binding (E§8.2) into `buf`
+ * (copy-out). `ErrStale`/`ErrIndexOutOfBounds` as [`doodle_frame_local_name`].
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_frame_dynamic_name(const struct DoodleInstance *instance,
+                                       uint32_t generation,
+                                       uint32_t index,
+                                       uint32_t slot,
+                                       uint8_t *buf,
+                                       uintptr_t cap,
+                                       uintptr_t *out_len);
+
+/**
+ * A fresh **host-owned** handle to frame `index`'s `slot`-th dynamic-parameter value (E§8.2),
+ * or `DOODLE_NULL_HANDLE` if the cell is unbound/absent. `ErrStale` on a stale `generation`.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_frame_dynamic_value(struct DoodleInstance *instance,
+                                        uint32_t generation,
+                                        uint32_t index,
+                                        uint32_t slot,
+                                        DoodleHandle *out_handle);
+
+/**
+ * Writes the number of module-level globals of the module named by `module_token` (E§8.2, L§5).
+ * `ErrStale` on a stale `generation`. (Globals are module-scoped, but share the pause token so a
+ * host re-walks after any drive — the values change with execution.)
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_module_global_count(const struct DoodleInstance *instance,
+                                        uint32_t generation,
+                                        uint32_t module_token,
+                                        uint32_t *out_count);
+
+/**
+ * Fills `out_global` with the `index`-th global of `module_token` (E§8.2): its `kind` and
+ * declaration span. Its name copies out via [`doodle_module_global_name`] and its value via
+ * [`doodle_module_global_value`] (same `index`). `ErrStale`/`ErrIndexOutOfBounds`.
+ *
+ * # Safety
+ * `instance` live; `out_global` writable.
+ */
+DoodleStatus doodle_module_global(const struct DoodleInstance *instance,
+                                  uint32_t generation,
+                                  uint32_t module_token,
+                                  uint32_t index,
+                                  struct DoodleGlobal *out_global);
+
+/**
+ * Copies the name of `module_token`'s `index`-th global (E§8.2) into `buf` (copy-out).
+ * `ErrStale`/`ErrIndexOutOfBounds`.
+ *
+ * # Safety
+ * `instance` live; `buf` readable for `cap` (or NULL with `cap` 0); `out_len` may be NULL.
+ */
+DoodleStatus doodle_module_global_name(const struct DoodleInstance *instance,
+                                       uint32_t generation,
+                                       uint32_t module_token,
+                                       uint32_t index,
+                                       uint8_t *buf,
+                                       uintptr_t cap,
+                                       uintptr_t *out_len);
+
+/**
+ * A fresh **host-owned** handle to the current value of `module_token`'s `index`-th global
+ * (E§8.2), or `DOODLE_NULL_HANDLE` if it is not yet defined (its declaration has not executed)
+ * or the index is absent. `ErrStale` on a stale `generation`. Non-null values are host-owned.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_module_global_value(struct DoodleInstance *instance,
+                                        uint32_t generation,
+                                        uint32_t module_token,
+                                        uint32_t index,
+                                        DoodleHandle *out_handle);
 
 /**
  * Creates an empty registry. Returns NULL only on allocation failure. Populate it in the

@@ -243,3 +243,7 @@ pub unsafe extern "C" fn doodle_module_canonical_id(
         }
     })
 }
+
+/// The frame-binding + module-global accessors (M7.3b), split out for length.
+mod bindings;
+pub use bindings::*;

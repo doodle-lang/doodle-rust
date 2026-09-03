@@ -14,7 +14,7 @@ use doodle_capi::abi::{
     DOODLE_NULL_HANDLE, DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault,
     DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
-use doodle_capi::abi::{DoodleFrame, DoodlePosition};
+use doodle_capi::abi::{DoodleFrame, DoodleGlobal, DoodleGlobalKind, DoodlePosition};
 use doodle_capi::call::{
     DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_arg_count, doodle_call_block,
     doodle_call_set_raise, doodle_call_set_result,
@@ -33,7 +33,10 @@ use doodle_capi::instance::{
 };
 use doodle_capi::observe::{
     doodle_current_position, doodle_current_result, doodle_frame_at, doodle_frame_callable,
-    doodle_module_canonical_id, doodle_stack_frame_count,
+    doodle_frame_dynamic_count, doodle_frame_local_count, doodle_frame_local_name,
+    doodle_frame_local_value, doodle_module_canonical_id, doodle_module_global,
+    doodle_module_global_count, doodle_module_global_name, doodle_module_global_value,
+    doodle_stack_frame_count,
 };
 use doodle_capi::registry::{
     DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_new,
@@ -943,5 +946,140 @@ fn observation_frame_callable_for_a_function_frame() {
         }
     }
     assert!(reached, "StepInto reached f's callable frame");
+    unsafe { doodle_free(inst) };
+}
+
+// ---- M7.3b: frame bindings + module globals ------------------------------------------------
+
+/// Copies out a name via a `(buf, cap, out_len)` copy-out accessor into a `String`.
+fn read_name(mut copy: impl FnMut(*mut u8, usize, *mut usize) -> DoodleStatus) -> String {
+    let mut len = 0usize;
+    let _ = copy(ptr::null_mut(), 0, &mut len);
+    let mut buf = vec![0u8; len];
+    assert_eq!(
+        copy(buf.as_mut_ptr(), buf.len(), &mut len),
+        DoodleStatus::Ok
+    );
+    String::from_utf8(buf).unwrap()
+}
+
+#[test]
+fn observation_frame_locals_and_module_globals() {
+    // g (a module `let`) + f(p) with a local z; pause inside f(5) and read its locals and the
+    // module globals through the pull surface.
+    let inst = load("let g = 10\nto f(p)\nlet z = p + 1\nend\nf(5)\n");
+    let mut out = DoodleOutcome::blank();
+    let (mut count, mut walk_gen) = (0u32, 0u32);
+    let mut inside = false;
+    for _ in 0..30 {
+        assert_eq!(
+            unsafe { doodle_drive(inst, DoodleDirective::StepInto, &mut out) },
+            DoodleStatus::Ok
+        );
+        if out.kind != DoodleOutcomeKind::Paused {
+            break;
+        }
+        assert_eq!(
+            unsafe { doodle_stack_frame_count(inst, &mut count, &mut walk_gen) },
+            DoodleStatus::Ok
+        );
+        if count >= 2 {
+            inside = true;
+            break;
+        }
+    }
+    assert!(inside, "paused inside f");
+
+    // f's locals include the parameter `p` = 5.
+    let mut local_count = 0u32;
+    assert_eq!(
+        unsafe { doodle_frame_local_count(inst, walk_gen, 0, &mut local_count) },
+        DoodleStatus::Ok
+    );
+    assert!(local_count >= 1, "f has at least the parameter p");
+    let mut found_p = false;
+    for slot in 0..local_count {
+        let name = read_name(|buf, cap, out_len| unsafe {
+            doodle_frame_local_name(inst, walk_gen, 0, slot, buf, cap, out_len)
+        });
+        if name == "p" {
+            let mut h = DOODLE_NULL_HANDLE;
+            assert_eq!(
+                unsafe { doodle_frame_local_value(inst, walk_gen, 0, slot, &mut h) },
+                DoodleStatus::Ok
+            );
+            assert_ne!(h, DOODLE_NULL_HANDLE, "p is bound");
+            let mut n = 0i64;
+            assert_eq!(unsafe { doodle_as_int(inst, h, &mut n) }, DoodleStatus::Ok);
+            assert_eq!(n, 5, "p == 5");
+            let _ = unsafe { doodle_release(inst, h) };
+            found_p = true;
+        }
+    }
+    assert!(found_p, "found the parameter p among f's locals");
+
+    // Dynamic-parameter bindings: f established none, so the count is 0 (accessor works).
+    let mut dyn_count = 99u32;
+    assert_eq!(
+        unsafe { doodle_frame_dynamic_count(inst, walk_gen, 0, &mut dyn_count) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(dyn_count, 0, "f has no `with` bindings");
+
+    // The module globals of f's frame include g (a Let) = 10.
+    let mut frame = zero_frame();
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, walk_gen, 0, &mut frame) },
+        DoodleStatus::Ok
+    );
+    let module = frame.module;
+    let mut global_count = 0u32;
+    assert_eq!(
+        unsafe { doodle_module_global_count(inst, walk_gen, module, &mut global_count) },
+        DoodleStatus::Ok
+    );
+    assert!(global_count >= 1, "the module has globals (g, f)");
+    let mut found_g = false;
+    for index in 0..global_count {
+        let name = read_name(|buf, cap, out_len| unsafe {
+            doodle_module_global_name(inst, walk_gen, module, index, buf, cap, out_len)
+        });
+        if name == "g" {
+            let mut global = DoodleGlobal {
+                kind: DoodleGlobalKind::Let,
+                decl_span: zero_pos(),
+                reserved: [0; 2],
+            };
+            assert_eq!(
+                unsafe { doodle_module_global(inst, walk_gen, module, index, &mut global) },
+                DoodleStatus::Ok
+            );
+            assert_eq!(global.kind, DoodleGlobalKind::Let, "g is a `let`");
+            let mut h = DOODLE_NULL_HANDLE;
+            assert_eq!(
+                unsafe { doodle_module_global_value(inst, walk_gen, module, index, &mut h) },
+                DoodleStatus::Ok
+            );
+            assert_ne!(h, DOODLE_NULL_HANDLE, "g is defined");
+            let mut n = 0i64;
+            assert_eq!(unsafe { doodle_as_int(inst, h, &mut n) }, DoodleStatus::Ok);
+            assert_eq!(n, 10, "g == 10");
+            let _ = unsafe { doodle_release(inst, h) };
+            found_g = true;
+        }
+    }
+    assert!(found_g, "found the module global g");
+
+    // A stale generation is rejected on the binding/global accessors too.
+    assert_eq!(
+        unsafe { doodle_frame_local_count(inst, walk_gen.wrapping_add(1), 0, &mut local_count) },
+        DoodleStatus::ErrStale
+    );
+    assert_eq!(
+        unsafe {
+            doodle_module_global_count(inst, walk_gen.wrapping_add(1), module, &mut global_count)
+        },
+        DoodleStatus::ErrStale
+    );
     unsafe { doodle_free(inst) };
 }
