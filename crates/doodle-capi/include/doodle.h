@@ -481,9 +481,9 @@ typedef uint32_t DoodleBuiltin;
 
 /**
  * The re-entry context handed to a host foreign callback (opaque to C). Wraps the raw
- * `&mut IntrinsicCtx` the engine threaded down, a one-shot liveness flag, and the callback's
- * pending reply. **Valid only for the dynamic extent of the callback** — the `live` flag makes
- * a stashed-and-reused ctx a defined `ErrContract`, never a dangling deref.
+ * `&mut IntrinsicCtx` the engine threaded down plus the callback's pending reply. **Valid only
+ * while it is the innermost active callback** — its validity is tracked by [`CURRENT_CTX`], not
+ * a field, so use-after-return and reentrant-ancestor use are both a defined `ErrContract`.
  */
 typedef struct DoodleCallCtx DoodleCallCtx;
 

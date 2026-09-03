@@ -15,8 +15,8 @@ use doodle_capi::abi::{
     DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
 use doodle_capi::call::{
-    DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_block, doodle_call_set_raise,
-    doodle_call_set_result,
+    DoodleCallCtx, DoodleForeignFn, doodle_call_arg, doodle_call_arg_count, doodle_call_block,
+    doodle_call_set_raise, doodle_call_set_result,
 };
 use doodle_capi::call_read::{doodle_call_as_int, doodle_call_release};
 use doodle_capi::call_value::{doodle_call_make_int, doodle_call_make_string};
@@ -40,7 +40,7 @@ use doodle_capi::value::{
 };
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 // Records the most recent foreign-value finalizer call (only the foreign-value test uses
 // these, so no cross-test race). `extern "C"` — the exact type a C host supplies.
@@ -703,4 +703,87 @@ fn a_host_foreign_callback_raises_a_constructed_value_through_c() {
         boom_cb,
     );
     assert_eq!(out, b"boom\n");
+}
+
+// The stashed ancestor ctx + the status `inner` got trying to touch it (reentrant-aliasing test).
+static STASHED_CTX: AtomicPtr<DoodleCallCtx> = AtomicPtr::new(ptr::null_mut());
+static REENTRANT_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// `outer(body)`: stashes its own ctx (so a reentrant callback can try to touch this *ancestor*
+/// activation), then invokes its block — which reenters foreign code.
+extern "C" fn outer_cb(ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    STASHED_CTX.store(ctx, Relaxed);
+    let mut outcome = DoodleBlockOutcome::Completed;
+    unsafe { doodle_call_block(ctx, ptr::null(), 0, &mut outcome) }
+}
+
+/// `inner()`: while `outer`'s block is mid-drive, adversarially touches the STASHED ancestor ctx.
+/// That ctx's `&mut IntrinsicCtx`/`&mut Machine` is reborrowed into this very drive, so honoring
+/// the call would form a second, aliasing `&mut` (instantaneous UB). The engine must reject it.
+extern "C" fn inner_cb(_ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    let stashed = STASHED_CTX.load(Relaxed);
+    let mut count = 0u32;
+    let status = unsafe { doodle_call_arg_count(stashed, &mut count) };
+    REENTRANT_STATUS.store(status as u32, Relaxed);
+    DoodleStatus::Ok
+}
+
+#[test]
+fn touching_an_ancestor_ctx_from_a_reentrant_call_is_rejected_not_ub() {
+    // Registers `outer(body)` + `inner()` and runs `outer() do inner() end`. `inner` runs inside
+    // `outer`'s block invocation (a nested drive) and tries to use `outer`'s stashed ctx. The
+    // innermost-ctx gate must make that a defined `ErrContract`, never two live `&mut` to the same
+    // activation. (Under the old `live`-flag gate this returned `Ok` and was UB; Miri would trap.)
+    STASHED_CTX.store(ptr::null_mut(), Relaxed);
+    REENTRANT_STATUS.store(u32::MAX, Relaxed);
+    let registry = doodle_registry_new();
+    let outer = unsafe { doodle_foreign_desc_new(b"outer".as_ptr(), 5, DoodleBodyKind::Proc) };
+    assert!(!outer.is_null());
+    assert_eq!(
+        unsafe { doodle_foreign_desc_block_param(outer, b"body".as_ptr(), 4) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_foreign_desc_set_callback(outer, outer_cb, ptr::null_mut()) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_registry_add_foreign(registry, outer) },
+        DoodleStatus::Ok
+    );
+    let inner = unsafe { doodle_foreign_desc_new(b"inner".as_ptr(), 5, DoodleBodyKind::Proc) };
+    assert!(!inner.is_null());
+    assert_eq!(
+        unsafe { doodle_foreign_desc_set_callback(inner, inner_cb, ptr::null_mut()) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_registry_add_foreign(registry, inner) },
+        DoodleStatus::Ok
+    );
+    let src = "outer() do\ninner()\nend\n";
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            doodle_load_with_registry(
+                src.as_ptr(),
+                src.len(),
+                ptr::null(),
+                registry,
+                &mut inst,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        DoodleStatus::Ok
+    );
+    let outcome = drive(inst);
+    assert_eq!(outcome.kind, DoodleOutcomeKind::Completed, "{outcome:?}");
+    unsafe { doodle_free(inst) };
+    assert_eq!(
+        REENTRANT_STATUS.load(Relaxed),
+        DoodleStatus::ErrContract as u32,
+        "touching the ancestor ctx mid-drive must be rejected"
+    );
 }

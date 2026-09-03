@@ -8,13 +8,23 @@
 //!
 //! # Soundness
 //!
-//! - **No second `&mut Instance`.** A [`DoodleCallCtx`] wraps the raw `&mut IntrinsicCtx`; every
-//!   `doodle_call_*` reaches the engine through it, and `doodle_call_block` routes to
-//!   [`IntrinsicCtx::invoke_block_handles`], so the instance pointer is never touched inside the
-//!   callback. The outer `doodle_drive`'s borrow stays the only `&mut Instance`.
-//! - **Lifetime.** The `DoodleCallCtx` is valid only while the C callback runs. A one-shot
-//!   `live` flag is flipped off when the trampoline returns; every `doodle_call_*` checks it
-//!   (→ `ErrContract`), so a stashed-and-reused ctx is caught, not a dangling deref.
+//! - **No second `&mut IntrinsicCtx` (hence no second `&mut Instance`).** Every `doodle_call_*`
+//!   reaches the engine only through the **innermost** live [`DoodleCallCtx`], and
+//!   `doodle_call_block` routes to [`IntrinsicCtx::invoke_block_handles`], so the instance
+//!   pointer is never touched inside a callback and the outer `doodle_drive`'s borrow stays the
+//!   only `&mut Instance`. The catch is re-entrancy: a `doodle_call_block` runs a nested drive
+//!   that may call a foreign function again, whose callback is a **deeper** activation. While
+//!   that deeper drive runs, the ancestor ctx's `&mut IntrinsicCtx`/`&mut Machine` is reborrowed
+//!   into it, so touching the ancestor ctx would form a second, aliasing `&mut` — the same
+//!   instantaneous UB, one level up. Prevented by the innermost gate below.
+//! - **The innermost gate.** A thread-local [`CURRENT_CTX`] points to the innermost live
+//!   `DoodleCallCtx` on this thread; the trampoline sets it on entry and **restores the previous
+//!   on return** (so nesting is a stack). Every `doodle_call_*` accepts a ctx pointer only if it
+//!   **equals** `CURRENT_CTX` — a pure pointer comparison that never dereferences the passed
+//!   pointer first. This rejects (`ErrContract`) both a *returned* ctx (no longer current) and an
+//!   *ancestor* ctx (a deeper call is current), so the only `&mut IntrinsicCtx` ever formed is to
+//!   the innermost activation, with no ancestor aliasing and no read of freed stack memory. The
+//!   single-threaded drive (E§11) makes the thread-local the whole story.
 //! - **Panic across the boundary.** The C callback runs inside the engine's `step`; the
 //!   trampoline wraps the call in `catch_unwind` so a Rust panic (a nested Doodle call's
 //!   `debug_assert!`/`unreachable!`, or a Rust-implemented callback) cannot cross the FFI — it
@@ -25,9 +35,20 @@ use crate::abi::{self, DoodleBlockOutcome, DoodleHandle, DoodleStatus};
 use crate::guard::catch;
 use crate::value::write_out;
 use doodle_core::machine::{Handle, HostCallback, HostReply, IntrinsicCtx};
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+
+thread_local! {
+    /// The **innermost** live [`DoodleCallCtx`] on this thread — the only one a `doodle_call_*`
+    /// may touch. The trampoline sets it to its on-stack `callctx` on entry and restores the
+    /// previous on return, so a reentrant nested foreign call makes the deeper ctx current and
+    /// pops back to the ancestor on return. A `doodle_call_*` gates on *pointer equality* with
+    /// this (never dereferencing the passed pointer first), so a *returned* ctx and an *ancestor*
+    /// ctx mid-drive are both a defined `ErrContract`, never a dangling or aliasing deref.
+    static CURRENT_CTX: Cell<*mut DoodleCallCtx> = const { Cell::new(std::ptr::null_mut()) };
+}
 
 /// A host `user_data` pointer the foreign-callback closure carries (the C `void*`). Raw
 /// pointers are neither `Send` nor `Sync`; the ABI (the sole `unsafe` crate, AD1) asserts both
@@ -70,43 +91,42 @@ enum CallReply {
 }
 
 /// The re-entry context handed to a host foreign callback (opaque to C). Wraps the raw
-/// `&mut IntrinsicCtx` the engine threaded down, a one-shot liveness flag, and the callback's
-/// pending reply. **Valid only for the dynamic extent of the callback** — the `live` flag makes
-/// a stashed-and-reused ctx a defined `ErrContract`, never a dangling deref.
+/// `&mut IntrinsicCtx` the engine threaded down plus the callback's pending reply. **Valid only
+/// while it is the innermost active callback** — its validity is tracked by [`CURRENT_CTX`], not
+/// a field, so use-after-return and reentrant-ancestor use are both a defined `ErrContract`.
 pub struct DoodleCallCtx {
     /// The engine activation, type-erased (its lifetime cannot be named in an FFI struct field).
-    /// Cast back to `&mut IntrinsicCtx` only while `live`.
+    /// Cast back to `&mut IntrinsicCtx` only after a [`CURRENT_CTX`] pointer-equality check.
     ctx: *mut c_void,
-    /// Whether the wrapped ctx is still valid (the callback has not yet returned).
-    live: bool,
     /// The callback's reported result/raise.
     reply: CallReply,
 }
 
 /// Builds the engine [`HostCallback`] that drives the C `callback` with `user_data` (M7.2b):
-/// wrap the `&mut IntrinsicCtx` as a [`DoodleCallCtx`], call the C fn under `catch_unwind`, flip
-/// the ctx dead, and map its reply to a [`HostReply`]. A non-`Ok` status or a caught panic
-/// faults the drive `Internal` ([`IntrinsicCtx::fault_host`]) — `apply` then stops on the parked
-/// fault, superseding the reply.
+/// wrap the `&mut IntrinsicCtx` as a [`DoodleCallCtx`], make it the innermost active ctx
+/// ([`CURRENT_CTX`]), call the C fn under `catch_unwind`, restore the previous innermost, and map
+/// its reply to a [`HostReply`]. A non-`Ok` status or a caught panic faults the drive `Internal`
+/// ([`IntrinsicCtx::fault_host`]) — `apply` stops on the parked fault, superseding the reply.
 pub(crate) fn trampoline(callback: DoodleForeignFn, user_data: SendPtr) -> HostCallback {
     Arc::new(move |ctx: &mut IntrinsicCtx| {
         // Take the whole `SendPtr` (via a `self`-consuming method) so the closure captures the
         // `Send + Sync` wrapper, not the bare `*mut c_void` (2021 disjoint captures).
         let user_data = user_data.into_raw();
         // Derive the raw pointer from the `&mut` and use it *exclusively* until the C call
-        // returns (never touch `ctx` again in between) — the standard raw-from-`&mut` pattern,
-        // so the callback's re-entries and the outer borrow never alias.
+        // returns (never touch `ctx` again in between) — the standard raw-from-`&mut` pattern.
         let mut callctx = DoodleCallCtx {
             ctx: (ctx as *mut IntrinsicCtx).cast::<c_void>(),
-            live: true,
             reply: CallReply::None,
         };
         let callctx_ptr: *mut DoodleCallCtx = &mut callctx;
+        // This callback is now the innermost active ctx; save the previous (an ancestor, or null)
+        // and restore it on return, so a reentrant nested call nests and pops correctly.
+        let previous = CURRENT_CTX.replace(callctx_ptr);
         let status = catch_unwind(AssertUnwindSafe(|| callback(callctx_ptr, user_data)))
             .unwrap_or(DoodleStatus::ErrPanic);
-        // The ctx is dead the instant the callback returns: a `doodle_call_*` on a stashed copy
-        // now hits `ErrContract`, not the (about-to-be-invalid) raw pointer.
-        callctx.live = false;
+        // Restore even on a caught panic (`catch_unwind` returned normally): a `doodle_call_*` on
+        // a stashed copy now fails the `CURRENT_CTX` equality check, without touching this frame.
+        CURRENT_CTX.set(previous);
         match (status, callctx.reply) {
             (DoodleStatus::Ok, CallReply::None) => HostReply::Value(None),
             (DoodleStatus::Ok, CallReply::Result(h)) => {
@@ -125,42 +145,46 @@ pub(crate) fn trampoline(callback: DoodleForeignFn, user_data: SendPtr) -> HostC
     })
 }
 
-/// Borrows the [`DoodleCallCtx`] behind a raw pointer if it is non-NULL and still **live** (the
-/// callback has not returned): `ErrNullPointer`/`ErrContract` otherwise. A dead ctx (stashed
-/// past the callback) is caught here, so the engine pointer is never dereferenced stale.
-fn live_ctx<'a>(ctx: *mut DoodleCallCtx) -> Result<&'a mut DoodleCallCtx, DoodleStatus> {
-    // SAFETY: `as_mut` returns None for NULL; a non-null `ctx` is the `DoodleCallCtx` the
-    // trampoline passed this callback, and the host's contract is to use it only during the
-    // call — the `live` flag downgrades a use-after-return to `ErrContract`, never UB.
-    let Some(cc) = (unsafe { ctx.as_mut() }) else {
+/// Borrows the [`DoodleCallCtx`] behind a raw pointer **only if it is the innermost active ctx**
+/// ([`CURRENT_CTX`]): `ErrContract` otherwise (a returned ctx, or an ancestor whose block is
+/// mid-drive). The check is a pure pointer comparison — the passed pointer is **not**
+/// dereferenced unless it equals `CURRENT_CTX`, so a stale/ancestor pointer never reads freed or
+/// aliased memory. Shared with the ctx value functions (`call_read`/`call_value`).
+pub(crate) fn current_ctx<'a>(
+    ctx: *mut DoodleCallCtx,
+) -> Result<&'a mut DoodleCallCtx, DoodleStatus> {
+    if ctx.is_null() {
         return Err(DoodleStatus::ErrNullPointer);
-    };
-    if cc.live {
-        Ok(cc)
-    } else {
-        Err(DoodleStatus::ErrContract)
     }
+    if CURRENT_CTX.get() != ctx {
+        return Err(DoodleStatus::ErrContract);
+    }
+    // SAFETY: `ctx == CURRENT_CTX`, which the active trampoline set to its live on-stack `callctx`
+    // (and has not yet restored), so `ctx` is valid and, being the innermost activation, is not
+    // reborrowed into a deeper drive — this `&mut` is the only live one. Single-threaded (E§11).
+    Ok(unsafe { &mut *ctx })
 }
 
-/// The live engine activation behind a `DoodleCallCtx` (its `&mut IntrinsicCtx`). The returned
-/// lifetime is unconstrained (an FFI raw deref); each caller uses it within one call, and the
-/// [`live_ctx`] check plus the single-threaded drive keep it valid.
+/// The engine activation behind a `DoodleCallCtx` (its `&mut IntrinsicCtx`). The returned lifetime
+/// is unconstrained (an FFI raw deref); each caller uses it within one call. Sound only because
+/// `cc` is the innermost ctx ([`current_ctx`] checked), so its `&mut IntrinsicCtx` is not
+/// reborrowed into a deeper drive.
 fn engine_ctx<'a>(cc: &mut DoodleCallCtx) -> &'a mut IntrinsicCtx<'a> {
-    // SAFETY: `cc.ctx` is the `&mut IntrinsicCtx` the engine threaded into the trampoline,
-    // valid because `cc.live` (the caller checked via `live_ctx`): the callback runs on the
-    // Rust stack above the engine's `apply`, which handed it exclusive access, so no other
-    // `&mut` to that ctx is live. Block re-entry routes through `invoke_block_handles`, so this
-    // forms no second `&mut Instance`.
+    // SAFETY: `cc.ctx` is the `&mut IntrinsicCtx` the engine threaded into the trampoline. `cc` is
+    // the innermost active ctx (`current_ctx` gated on `CURRENT_CTX`), so the engine's `apply`
+    // handed it exclusive access and no deeper drive holds a reborrow of it — no other `&mut` to
+    // this ctx is live. Block re-entry routes through `invoke_block_handles`, forming no
+    // second `&mut Instance`.
     unsafe { &mut *(cc.ctx as *mut IntrinsicCtx<'a>) }
 }
 
-/// The live engine activation behind a raw `DoodleCallCtx`, or an error status — the null +
-/// liveness check ([`live_ctx`]) then the engine deref ([`engine_ctx`]). Shared with the
-/// ctx value functions ([`crate::call_value`]).
+/// The engine activation behind the innermost `DoodleCallCtx`, or an error status — the
+/// innermost-ctx check ([`current_ctx`]) then the engine deref ([`engine_ctx`]). Shared with the
+/// ctx value functions ([`crate::call_read`]/[`crate::call_value`]).
 pub(crate) fn engine_of<'a>(
     ctx: *mut DoodleCallCtx,
 ) -> Result<&'a mut IntrinsicCtx<'a>, DoodleStatus> {
-    Ok(engine_ctx(live_ctx(ctx)?))
+    Ok(engine_ctx(current_ctx(ctx)?))
 }
 
 /// Writes the number of bound (non-block) arguments this call received (E§5.2) — read each with
@@ -295,7 +319,7 @@ pub unsafe extern "C" fn doodle_call_set_result(
     ctx: *mut DoodleCallCtx,
     handle: DoodleHandle,
 ) -> DoodleStatus {
-    catch(|| match live_ctx(ctx) {
+    catch(|| match current_ctx(ctx) {
         Ok(cc) => {
             cc.reply = CallReply::Result(handle);
             DoodleStatus::Ok
@@ -316,7 +340,7 @@ pub unsafe extern "C" fn doodle_call_set_raise(
     ctx: *mut DoodleCallCtx,
     handle: DoodleHandle,
 ) -> DoodleStatus {
-    catch(|| match live_ctx(ctx) {
+    catch(|| match current_ctx(ctx) {
         Ok(cc) => {
             cc.reply = CallReply::Raise(handle);
             DoodleStatus::Ok

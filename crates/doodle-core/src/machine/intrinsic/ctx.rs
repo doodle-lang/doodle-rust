@@ -129,6 +129,12 @@ impl IntrinsicCtx<'_> {
     /// binding error (e.g. wrong block arity) arms its raise at the boundary and reports
     /// `NonLocalExit`, so it propagates like any block-body raise.
     pub fn invoke_block_handles(&mut self, args: &[Handle]) -> BlockOutcome {
+        // A fault is already parked (a prior `invoke_block_handles` returned `Halted` and the host
+        // drove on regardless): do not run more Doodle under it — report `Halted` again so the
+        // apply site still surfaces the original fault, exactly once.
+        if self.machine.pending_fault.is_some() {
+            return BlockOutcome::Halted;
+        }
         let mut values = Vec::with_capacity(args.len());
         for &handle in args {
             match self.machine.handles.resolve(handle) {
