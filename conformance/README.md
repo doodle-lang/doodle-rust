@@ -108,14 +108,20 @@ brittle against new lints. These tests are runnable from **M1**.
 
 The test is executed under the conformance host. The host registers a `print`
 capability whose rendering (each argument via the value's textual rendering,
-newline-terminated) is pinned here; other scripted capability stubs are a
-**named placeholder**, spec'd with the engine drive-script format at M2b. The
-expected **transcript** is the ordered list of:
+newline-terminated) is pinned here; the suspending capabilities `read_line`/
+`time`/`random` are answered from the fixture's scripted `input:` queue (M7.5a).
+The expected **transcript** is the ordered list of:
 
 ```
 #! expect-out: <text>                          (one print line)
 #! expect-raise: <substring> @ <line>:<col>    (uncaught error terminating the test)
+#! input: <capability> -> <response>           (scripted answer to the next request for it)
 ```
+
+Each `input:` `<response>` is a `<value>` (a string `"…"`, integer, float,
+`true`/`false`, or `nil`) or `raise "<msg>"`; entries for one capability form an
+in-order FIFO drawn from as it suspends. An unscripted capability request is a
+fixture error (never a silent pass).
 
 A `run` test passes iff the produced transcript matches the expectations
 exactly (count, order, content) and the program terminates (a runner step
@@ -137,32 +143,40 @@ then an **ordered** sequence of drive steps whose actual outcome/position/stack
 #! obs: subexpr | statement      (observation mode, E§8.8/S-62; default statement)
 ```
 
-All setup directives MUST precede the first `do:`. Each step is one `do:` (a
-driving directive) followed by one `expect:` (the stop it must produce) and an
-optional `stack:`:
+All setup directives MUST precede the first step. Each step begins with a `do:`
+(a driving directive), a `resolve:`, or a `resolve-raise:`, followed by one
+`expect:` (the stop it must produce) and an optional `stack:`:
 
 ```
 #! do: run | continue | step | into | over | out    (a directive, E§7.3)
+#! resolve: <value>                                  (fulfil the suspended capability, E§7.5)
+#! resolve-raise: "<msg>"                            (raise <msg> at its call site)
 #! expect: <stop>
 #! stack: <elem>, <elem>, …                          (call frames, innermost first)
 ```
 
+A `resolve:`/`resolve-raise:` step fulfils the capability the previous step
+suspended on. A `<value>` is a string (`"…"`), integer, float (has a `.`),
+`true`/`false`, or `nil`.
+
 A `<stop>` is one of:
 
 ```
-completed                       (the driven unit finished)
-paused <reason> @ <line>:<col>  (reason: step | breakpoint | host-pause | raise-trap | slice-end)
+completed                          (the driven unit finished)
+paused <reason> @ <line>:<col>     (reason: step | breakpoint | host-pause | raise-trap | slice-end)
 raised <substring> @ <line>:<col>
-suspended <id> @ <line>:<col>   (id: capability name or dotted import path)
-faulted <kind>                  (step-budget | heap | op-result | stack-depth | tail-history | cancelled | …)
+suspended <capability> @ <line>:<col>   (a capability request, Outcome::Suspended)
+import <path> @ <line>:<col>            (an import, Outcome::SuspendedImport; dotted path)
+faulted <kind>                     (step-budget | heap | op-result | stack-depth | tail-history | cancelled | …)
 ```
 
 A stack `<elem>` is `<line>`, `<name>@<line>`, or `<name>@<line>×<n>` (the
 tail-iteration count `n`, E§8.3; `x` is accepted for `×`); the matcher checks
 only what an element pins. Positions are 1-based, in the NFC'd source, and are
 **absolute file lines** (the `#!` header counts). Imports resolve transparently,
-like `mode: run` (sibling module file, else `NotFound`). An **unknown** `do:`/
-`expect:`/stack token, or a **reserved-but-unimplemented** directive (`local:`,
+like `mode: run` (sibling module file, else `NotFound`) — **unless** a step
+asserts an `import` stop, which leaves the suspension for that step to inspect. An
+**unknown** `do:`/`expect:`/stack token, or a **reserved-but-unimplemented** directive (`local:`,
 `render:` — the named slots for a future value/inspection extension), is a
 fixture **error**, never silently ignored. The format is versioned implicitly by
 `mode: drive`; a future incompatible grammar would be `mode: drive2`. Drive
@@ -179,10 +193,9 @@ fixtures live under `conformance/v0.1/eng/<clause>/` and are runnable from **M6*
 
 ## Deferred (placeholders)
 
-- **Capability-resolution steps** in a drive script (a `resolve:`/`resolve-raise:`
-  action feeding a suspended capability) — the format's reserved next extension,
-  landing when a suspending capability exists (M7); imports already resolve
-  transparently. Value/local **inspection** assertions (`local:`, `render:`) are
-  reserved-but-unimplemented named slots (§ `mode: drive`).
+- Value/local **inspection** assertions (`local:`, `render:`) are
+  reserved-but-unimplemented named slots (§ `mode: drive`). (Capability-resolution
+  steps — `resolve:`/`resolve-raise:` in a drive script, and `input:` in a `run`
+  fixture — landed at M7.5a.)
 - **Determinism harness** (run twice + GC-stress, diff traces) — a runner
   flag, M2a.

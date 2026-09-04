@@ -3,12 +3,15 @@
 //! against the declared one. The whole ordered sequence is checked — every `do:` has an `expect:`,
 //! none is spot-checked — so a drive fixture is cross-surface determinism evidence for E§8.
 
-use crate::matcher::{demo_registry, error_messages};
-use crate::model::{DriveAction, DriveScript, DriveStep, StackElem, StopAssertion, Test};
+use crate::capability::{capability_name, registry};
+use crate::matcher::{build_resolution, error_messages};
+use crate::model::{
+    DriveAction, DriveScript, DriveStep, ScriptResponse, StackElem, StopAssertion, Test,
+};
 use doodle_core::drive::ObservationMode;
 use doodle_core::drive::{
     Directive, EngineFault, ImportResolution, LimitKind, Limits, Outcome, PauseReason,
-    resolve_import, run,
+    resolve as resolve_capability, resolve_import, run,
 };
 use doodle_core::machine::{Instance, InstanceState};
 use doodle_core::parse::parse_program;
@@ -44,12 +47,12 @@ pub(crate) fn run_drive(
 
     // The entry id is `main` — the id a drive fixture's `break:` defaults to (drivescript.rs), so
     // its breakpoints bind to this module (E§3.2).
-    let mut instance = Instance::load(resolved.module, Limits::default(), demo_registry(), "main");
+    let mut instance = Instance::load(resolved.module, Limits::default(), registry(), "main");
     apply_setup(&mut instance, script);
 
     let mut reasons = Vec::new();
     for (i, step) in script.steps.iter().enumerate() {
-        let outcome = match drive_action(&mut instance, step.action, modules_dir) {
+        let outcome = match drive_action(&mut instance, &step.action, &step.expect, modules_dir) {
             Ok(outcome) => outcome,
             Err(reason) => {
                 reasons.push(format!("step {}: {reason}", i + 1));
@@ -80,53 +83,69 @@ fn apply_setup(instance: &mut Instance, script: &DriveScript) {
     }
 }
 
-/// Drives one action to its stop (E§7.3), transparently resolving any `import` the same way a
-/// `run` fixture does (sibling module file, else `NotFound`) so imports need no explicit script
-/// step — a fixture asserts the debug stop, not the import plumbing.
+/// Drives one action to its stop (E§7.3). A `do:` directive drives the machine; a `resolve:`/
+/// `resolve-raise:` step fulfils the capability the previous step suspended on (E§7.5). Any `import`
+/// is transparently resolved the same way a `run` fixture does (sibling module file, else
+/// `NotFound`) so imports need no explicit step — **unless** this step asserts an `import` stop, in
+/// which case the suspension is left for [`check_step`] to inspect. A **capability** suspension is
+/// never auto-resolved: it is a stop the fixture asserts and then a `resolve:` step resumes.
 fn drive_action(
     instance: &mut Instance,
-    action: DriveAction,
+    action: &DriveAction,
+    expect: &StopAssertion,
     modules_dir: Option<&Path>,
 ) -> Result<Outcome, String> {
-    // A terminal instance is not re-drivable (E§3.3): a `do:` after the program has finished is a
+    // A terminal instance is not re-drivable (E§3.3): a step after the program has finished is a
     // mis-authored fixture — report it, rather than tripping the engine's debug assertion.
     if matches!(
         instance.state(),
         InstanceState::Completed | InstanceState::Raised | InstanceState::Faulted
     ) {
         return Err(format!(
-            "cannot drive a {:?} (terminal) instance — the script has a `do:` past the program's end",
+            "cannot drive a {:?} (terminal) instance — a step runs past the program's end",
             instance.state()
         ));
     }
-    let directive = match action {
-        DriveAction::Run => Directive::RunToCompletion,
-        DriveAction::Continue => Directive::Continue,
-        DriveAction::Step => Directive::Step,
-        DriveAction::Into => Directive::StepInto,
-        DriveAction::Over => Directive::StepOver,
-        DriveAction::Out => Directive::StepOut,
+    let mut outcome = match action {
+        DriveAction::Run => run(instance, Directive::RunToCompletion),
+        DriveAction::Continue => run(instance, Directive::Continue),
+        DriveAction::Step => run(instance, Directive::Step),
+        DriveAction::Into => run(instance, Directive::StepInto),
+        DriveAction::Over => run(instance, Directive::StepOver),
+        DriveAction::Out => run(instance, Directive::StepOut),
+        DriveAction::Resolve(value) => {
+            let resolution = build_resolution(instance, &ScriptResponse::Value(value.clone()))?;
+            resolve_capability(instance, resolution)
+        }
+        DriveAction::ResolveRaise(message) => {
+            let resolution = build_resolution(instance, &ScriptResponse::Raise(message.clone()))?;
+            resolve_capability(instance, resolution)
+        }
     };
-    let mut outcome = run(instance, directive);
-    while let Outcome::SuspendedImport(req) = &outcome {
-        let joined = req
-            .path
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<&str>>()
-            .join("/");
-        let file = modules_dir.map(|d| d.join(&joined).with_extension("doodle"));
-        let resolution = match file {
-            Some(path) if path.is_file() => match std::fs::read_to_string(&path) {
-                Ok(text) => ImportResolution::Source {
-                    text,
-                    canonical_id: joined.clone(),
+    // Leave an import suspension in place when the step asserts an `import` stop; otherwise resolve
+    // imports transparently. (A capability suspension is never auto-resolved here.)
+    let assert_import = matches!(expect, StopAssertion::Import { .. });
+    if !assert_import {
+        while let Outcome::SuspendedImport(req) = &outcome {
+            let joined = req
+                .path
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<&str>>()
+                .join("/");
+            let file = modules_dir.map(|d| d.join(&joined).with_extension("doodle"));
+            let resolution = match file {
+                Some(path) if path.is_file() => match std::fs::read_to_string(&path) {
+                    Ok(text) => ImportResolution::Source {
+                        text,
+                        canonical_id: joined.clone(),
+                    },
+                    Err(e) => return Err(format!("reading module {}: {e}", path.display())),
                 },
-                Err(e) => return Err(format!("reading module {}: {e}", path.display())),
-            },
-            _ => ImportResolution::NotFound,
-        };
-        outcome = resolve_import(instance, resolution);
+                _ => ImportResolution::NotFound,
+            };
+            outcome = resolve_import(instance, resolution);
+        }
     }
     Ok(outcome)
 }
@@ -173,21 +192,28 @@ fn check_step(
                 ));
             }
         }
-        (StopAssertion::Suspended { id, pos }, Outcome::SuspendedImport(req)) => {
-            let actual_id = req.path.join(".");
-            if &actual_id != id {
-                return Err(format!("expected suspended {id}, got import {actual_id}"));
+        (StopAssertion::Suspended { capability, pos }, Outcome::Suspended(req)) => {
+            let actual = capability_name(req.capability.0)
+                .ok_or_else(|| format!("unknown capability id {}", req.capability.0))?;
+            if actual != capability {
+                return Err(format!(
+                    "expected capability {capability}, got capability {actual}"
+                ));
             }
             let got = instance
                 .current_position()
                 .map(|p| index.position_at(nfc, p.span.start));
-            if got.as_ref() != Some(pos) {
-                return Err(format!(
-                    "expected suspend @ {}, got {}",
-                    show(pos),
-                    show_opt(&got)
-                ));
+            check_position("suspend", pos, &got)?;
+        }
+        (StopAssertion::Import { path, pos }, Outcome::SuspendedImport(req)) => {
+            let actual = req.path.join(".");
+            if &actual != path {
+                return Err(format!("expected import {path}, got import {actual}"));
             }
+            let got = instance
+                .current_position()
+                .map(|p| index.position_at(nfc, p.span.start));
+            check_position("import", pos, &got)?;
         }
         (StopAssertion::Faulted { kind }, Outcome::Faulted(fault)) => {
             let actual = fault_kind(*fault);
@@ -311,6 +337,20 @@ fn outcome_kind(outcome: &Outcome) -> String {
         Outcome::Suspended(_) => "suspended (capability)".to_string(),
         Outcome::SuspendedImport(_) => "suspended (import)".to_string(),
         Outcome::Faulted(f) => format!("faulted {}", fault_kind(*f)),
+    }
+}
+
+/// Checks a stop's reported source position against the asserted one, reporting `label @ L:C` on a
+/// mismatch.
+fn check_position(label: &str, expected: &Position, got: &Option<Position>) -> Result<(), String> {
+    if got.as_ref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {label} @ {}, got {}",
+            show(expected),
+            show_opt(got)
+        ))
     }
 }
 

@@ -5,7 +5,7 @@
 //! directive (conformance/README.md). At M0 the block is parsed and
 //! syntax-validated; expectation *matching* begins at M1.
 
-use crate::model::{Expectation, Mode, Test};
+use crate::model::{Expectation, Mode, ScriptInput, ScriptResponse, Test};
 use doodle_core::source::Position;
 use doodle_core::stage::Stage;
 use std::path::Path;
@@ -24,6 +24,8 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
     let mut mode = Mode::Run;
     let mut stage_directive: Option<Stage> = None;
     let mut expectations: Vec<Expectation> = Vec::new();
+    // Scripted capability responses (`#! input:`, run mode), in header order.
+    let mut inputs: Vec<ScriptInput> = Vec::new();
     // Drive-script directives (`mode: drive`), retained raw and in order, then parsed into a
     // `DriveScript` below (crate::drivescript) once the whole header is read.
     let mut drive_raw: Vec<(String, String)> = Vec::new();
@@ -56,8 +58,10 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
                 "expect-out" => expectations.push(Expectation::Out {
                     text: value.to_string(),
                 }),
+                "input" => inputs.push(parse_input(value)?),
                 // Drive-script directives — retained raw, parsed as a unit below.
-                "break" | "raise-trap" | "obs" | "do" | "expect" | "stack" => {
+                "break" | "raise-trap" | "obs" | "do" | "resolve" | "resolve-raise" | "expect"
+                | "stack" => {
                     drive_raw.push((key.to_string(), value.to_string()));
                 }
                 // Reserved for the inspection follow-on (value/render assertions): a named slot
@@ -93,10 +97,17 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
         Some(crate::drivescript::parse(&drive_raw)?)
     } else {
         if !drive_raw.is_empty() {
-            return Err("`break:`/`do:`/`expect:`/`stack:` require `mode: drive`".to_string());
+            return Err(
+                "`break:`/`do:`/`resolve:`/`expect:`/`stack:` require `mode: drive`".to_string(),
+            );
         }
         None
     };
+    // `input:` scripts a capability response before the run drives it — a `run`-mode notion (a drive
+    // fixture uses `resolve:` steps instead).
+    if !inputs.is_empty() && mode != Mode::Run {
+        return Err("`#! input:` requires `mode: run` (drive fixtures use `resolve:`)".to_string());
+    }
 
     Ok(Test {
         id,
@@ -104,7 +115,29 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
         mode,
         required,
         expectations,
+        inputs,
         drive,
+    })
+}
+
+/// Parses `#! input: <capability> -> <response>` (run mode): the capability name, then either a
+/// scripted value or `raise "<msg>"`.
+fn parse_input(value: &str) -> Result<ScriptInput, String> {
+    let (capability, response) = value
+        .split_once("->")
+        .ok_or_else(|| format!("`input:` expects `<capability> -> <response>`, got `{value}`"))?;
+    let capability = capability.trim();
+    if capability.is_empty() {
+        return Err(format!("`input:` has no capability name in `{value}`"));
+    }
+    let response = response.trim();
+    let response = match response.strip_prefix("raise") {
+        Some(msg) => ScriptResponse::Raise(crate::drivescript::parse_string_literal(msg)?),
+        None => ScriptResponse::Value(crate::drivescript::parse_script_value(response)?),
+    };
+    Ok(ScriptInput {
+        capability: capability.to_string(),
+        response,
     })
 }
 

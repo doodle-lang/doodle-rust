@@ -17,6 +17,7 @@
 //! `expect-raise` (the uncaught exception) and `expect-out` (the captured output). A run test above
 //! the implemented stage still SKIPs.
 
+mod capability;
 mod directive;
 mod drive;
 mod drivescript;

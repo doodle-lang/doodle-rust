@@ -6,17 +6,22 @@
 //! #! raise-trap: on                  # enable raise-trapping (E§8.7)
 //! #! obs: subexpr | statement        # observation mode (E§8.8, S-62); default statement
 //! #! do: run | continue | step | into | over | out    # a driving directive (E§7.3)
-//! #! expect: <stop>                  # the stop that `do:` must produce
+//! #! resolve: <value>                # resolve the suspended capability with a value (E§7.5)
+//! #! resolve-raise: "<msg>"          # raise <msg> at the suspended capability's call site
+//! #! expect: <stop>                  # the stop the step must produce
 //! #! stack: <elem>, <elem>, …        # optional stack shape at the stop, innermost first
 //! ```
 //!
 //! where a `<stop>` is `completed`, `paused <reason> @ L:C`, `raised <substring> @ L:C`,
-//! `suspended <id> @ L:C`, or `faulted <kind>`; a `<reason>` is one of `step`/`breakpoint`/
-//! `host-pause`/`raise-trap`/`slice-end`; and a stack `<elem>` is `L`, `name@L`, or `name@L×N`
-//! (tail-iteration count `N`; `x` accepted for `×`). Setup directives must precede the first `do:`.
+//! `suspended <capability> @ L:C` (a capability request, `Outcome::Suspended`), `import <path> @
+//! L:C` (an import, `Outcome::SuspendedImport`), or `faulted <kind>`; a `<reason>` is one of
+//! `step`/`breakpoint`/`host-pause`/`raise-trap`/`slice-end`; a `<value>` is a string (`"…"`),
+//! integer, float, `true`/`false`, or `nil`; and a stack `<elem>` is `L`, `name@L`, or `name@L×N`
+//! (tail-iteration count `N`; `x` accepted for `×`). `do:`/`resolve:`/`resolve-raise:` each start a
+//! step; setup directives (`break`/`raise-trap`/`obs`) must precede the first one.
 
 use crate::directive::parse_positioned;
-use crate::model::{DriveAction, DriveScript, DriveStep, StackElem, StopAssertion};
+use crate::model::{DriveAction, DriveScript, DriveStep, ScriptValue, StackElem, StopAssertion};
 
 /// Parses the raw drive directives (key, value), in header order, into a [`DriveScript`].
 pub(crate) fn parse(raw: &[(String, String)]) -> Result<DriveScript, String> {
@@ -37,12 +42,17 @@ pub(crate) fn parse(raw: &[(String, String)]) -> Result<DriveScript, String> {
             "break" => breakpoints.push(parse_break(value)?),
             "raise-trap" => raise_trap = parse_on(value)?,
             "obs" => subexpr = parse_obs(value)?,
-            "do" => {
+            "do" | "resolve" | "resolve-raise" => {
                 if let Some(prev) = building.take() {
                     steps.push(prev.finish()?);
                 }
                 seen_do = true;
-                building = Some(Building::new(parse_action(value)?));
+                let action = match key.as_str() {
+                    "resolve" => DriveAction::Resolve(parse_script_value(value)?),
+                    "resolve-raise" => DriveAction::ResolveRaise(parse_string_literal(value)?),
+                    _ => parse_action(value)?,
+                };
+                building = Some(Building::new(action));
             }
             "expect" => {
                 let step = building
@@ -166,6 +176,44 @@ fn parse_action(value: &str) -> Result<DriveAction, String> {
     }
 }
 
+/// A scripted primitive value (`resolve:`/`input:`): a string (`"…"`), integer, float (`has a .`),
+/// `true`/`false`, or `nil`. Shared by the drive `resolve:` step and the run-mode `input:` queue.
+pub(crate) fn parse_script_value(value: &str) -> Result<ScriptValue, String> {
+    let value = value.trim();
+    match value {
+        "true" => return Ok(ScriptValue::Bool(true)),
+        "false" => return Ok(ScriptValue::Bool(false)),
+        "nil" => return Ok(ScriptValue::Nil),
+        _ => {}
+    }
+    if value.starts_with('"') {
+        return Ok(ScriptValue::Str(parse_string_literal(value)?));
+    }
+    if value.contains('.') {
+        if let Ok(f) = value.parse::<f64>() {
+            return Ok(ScriptValue::Float(f));
+        }
+    } else if let Ok(n) = value.parse::<i64>() {
+        return Ok(ScriptValue::Int(n));
+    }
+    Err(format!(
+        "bad scripted value `{value}` (expected a \"string\", integer, float, true/false, or nil)"
+    ))
+}
+
+/// The contents of a `"…"` string literal (no escapes beyond the delimiters — conformance scripts
+/// keep values plain). Errors if `value` is not a single double-quoted string.
+pub(crate) fn parse_string_literal(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let inner = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .filter(|inner| !inner.contains('"'));
+    inner
+        .map(str::to_string)
+        .ok_or_else(|| format!("expected a double-quoted string, got `{value}`"))
+}
+
 /// A `<stop>` assertion.
 fn parse_stop(value: &str) -> Result<StopAssertion, String> {
     let (head, rest) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
@@ -182,8 +230,12 @@ fn parse_stop(value: &str) -> Result<StopAssertion, String> {
             Ok(StopAssertion::Raised { substring, pos })
         }
         "suspended" => {
-            let (id, pos) = parse_positioned(rest)?;
-            Ok(StopAssertion::Suspended { id, pos })
+            let (capability, pos) = parse_positioned(rest)?;
+            Ok(StopAssertion::Suspended { capability, pos })
+        }
+        "import" => {
+            let (path, pos) = parse_positioned(rest)?;
+            Ok(StopAssertion::Import { path, pos })
         }
         "faulted" => {
             if rest.is_empty() {

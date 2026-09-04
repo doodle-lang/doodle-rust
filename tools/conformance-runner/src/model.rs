@@ -32,6 +32,44 @@ pub(crate) enum Expectation {
     Raise { substring: String, pos: Position },
 }
 
+/// A scripted primitive value used to resolve a suspending capability (D-M7-21): the literal a
+/// fixture writes in a `resolve:` step or an `input:` queue entry. Covers what the conformance
+/// capabilities produce — `read_line` a string, `time`/`random` a number — plus `bool`/`nil` for
+/// completeness. Materialized into a host handle at resolution (`matcher`/`drive`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ScriptValue {
+    /// A `"…"` string literal.
+    Str(String),
+    /// An integer literal.
+    Int(i64),
+    /// A float literal (has a `.`).
+    Float(f64),
+    /// `true` / `false`.
+    Bool(bool),
+    /// `nil`.
+    Nil,
+}
+
+/// How a scripted `input:`/`resolve:` fulfils a capability request (E§7.5): a value the capability
+/// produces, or an exception raised at its call site.
+#[derive(Clone, Debug)]
+pub(crate) enum ScriptResponse {
+    /// Resolve with this value (`Resolution::Value`).
+    Value(ScriptValue),
+    /// Raise this message at the call site (`Resolution::Raise`).
+    Raise(String),
+}
+
+/// One `#! input: <capability> -> <response>` entry (run mode): the host's scripted answer to the
+/// next request for that capability. Entries for one capability form an in-order FIFO queue.
+#[derive(Clone, Debug)]
+pub(crate) struct ScriptInput {
+    /// The capability name the response is for (e.g. `read_line`).
+    pub(crate) capability: String,
+    /// The value/raise to answer its next request with.
+    pub(crate) response: ScriptResponse,
+}
+
 /// A discovered, parsed conformance test.
 #[derive(Clone, Debug)]
 pub(crate) struct Test {
@@ -45,6 +83,9 @@ pub(crate) struct Test {
     pub(crate) required: Stage,
     /// The declared `#! expect-…` directives, in file order (`run`/`static` modes).
     pub(crate) expectations: Vec<Expectation>,
+    /// The scripted capability responses (`#! input:`, `run` mode): per capability, an in-order
+    /// FIFO the runner draws from when that capability suspends (D-M7-21).
+    pub(crate) inputs: Vec<ScriptInput>,
     /// The drive script (`mode: drive` only): setup + the ordered directive/expectation steps.
     pub(crate) drive: Option<DriveScript>,
 }
@@ -75,9 +116,11 @@ pub(crate) struct DriveStep {
     pub(crate) stack: Option<Vec<StackElem>>,
 }
 
-/// A drive-script action (`#! do:`) — a driving directive (E§7.3). Capability/import resolutions
-/// (§4.3) join when a suspending capability exists (M7); imports already resolve via sibling files.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A drive-script action (`#! do:`, `#! resolve:`, `#! resolve-raise:`) — a driving directive
+/// (E§7.3). Most drive the machine forward; `Resolve`/`ResolveRaise` fulfil the capability the
+/// previous step suspended on (D-M7-21), resuming via the engine's `resolve(Resolution)`. (Imports
+/// resolve transparently via sibling files unless a step expects an `import` stop.)
+#[derive(Clone, Debug)]
 pub(crate) enum DriveAction {
     /// `run` — `RunToCompletion`.
     Run,
@@ -91,6 +134,11 @@ pub(crate) enum DriveAction {
     Over,
     /// `out` — `StepOut`.
     Out,
+    /// `resolve: <value>` — resolve the suspended capability with a value (`Resolution::Value`).
+    Resolve(ScriptValue),
+    /// `resolve-raise: <msg>` — raise `msg` at the suspended capability's call site
+    /// (`Resolution::Raise`).
+    ResolveRaise(String),
 }
 
 /// The stop a [`DriveStep`] must produce (`#! expect:`) — one entry of the outcome transcript.
@@ -102,8 +150,13 @@ pub(crate) enum StopAssertion {
     Paused { reason: String, pos: Position },
     /// `raised <substring> @ <pos>` — an uncaught raise whose message contains `substring`.
     Raised { substring: String, pos: Position },
-    /// `suspended <id> @ <pos>` — a capability/import suspension with this request identity.
-    Suspended { id: String, pos: Position },
+    /// `suspended <capability> @ <pos>` — a **capability** request (`Outcome::Suspended`) for the
+    /// named capability, at this position (D-M7-21).
+    Suspended { capability: String, pos: Position },
+    /// `import <path> @ <pos>` — an **import** suspension (`Outcome::SuspendedImport`) for this
+    /// dotted module path, at this position (D-M7-21). Asserting it suppresses the transparent
+    /// sibling-file resolution for that step.
+    Import { path: String, pos: Position },
     /// `faulted <kind>` — a non-resumable engine fault of this kind.
     Faulted { kind: String },
 }
