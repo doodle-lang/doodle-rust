@@ -1,0 +1,9 @@
+# Print the current time, in seconds since 1970.
+#
+# `time` reads the real wall clock — a capability the host resolves. It differs every run, yet
+# because it enters only as a recorded capability resolution, a recorded run still replays exactly.
+#
+#   doodle run examples/gallery/clock.doodle
+
+print("Seconds since 1970:")
+print(time())

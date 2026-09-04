@@ -10,6 +10,7 @@
 //! nonzero otherwise). An `import` resolves against the filesystem ([`resolve_import_request`]):
 //! the dotted path maps to a `.doodle` file beside the importing module (E§6, S-7).
 
+use crate::draw::DrawSink;
 use crate::rng::Rng;
 use doodle_core::diag::render::{SourceView, render_diagnostics, render_raise};
 use doodle_core::diag::{Diagnostic, Severity};
@@ -18,7 +19,9 @@ use doodle_core::drive::{
     Limits, Outcome, Resolution,
 };
 use doodle_core::machine::{
-    Instance, Registry, print_intrinsic, random_intrinsic, read_line_intrinsic, time_intrinsic,
+    Instance, Registry, clear_canvas_intrinsic, cos_intrinsic, draw_line_intrinsic,
+    print_intrinsic, random_intrinsic, read_line_intrinsic, set_turtle_intrinsic, sin_intrinsic,
+    time_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
@@ -27,13 +30,16 @@ use doodle_core::span::ModuleId;
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-/// The capability ids the CLI resolves, fixed by the registration order in [`build_registry`]:
-/// `print` is index 0 (a synchronous intrinsic that never suspends), then the three ambient
-/// capabilities. Stable across runs, so a recording replays each resolution against a stable
-/// identity (E§11, S-43).
+/// The suspending-capability ids the CLI resolves, fixed by the registration order in
+/// [`build_registry`]. `print`(0)/`sin`(4)/`cos`(5) are **synchronous** intrinsics that never
+/// suspend, so they have no id here. Stable across runs, so a recording replays each resolution
+/// against a stable identity (E§11, S-43).
 const CAP_READ_LINE: u32 = 1;
 const CAP_TIME: u32 = 2;
 const CAP_RANDOM: u32 = 3;
+const CAP_DRAW_LINE: u32 = 6;
+const CAP_SET_TURTLE: u32 = 7;
+const CAP_CLEAR_CANVAS: u32 = 8;
 
 /// Options for `doodle run`, parsed by the argument front end (`main.rs`).
 pub struct RunOptions {
@@ -41,6 +47,8 @@ pub struct RunOptions {
     pub file: String,
     /// The `--seed N` value for `random`, or `None` to seed from the wall clock (D-M7-16).
     pub seed: Option<u64>,
+    /// `--draw-log`: emit one line per drawing command (D-M7-18).
+    pub draw_log: bool,
 }
 
 /// Runs the program at `options.file`, returning the process exit code: `0` on `Completed`, `1` on
@@ -90,11 +98,14 @@ pub fn run(options: RunOptions) -> u8 {
         eprint!("{load_warnings}");
     }
 
-    drive_to_terminal(&mut inst, &view, options.seed)
+    drive_to_terminal(&mut inst, &view, options.seed, options.draw_log)
 }
 
-/// The CLI's registry (E§5.5, S-43): the demo `print` plus the three ambient capabilities, in a
-/// fixed order so the [`CAP_*`](CAP_READ_LINE) ids and any recording stay stable (E§11).
+/// The CLI's registry (E§5.5, S-43): `print`, the three ambient capabilities, the provisional trig
+/// natives `sin`/`cos` (which the turtle library's `forward` needs), and the three platform drawing
+/// primitives (E§13). The order is fixed so the [`CAP_*`](CAP_READ_LINE) ids and any recording are
+/// stable (E§11): print(0), read_line(1), time(2), random(3), sin(4), cos(5), draw_line(6),
+/// set_turtle(7), clear_canvas(8).
 fn build_registry() -> Registry {
     let mut registry = Registry::new();
     for intrinsic in [
@@ -102,6 +113,11 @@ fn build_registry() -> Registry {
         read_line_intrinsic(),
         time_intrinsic(),
         random_intrinsic(),
+        sin_intrinsic(),
+        cos_intrinsic(),
+        draw_line_intrinsic(),
+        set_turtle_intrinsic(),
+        clear_canvas_intrinsic(),
     ] {
         registry
             .register(intrinsic)
@@ -111,19 +127,27 @@ fn build_registry() -> Registry {
 }
 
 /// Drives `inst` to a terminal outcome, streaming `print` output to stdout, resolving each
-/// capability/import request, and rendering a raise/fault to stderr. Returns the exit code.
-fn drive_to_terminal(inst: &mut Instance, view: &SourceView<'_>, seed: Option<u64>) -> u8 {
+/// capability/import request, feeding drawing commands into `sink`, and rendering a raise/fault to
+/// stderr. On the way out, for **any** terminal outcome (including a raise after a partial
+/// drawing), it prints the never-silent draw summary (D-M7-18). Returns the exit code.
+fn drive_to_terminal(
+    inst: &mut Instance,
+    view: &SourceView<'_>,
+    seed: Option<u64>,
+    draw_log: bool,
+) -> u8 {
     let mut rng = Rng::new(seed.unwrap_or_else(entropy_seed));
+    let mut sink = DrawSink::new(draw_log);
     let mut flushed = 0usize;
     let mut outcome = drive::run(inst, Directive::RunToCompletion);
-    loop {
+    let exit = loop {
         // Stream whatever `print` produced in the last step before we act — so a prompt shows
         // before we block on stdin, and program output precedes any error we are about to render.
         flush_output(inst, &mut flushed);
         match outcome {
-            Outcome::Completed(_) => return 0,
+            Outcome::Completed(_) => break 0,
             Outcome::Suspended(request) => {
-                let resolution = resolve_capability(inst, &request, &mut rng);
+                let resolution = resolve_capability(inst, &request, &mut rng, &mut sink);
                 outcome = drive::resolve(inst, resolution);
             }
             Outcome::SuspendedImport(request) => {
@@ -133,20 +157,24 @@ fn drive_to_terminal(inst: &mut Instance, view: &SourceView<'_>, seed: Option<u6
             Outcome::Raised(value, trace) => {
                 let (kind, message) = inst.describe_raised(value);
                 eprint!("{}", render_raise(&kind, &message, trace.raised_at, view));
-                return 1;
+                break 1;
             }
             Outcome::Faulted(fault) => {
                 eprintln!("doodle: {}", fault_message(fault));
-                return 1;
+                break 1;
             }
             // `RunToCompletion` with no breakpoints/host-pause never pauses; a pause here means a
             // violated engine invariant, reported rather than silently looped.
             Outcome::Paused(reason) => {
                 eprintln!("doodle: internal error: unexpected pause ({reason:?})");
-                return 1;
+                break 1;
             }
         }
+    };
+    if let Some(summary) = sink.summary() {
+        println!("{summary}");
     }
+    exit
 }
 
 /// Resolves one `import` request against the filesystem (E§6, S-7): the dotted `path` maps to a
@@ -212,27 +240,42 @@ fn flush_output(inst: &Instance, flushed: &mut usize) {
 }
 
 /// Resolves one capability request (E§7.5): `read_line` from a line of stdin, `time` from the wall
-/// clock, `random` from `rng`. The request's argument handles are host-owned and released here
-/// (S-17); these capabilities take none, but a stray one is freed rather than leaked.
+/// clock, `random` from `rng`, and the drawing primitives into `sink` (each a `to`, resolved with
+/// nil after the sink reads its arguments). The request's argument handles are host-owned; they are
+/// read first (the drawing ones carry coordinates/colors) and then released here (S-17).
 fn resolve_capability(
     inst: &mut Instance,
     request: &CapabilityRequest,
     rng: &mut Rng,
+    sink: &mut DrawSink,
 ) -> Resolution {
-    for &handle in &request.args {
-        let _ = inst.release(handle);
-    }
-    match request.capability.0 {
+    let resolution = match request.capability.0 {
         CAP_READ_LINE => resolve_read_line(inst),
         CAP_TIME => Resolution::Value(inst.make_float(wall_clock_seconds())),
         CAP_RANDOM => Resolution::Value(inst.make_float(rng.next_f64())),
-        // Only the three ambient capabilities suspend (print is synchronous), so this is
-        // unreachable in practice; a raise keeps a mis-registration from wedging the drive.
+        CAP_DRAW_LINE => {
+            sink.draw_line(inst, &request.args);
+            Resolution::Value(inst.make_nil())
+        }
+        CAP_SET_TURTLE => {
+            sink.set_turtle(inst, &request.args);
+            Resolution::Value(inst.make_nil())
+        }
+        CAP_CLEAR_CANVAS => {
+            sink.clear_canvas();
+            Resolution::Value(inst.make_nil())
+        }
+        // Only the registered suspending capabilities reach here (the sync intrinsics never
+        // suspend); a raise keeps a mis-registration from wedging the drive.
         other => Resolution::Raise(raise_string(
             inst,
             &format!("unresolved capability {other}"),
         )),
+    };
+    for &handle in &request.args {
+        let _ = inst.release(handle);
     }
+    resolution
 }
 
 /// Resolves `read_line` (E§5.3): one line of stdin as a string with its trailing newline stripped;

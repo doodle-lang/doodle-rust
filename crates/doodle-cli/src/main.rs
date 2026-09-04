@@ -4,6 +4,7 @@
 //! dependency, matching the audited minimal-dep house style. Exit codes: `0` success, `1` a program
 //! error (raise/fault/load error) or a failing suite, `2` a usage error.
 
+mod draw;
 mod rng;
 mod run;
 
@@ -44,6 +45,7 @@ fn dispatch(args: &[String]) -> u8 {
 fn cmd_run(args: &[String]) -> u8 {
     let mut file: Option<String> = None;
     let mut seed: Option<u64> = None;
+    let mut draw_log = false;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -64,6 +66,8 @@ fn cmd_run(args: &[String]) -> u8 {
                 Ok(n) => seed = Some(n),
                 Err(code) => return code,
             }
+        } else if arg == "--draw-log" {
+            draw_log = true;
         } else if arg.starts_with('-') {
             eprintln!("doodle: unknown option `{arg}`");
             return 2;
@@ -76,10 +80,14 @@ fn cmd_run(args: &[String]) -> u8 {
         i += 1;
     }
     match file {
-        Some(file) => run::run(run::RunOptions { file, seed }),
+        Some(file) => run::run(run::RunOptions {
+            file,
+            seed,
+            draw_log,
+        }),
         None => {
             eprintln!("doodle: `run` needs a program file");
-            eprintln!("usage: doodle run <file> [--seed N]");
+            eprintln!("usage: doodle run <file> [--seed N] [--draw-log]");
             2
         }
     }
@@ -119,8 +127,11 @@ const USAGE: &str = "\
 doodle — the Doodle language CLI
 
 usage:
-  doodle run <file> [--seed N]   run a Doodle program
-  doodle test [root]             run the conformance suite (default root: conformance)
-  doodle --help                  show this help
-  doodle --version               show the version
+  doodle run <file> [--seed N] [--draw-log]   run a Doodle program
+  doodle test [root]                          run the conformance suite (default: conformance)
+  doodle --help                               show this help
+  doodle --version                            show the version
+
+  --seed N     make `random` reproducible (default: seeded from the clock)
+  --draw-log   print one line per drawing command (turtle programs)
 ";

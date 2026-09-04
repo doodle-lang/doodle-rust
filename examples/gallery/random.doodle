@@ -1,0 +1,12 @@
+# Print a few random numbers in [0, 1).
+#
+# `random` is a capability the host resolves — so the numbers differ each run. Pass `--seed N`
+# to get the same sequence every time (the "same maze every time" flag):
+#
+#   doodle run examples/gallery/random.doodle
+#   doodle run examples/gallery/random.doodle --seed 42
+
+print("Three random numbers in [0, 1):")
+print(random())
+print(random())
+print(random())

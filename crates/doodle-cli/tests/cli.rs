@@ -156,6 +156,78 @@ fn a_missing_import_raises_module_not_found() {
 }
 
 #[test]
+fn draw_log_emits_a_line_per_command() {
+    // A tiny primitives-direct program: the drawing plumbing smoke test, independent of the turtle
+    // library (its minimal capability path). Clean integer coords make `--draw-log` exactly
+    // assertable; the never-silent summary follows.
+    let program = fixture(
+        "draw.doodle",
+        "draw_line(0, 0, 100, 0, 0, 0, 0, 255)\ndraw_line(100, 0, 100, 50, 255, 0, 0, 128)\n",
+    );
+    let out = run_doodle(&["run", program.to_str().unwrap(), "--draw-log"], b"");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout
+            .starts_with("line (0,0) -> (100,0) #000000ff\nline (100,0) -> (100,50) #ff000080\n"),
+        "stdout: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("drew 2 line segments"),
+        "stdout: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn a_drawing_program_is_never_silent() {
+    // Without `--draw-log` a drawing program still reports what it drew (D-M7-18): the summary is
+    // shown, and no per-command lines leak.
+    let program = fixture(
+        "draw_quiet.doodle",
+        "draw_line(0, 0, 10, 10, 0, 0, 0, 255)\n",
+    );
+    let out = run_doodle(&["run", program.to_str().unwrap()], b"");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("drew 1 line segment"),
+        "stdout: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("line (0,0)"),
+        "no per-command log without --draw-log: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn run_a_terminal_gallery_program_with_scripted_input() {
+    // examples/gallery/greeting.doodle: read_line + print + interpolation, driven with scripted
+    // stdin — keeps a terminal-friendly gallery program valid.
+    let entry =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gallery/greeting.doodle");
+    let out = run_doodle(&["run", entry.to_str().unwrap()], b"Ada\n");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "What's your name?\nNice to meet you, Ada!\n");
+}
+
+#[test]
+fn run_draws_a_turtle_program_from_the_gallery() {
+    // The flagship: examples/gallery/spiral.doodle does `import turtle.*` and draws with
+    // forward/right inside a `repeat` block — exercising module resolution, the Doodle-over-host
+    // wrapper (M3.2), a block consumer, the drawing capabilities, and the sink, end to end.
+    let entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gallery/spiral.doodle");
+    let out = run_doodle(&["run", entry.to_str().unwrap()], b"");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("drew 40 line segments"),
+        "stdout: {}",
+        out.stdout
+    );
+}
+
+#[test]
 fn no_command_is_a_usage_error() {
     let out = run_doodle(&[], b"");
     assert_eq!(out.code, 2);

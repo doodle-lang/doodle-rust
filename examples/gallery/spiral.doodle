@@ -1,0 +1,22 @@
+# A turtle-graphics example: a colorful growing spiral.
+#
+# This is what a kid actually writes — `import turtle`, then `forward`/`right` — not the
+# low-level `draw_line` the library calls underneath ("no magic boundaries": the turtle
+# commands are ordinary Doodle code over three host primitives). The `doodle` CLI is a real
+# drawing host, but a terminal can't show pixels, so it renders the drawing to text: a quiet
+# end-of-run summary, or one line per command with `--draw-log`. Open it in the browser
+# playground to see the actual picture.
+#
+#   doodle run examples/gallery/spiral.doodle
+#   doodle run examples/gallery/spiral.doodle --draw-log
+
+import turtle.*
+
+pencolor(30, 90, 200)
+
+let step = 8
+repeat(40) do
+  forward(step)
+  right(92)
+  step = step + 4
+end
