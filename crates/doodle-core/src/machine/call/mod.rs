@@ -39,6 +39,7 @@ pub(crate) use frame::{define_callable, make_callable, return_from_callable};
 /// [`apply`].
 pub(crate) fn eval_call(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     call: NodeId,
@@ -48,7 +49,7 @@ pub(crate) fn eval_call(
     };
     let callee = *callee;
     if block::is_block_invocation(resolved, heap, machine, callee) {
-        return block::eval_block_call(resolved, heap, machine, call);
+        return block::eval_block_call(resolved, modules, heap, machine, call);
     }
     let frame = machine.frames.last_mut().expect("eval_call with no frame");
     frame.conts.push(Cont::CallGotCallee { call });

@@ -326,7 +326,7 @@ pub(super) fn eval(
         }
         // A call schedules callee/argument evaluation, then `Apply` (call.rs); a
         // block-parameter invocation takes the block path (block.rs).
-        Node::Call { .. } => return call::eval_call(resolved, heap, machine, node),
+        Node::Call { .. } => return call::eval_call(resolved, modules, heap, machine, node),
         // An anonymous `fn` expression interns its own closure value (L§6.10),
         // reading its captured cells from the creating environment (M2a.8).
         Node::Callable { .. } => call::make_callable(resolved, heap, machine, node),

@@ -22,11 +22,12 @@ use super::cont::Cont;
 use super::error::{ExceptionKind, Raise};
 use super::frame::{BlockDescriptor, Consumer, Frame, FrameKind};
 use super::step::take_value;
-use super::{Machine, Value, call, control, local};
+use super::{LoadedModule, Machine, Value, call, control, local};
 use crate::ast::{Node, NodeId};
 use crate::heap::Heap;
 use crate::resolve::{ParamInfo, Resolution, ResolvedModule};
 use crate::span::Span;
+use std::sync::Arc;
 
 /// Whether a call whose callee is `callee` invokes a block parameter (`body(args)`,
 /// §8.5) rather than a callable value. True iff `callee` is an `Ident` resolving to
@@ -76,6 +77,7 @@ fn block_param_owner(
 /// to right, or, with none, invoke it immediately.
 pub(crate) fn eval_block_call(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     call: NodeId,
@@ -95,7 +97,7 @@ pub(crate) fn eval_block_call(
             frame.conts.push(Cont::Eval { node: first_expr });
             Ok(())
         }
-        None => block_apply(resolved, heap, machine, call, Vec::new()),
+        None => block_apply(resolved, modules, heap, machine, call, Vec::new()),
     }
 }
 
@@ -103,6 +105,7 @@ pub(crate) fn eval_block_call(
 /// evaluate the next argument or invoke the block once the last is in.
 pub(crate) fn got_block_arg(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     call: NodeId,
@@ -127,7 +130,7 @@ pub(crate) fn got_block_arg(
             frame.conts.push(Cont::Eval { node: next_expr });
             Ok(())
         }
-        None => block_apply(resolved, heap, machine, call, values),
+        None => block_apply(resolved, modules, heap, machine, call, values),
     }
 }
 
@@ -141,6 +144,7 @@ pub(crate) fn got_block_arg(
 /// Block parameters have no defaults, so each must be supplied.
 fn block_apply(
     resolved: &ResolvedModule,
+    modules: &[LoadedModule],
     heap: &mut Heap,
     machine: &mut Machine,
     call: NodeId,
@@ -162,7 +166,14 @@ fn block_apply(
         .with_details(super::exception::parameter_details(None, "block")));
     };
     let block_id = desc.callable as usize;
-    let block_info = &resolved.callables[block_id];
+    // The block's `CallableInfo` (its parameters, slots, body) lives in the module where the block
+    // was **written** (its defining frame's module), and `desc.callable` is an index into *that*
+    // module's callables. When an imported block consumer runs a caller's block, the consumer's
+    // `resolved` is a different module, so the block must be read from its own (they coincide for a
+    // same-module invocation). The `body(args)` call node, by contrast, lives in `resolved`.
+    let block_module = machine.frames[desc.defining].module;
+    let block_resolved = Arc::clone(&modules[block_module.0 as usize].resolved);
+    let block_info = &block_resolved.callables[block_id];
     let (slots, filled) = call::bind_arguments(
         resolved,
         heap,
@@ -186,11 +197,10 @@ fn block_apply(
     let body = block_info.body;
     // A block does not capture (it uses static links, §7); its own locals may still
     // be cell-boxed (a nested `fn` inside the block captured one), so build slots.
-    let locals = local::build(resolved, heap, block_id, &slots, &[]);
+    let locals = local::build(&block_resolved, heap, block_id, &slots, &[]);
     let serial = machine.next_frame_serial();
     let dyn_depth = machine.dyn_stack.len() as u32;
     // A block runs in its defining frame's module (its static-link parent, §7/AD5).
-    let block_module = machine.frames[desc.defining].module;
     machine.frames.push(Frame::block(
         block_module,
         desc.defining,

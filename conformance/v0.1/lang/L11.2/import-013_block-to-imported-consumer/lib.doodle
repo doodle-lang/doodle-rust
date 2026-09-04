@@ -1,0 +1,7 @@
+to greet(name)
+    print(name)
+end
+to twice(do body)
+    body()
+    body()
+end

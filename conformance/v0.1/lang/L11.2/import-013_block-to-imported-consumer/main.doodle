@@ -1,0 +1,12 @@
+#! clause: L11.2
+#! mode: run
+#! expect-out: x
+#! expect-out: x
+# A `do … end` block passed to a block-consumer procedure imported from another module (L§8.5 +
+# L§11.2): invoking `body()` inside `twice` runs the caller's block in its own context. `lib`'s
+# first proc `greet(name)` is present so a regression that reads the block against the *consumer's*
+# module (lib) would mis-resolve to `greet` and raise `missing-argument` for `name`.
+import lib.*
+twice() do
+    print("x")
+end

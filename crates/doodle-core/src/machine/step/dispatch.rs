@@ -123,7 +123,7 @@ pub(super) fn dispatch(
             call,
             values,
             index,
-        }) => block::got_block_arg(resolved, heap, machine, call, values, index),
+        }) => block::got_block_arg(resolved, modules, heap, machine, call, values, index),
         Some(Cont::ListGotElem {
             list,
             values,
