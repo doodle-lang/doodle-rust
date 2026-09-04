@@ -4,8 +4,10 @@
 //! Registration order is replay identity (E§5.5, S-43): a capability's `CapabilityId` is its
 //! registration index, so a `#! input:`/`resolve:`/`suspended` directive that names a capability
 //! must resolve to the same index the engine reports in an `Outcome::Suspended`. This one ordered
-//! list is therefore the single source of truth for **both** the registry and the map — the seed of
-//! the portable manifest native, wasm, and C will share (M7.5b).
+//! list is the single source of truth for **both** the registry and the map, and it is the
+//! **portable manifest** (M7.5b, normative in `conformance/README.md`): the wasm surface
+//! (`DoodleInstance.demo`) installs the identical set in the identical order, and the M7 C host will
+//! too. Any divergence is a determinism leak (E§11); the M7.5d trace schema catches it.
 
 use doodle_core::machine::{
     Intrinsic, Registry, decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic,

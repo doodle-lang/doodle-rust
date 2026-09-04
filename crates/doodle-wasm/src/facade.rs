@@ -20,7 +20,8 @@ use doodle_core::drive::{
 use doodle_core::machine::{
     Handle, HandleError, Instance, Kind, Registry, ValueError, clear_canvas_intrinsic,
     cos_intrinsic, decode_intrinsic, draw_line_intrinsic, each_intrinsic, encode_intrinsic,
-    length_intrinsic, print_intrinsic, set_turtle_intrinsic, sin_intrinsic,
+    length_intrinsic, print_intrinsic, random_intrinsic, read_line_intrinsic, set_turtle_intrinsic,
+    sin_intrinsic, time_intrinsic,
 };
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve as resolve_module;
@@ -124,19 +125,24 @@ pub enum DriveOutcome {
 }
 
 impl Session {
-    /// Loads `program` with the **demo** registry — only `print`, matching the native
-    /// conformance runner (S-43), and nothing prepended. This is the conformance-parity
-    /// configuration (identical namespace ⇒ identical resolution, E§11).
+    /// Loads `program` with the **demo** registry — the portable conformance manifest (D-M7-21,
+    /// M7.5b), nothing prepended. This is the conformance-parity configuration (identical namespace
+    /// and registration order ⇒ identical resolution + capability ids across surfaces, E§11).
     pub fn demo(program: &str) -> Result<Self, LoadError> {
         let mut registry = Registry::new();
-        // Must match the native conformance runner's `demo_registry` in the same order —
-        // an identical namespace is what makes native/wasm resolution identical (E§11).
+        // The portable conformance manifest, in the fixed registration order the native runner
+        // (`conformance-runner`'s `capability` module) and the C host also install. Registration
+        // order is a capability's replay identity (E§5.5/§11), so all three surfaces must match:
+        // print(0), length(1), each(2), encode(3), decode(4), read_line(5), time(6), random(7).
         for intrinsic in [
             print_intrinsic(),
             length_intrinsic(),
             each_intrinsic(),
             encode_intrinsic(),
             decode_intrinsic(),
+            read_line_intrinsic(),
+            time_intrinsic(),
+            random_intrinsic(),
         ] {
             registry
                 .register(intrinsic)

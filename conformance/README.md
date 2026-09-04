@@ -182,6 +182,29 @@ fixture **error**, never silently ignored. The format is versioned implicitly by
 `mode: drive`; a future incompatible grammar would be `mode: drive2`. Drive
 fixtures live under `conformance/v0.1/eng/<clause>/` and are runnable from **M6**.
 
+## Capability manifest (portable, M7.5b)
+
+The conformance host registers a **fixed, ordered** set of intrinsics + capabilities,
+installed **identically** by every surface — native (`conformance-runner`), wasm
+(`DoodleInstance.demo`), and the M7 C host. Registration order is a capability's
+**replay identity** (E§5.5/§11): a capability's id is its registration index, and a
+`suspended <capability>` / `input:` / `resolve:` directive resolves against that index,
+so the three surfaces MUST register this list in this order:
+
+```
+0 print       6 time
+1 length      7 random
+2 each        (drawing/trig capabilities append here at M7.5d,
+3 encode       preserving indices 0–7)
+4 decode
+5 read_line
+```
+
+`print`/`length`/`each`/`encode`/`decode` are synchronous natives; `read_line`/`time`/
+`random` are suspending capabilities a fixture scripts. Divergence in this order across
+surfaces is a determinism leak (E§11) and a release blocker; the cross-surface trace
+schema (M7.5d) is what catches it.
+
 ## Rules
 
 - Expected text uses **substring** match per event (full-match is too brittle
