@@ -1,13 +1,13 @@
-//! The `#[repr(C)]` ABI types (freeze convention 1) and their mappings from the
-//! `doodle-core` enums. Each type here is the C-visible mirror of a core type whose
-//! default Rust layout is not ABI-stable; the explicit discriminants are the frozen
-//! contract, so **only append** variants (never renumber) and put new struct fields in
-//! [`DoodleOutcome::reserved`].
+//! The `#[repr(C)]` ABI types (freeze convention 1). Each type here is the C-visible mirror of a
+//! `doodle-core` type whose default Rust layout is not ABI-stable; the explicit discriminants are
+//! the frozen contract, so **only append** variants (never renumber) and put new struct fields in
+//! [`DoodleOutcome::reserved`]. The core↔ABI conversion functions live in [`map`] and are
+//! re-exported here, so call sites spell them `abi::value_error`, `abi::fault`, ….
 
-use doodle_core::diag::Severity;
-use doodle_core::drive::{Directive, EngineFault, LimitKind, ObservationMode, PauseReason};
-use doodle_core::machine::{BlockOutcome, Kind, Position, ValueError};
-use doodle_core::resolve::{BodyKind, GlobalKind};
+use doodle_core::resolve::GlobalKind;
+
+mod map;
+pub(crate) use map::*;
 
 /// An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
 /// Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
@@ -32,8 +32,8 @@ pub type DoodleFinalizer = extern "C" fn(ptr: u64);
 pub enum DoodleStatus {
     /// The call succeeded; any out-parameters are written.
     Ok = 0,
-    /// A handle named a freed/reused slot — a use-after-release, forged, or (M7.6) a
-    /// cross-instance handle (mirrors `ValueError::Stale`).
+    /// A handle named a freed/reused slot — a use-after-release or forged handle (mirrors
+    /// `ValueError::Stale`). A *cross-instance* handle is a host bug, reported as `ErrContract`.
     ErrStaleHandle = 1,
     /// A typed reader was applied to a value of a different kind (e.g. read an int from a
     /// string). The value's actual kind is available via `doodle_kind_of`.
@@ -57,7 +57,9 @@ pub enum DoodleStatus {
     ErrBufferTooSmall = 9,
     /// A required pointer argument was NULL.
     ErrNullPointer = 10,
-    /// A host-contract violation the engine caught (e.g. resolving a non-suspended instance).
+    /// A host-contract violation the engine caught, e.g. resolving a non-suspended instance.
+    /// Also (debug builds, MD §16) a handle minted by a *different instance*: a mixup to fix,
+    /// not a stale handle to retry (distinct from `ErrStaleHandle`). Release cannot detect it.
     ErrContract = 11,
     /// A Rust panic was caught at the boundary (an engine bug; the firewall of last resort,
     /// [`crate::guard`]). The instance should be considered unusable.
@@ -442,123 +444,4 @@ pub struct DoodleDiagnostic {
     pub span_end: u32,
     /// Reserved for additive growth; always written as `0`.
     pub reserved: [u64; 2],
-}
-
-/// Maps a core [`Severity`] to its ABI mirror.
-pub(crate) fn severity(s: Severity) -> DoodleSeverity {
-    match s {
-        Severity::Error => DoodleSeverity::Error,
-        Severity::Warning => DoodleSeverity::Warning,
-    }
-}
-
-/// Maps a [`DoodleObservationMode`] to the core [`ObservationMode`].
-pub(crate) fn observation_mode(mode: DoodleObservationMode) -> ObservationMode {
-    match mode {
-        DoodleObservationMode::Statement => ObservationMode::Statement,
-        DoodleObservationMode::Subexpression => ObservationMode::Subexpression,
-    }
-}
-
-/// Maps a core [`ObservationMode`] to its ABI mirror.
-pub(crate) fn observation_mode_of(mode: ObservationMode) -> DoodleObservationMode {
-    match mode {
-        ObservationMode::Statement => DoodleObservationMode::Statement,
-        ObservationMode::Subexpression => DoodleObservationMode::Subexpression,
-    }
-}
-
-/// Maps a core [`Position`] to its ABI mirror (the module id becomes the opaque token).
-pub(crate) fn position(pos: Position) -> DoodlePosition {
-    DoodlePosition {
-        span_start: pos.span.start,
-        span_end: pos.span.end,
-        module: pos.module.0,
-    }
-}
-
-/// Maps a core [`Kind`] to its ABI mirror.
-pub(crate) fn kind(k: Kind) -> DoodleKind {
-    match k {
-        Kind::Nil => DoodleKind::Nil,
-        Kind::Bool => DoodleKind::Bool,
-        Kind::Int => DoodleKind::Int,
-        Kind::Float => DoodleKind::Float,
-        Kind::String => DoodleKind::String,
-        Kind::Bytes => DoodleKind::Bytes,
-        Kind::List => DoodleKind::List,
-        Kind::Dict => DoodleKind::Dict,
-        Kind::Record => DoodleKind::Record,
-        Kind::Callable => DoodleKind::Callable,
-        Kind::Module => DoodleKind::Module,
-        Kind::Type => DoodleKind::Type,
-        Kind::Foreign => DoodleKind::Foreign,
-    }
-}
-
-/// Maps a [`DoodleDirective`] to the core [`Directive`].
-pub(crate) fn directive(d: DoodleDirective) -> Directive {
-    match d {
-        DoodleDirective::RunToCompletion => Directive::RunToCompletion,
-        DoodleDirective::Continue => Directive::Continue,
-        DoodleDirective::Step => Directive::Step,
-        DoodleDirective::StepInto => Directive::StepInto,
-        DoodleDirective::StepOver => Directive::StepOver,
-        DoodleDirective::StepOut => Directive::StepOut,
-    }
-}
-
-/// Maps a core [`PauseReason`] to its ABI mirror, returning the breakpoint id alongside
-/// (`0` when the pause is not a breakpoint).
-pub(crate) fn pause_reason(reason: PauseReason) -> (DoodlePauseReason, u32) {
-    match reason {
-        PauseReason::Step => (DoodlePauseReason::Step, 0),
-        PauseReason::Breakpoint(id) => (DoodlePauseReason::Breakpoint, id.0),
-        PauseReason::RaiseTrap => (DoodlePauseReason::RaiseTrap, 0),
-        PauseReason::HostPause => (DoodlePauseReason::HostPause, 0),
-        PauseReason::SliceEnd => (DoodlePauseReason::SliceEnd, 0),
-    }
-}
-
-/// Maps a core [`EngineFault`] to its flattened ABI [`DoodleFault`].
-pub(crate) fn fault(fault: EngineFault) -> DoodleFault {
-    match fault {
-        EngineFault::LimitExceeded(LimitKind::StepBudget) => DoodleFault::LimitStepBudget,
-        EngineFault::LimitExceeded(LimitKind::Heap) => DoodleFault::LimitHeap,
-        EngineFault::LimitExceeded(LimitKind::StackDepth) => DoodleFault::LimitStackDepth,
-        EngineFault::LimitExceeded(LimitKind::TailHistory) => DoodleFault::LimitTailHistory,
-        EngineFault::LimitExceeded(LimitKind::OpResult) => DoodleFault::LimitOpResult,
-        EngineFault::Cancelled => DoodleFault::Cancelled,
-        EngineFault::NestedSuspend => DoodleFault::NestedSuspend,
-        EngineFault::Internal => DoodleFault::Internal,
-    }
-}
-
-/// Maps a [`DoodleBodyKind`] to the core [`BodyKind`].
-pub(crate) fn body_kind(k: DoodleBodyKind) -> BodyKind {
-    match k {
-        DoodleBodyKind::Proc => BodyKind::Proc,
-        DoodleBodyKind::Func => BodyKind::Func,
-    }
-}
-
-/// Maps a core [`BlockOutcome`] to its ABI mirror.
-pub(crate) fn block_outcome(outcome: BlockOutcome) -> DoodleBlockOutcome {
-    match outcome {
-        BlockOutcome::Completed => DoodleBlockOutcome::Completed,
-        BlockOutcome::NonLocalExit => DoodleBlockOutcome::NonLocalExit,
-        BlockOutcome::Halted => DoodleBlockOutcome::Halted,
-    }
-}
-
-/// Maps a boundary [`ValueError`] to the ABI status a reader/constructor returns.
-pub(crate) fn value_error(err: ValueError) -> DoodleStatus {
-    match err {
-        ValueError::Stale => DoodleStatus::ErrStaleHandle,
-        ValueError::WrongKind { .. } => DoodleStatus::ErrWrongKind,
-        ValueError::IntOutOfRange => DoodleStatus::ErrIntOutOfRange,
-        ValueError::IndexOutOfBounds => DoodleStatus::ErrIndexOutOfBounds,
-        ValueError::InvalidUtf8 { .. } => DoodleStatus::ErrInvalidUtf8,
-        ValueError::MalformedInt => DoodleStatus::ErrMalformedInt,
-    }
 }

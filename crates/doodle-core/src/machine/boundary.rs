@@ -54,9 +54,14 @@ pub enum Kind {
 /// Why a boundary value operation failed (engine spec E§4.2/§4.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ValueError {
-    /// The handle names a freed/reused slot — a use-after-release (or forged/cross-instance)
-    /// handle (E§4.2). Mirrors [`HandleError::Stale`].
+    /// The handle names a freed/reused slot — a use-after-release (or forged) handle (E§4.2).
+    /// Mirrors [`HandleError::Stale`].
     Stale,
+    /// The handle belongs to a *different instance* (MD §16, debug builds only): a
+    /// cross-instance handle mixup — a host bug, kept distinct from [`Stale`](ValueError::Stale)
+    /// so the host boundary can report a contract violation rather than a routine retry.
+    /// Mirrors [`HandleError::ForeignInstance`].
+    ForeignInstance,
     /// A typed reader was applied to a value of a different kind (e.g. `as_int` on a string).
     /// Carries the reader's expected kind and the value's actual kind.
     WrongKind {
@@ -82,9 +87,12 @@ pub enum ValueError {
 }
 
 impl From<HandleError> for ValueError {
-    fn from(_: HandleError) -> Self {
-        // The only handle error is staleness; keep it a single boundary error kind.
-        ValueError::Stale
+    fn from(err: HandleError) -> Self {
+        match err {
+            HandleError::Stale => ValueError::Stale,
+            // Kept distinct so the host boundary maps it to a contract violation, not a retry.
+            HandleError::ForeignInstance => ValueError::ForeignInstance,
+        }
     }
 }
 

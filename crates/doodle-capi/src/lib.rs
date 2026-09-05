@@ -33,6 +33,22 @@
 //!
 //! The ABI contract version ([`doodle_abi_version`]) is distinct from the engine
 //! version ([`doodle_version`]): major = breaking, minor = additive.
+//!
+//! # Handles & instances (handle-ownership contract)
+//!
+//! A value crossing to the host is a `uint64_t` **handle** into *one* instance's heap. The host
+//! owns it and must [`value::doodle_release`] it exactly as many times as it was obtained, and a
+//! handle is only valid on the instance that minted it. A stale or forged handle is caught at the
+//! boundary as [`abi::DoodleStatus::ErrStaleHandle`]. Using a handle on the **wrong instance** is
+//! a host bug: in debug builds the engine detects it (a per-instance id stamped into the handle
+//! bits, MD §16) and reports [`abi::DoodleStatus::ErrContract`], distinct from a stale handle.
+//!
+//! Release builds do not encode that id and cannot detect the cross-instance case — but it is
+//! never memory-unsafe. The handle's index+generation are always validated against the
+//! *resolving* instance's own table, so the worst case a foreign handle can produce is a
+//! wrong-but-live value from that instance (or a boundary error), never undefined behavior. The
+//! Rust-side memory safety of the boundary (AD1) holds in every build; only the *diagnosis* of a
+//! cross-instance mixup is debug-only.
 
 use std::ffi::{CString, c_char};
 use std::sync::OnceLock;

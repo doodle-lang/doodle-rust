@@ -27,8 +27,8 @@ enum DoodleStatus
    */
   DoodleStatus_Ok = 0,
   /**
-   * A handle named a freed/reused slot — a use-after-release, forged, or (M7.6) a
-   * cross-instance handle (mirrors `ValueError::Stale`).
+   * A handle named a freed/reused slot — a use-after-release or forged handle (mirrors
+   * `ValueError::Stale`). A *cross-instance* handle is a host bug, reported as `ErrContract`.
    */
   DoodleStatus_ErrStaleHandle = 1,
   /**
@@ -72,7 +72,9 @@ enum DoodleStatus
    */
   DoodleStatus_ErrNullPointer = 10,
   /**
-   * A host-contract violation the engine caught (e.g. resolving a non-suspended instance).
+   * A host-contract violation the engine caught, e.g. resolving a non-suspended instance.
+   * Also (debug builds, MD §16) a handle minted by a *different instance*: a mixup to fix,
+   * not a stale handle to retry (distinct from `ErrStaleHandle`). Release cannot detect it.
    */
   DoodleStatus_ErrContract = 11,
   /**

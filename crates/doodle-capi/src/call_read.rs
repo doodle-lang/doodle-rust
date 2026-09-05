@@ -250,7 +250,7 @@ pub unsafe extern "C" fn doodle_call_release(
         };
         match engine.release(Handle::from_bits(handle)) {
             Ok(()) => DoodleStatus::Ok,
-            Err(_) => DoodleStatus::ErrStaleHandle,
+            Err(err) => abi::handle_error(err),
         }
     })
 }

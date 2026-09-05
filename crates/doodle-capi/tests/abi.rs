@@ -262,6 +262,53 @@ fn handle_round_trips_and_release_makes_stale() {
     unsafe { doodle_free(inst) };
 }
 
+/// A handle minted by one instance and used on another is caught as a *contract* error in
+/// debug builds (MD §16) — a host bug the embedder should fix, distinct from the
+/// `ErrStaleHandle` a released/forged handle yields (which a host may routinely retry).
+/// Release builds do not encode the per-instance id and cannot detect the collision, so this
+/// asserts only under `debug_assertions` — where the M7 exit criterion places the guard and
+/// where the sanitizer/Miri gates run. The deterministic guarantee lives in the engine unit
+/// test `handle::tests::a_handle_from_another_instance_is_caught_as_foreign` (which pins the
+/// ids); this end-to-end test drives it through the real C ABI.
+#[cfg(debug_assertions)]
+#[test]
+fn a_handle_from_another_instance_is_a_contract_error() {
+    let a = load("let a = 1\n");
+    let b = load("let b = 1\n");
+    // Neither instance has been driven, so each `make_int` is its table's first host handle:
+    // `ha` and `hb` collide in index+generation (slot 0, generation 1) and differ only in the
+    // debug instance-id. This is the exact look-alike a value-keyed minted-set could not catch.
+    let mut ha = 0u64;
+    assert_eq!(unsafe { doodle_make_int(a, 10, &mut ha) }, DoodleStatus::Ok);
+    let mut hb = 0u64;
+    assert_eq!(unsafe { doodle_make_int(b, 20, &mut hb) }, DoodleStatus::Ok);
+
+    // `b` reads its own handle fine.
+    let mut n = 0i64;
+    assert_eq!(unsafe { doodle_as_int(b, hb, &mut n) }, DoodleStatus::Ok);
+    assert_eq!(n, 20);
+
+    // `a`'s look-alike handle on `b` is a cross-instance contract violation, not a stale handle,
+    // and `b`'s own value is untouched.
+    assert_eq!(
+        unsafe { doodle_as_int(b, ha, &mut n) },
+        DoodleStatus::ErrContract
+    );
+    assert_eq!(n, 20, "the rejected read must not overwrite the out-param");
+    assert_eq!(
+        unsafe { doodle_release(b, ha) },
+        DoodleStatus::ErrContract,
+        "releasing a foreign handle is a contract error, not a stale-handle no-op"
+    );
+
+    // `a` still owns its handle after `b` rejected it.
+    assert_eq!(unsafe { doodle_as_int(a, ha, &mut n) }, DoodleStatus::Ok);
+    assert_eq!(n, 10);
+
+    unsafe { doodle_free(a) };
+    unsafe { doodle_free(b) };
+}
+
 #[test]
 fn string_round_trips_by_copy_out_and_reports_needed_length() {
     let inst = load("1\n");
