@@ -583,6 +583,15 @@ enum DoodleBuiltin
    * `clear_canvas()` — a suspending turtle capability.
    */
   DoodleBuiltin_ClearCanvas = 10,
+  /**
+   * `time() -> number` — a suspending clock capability (E§5.3/S-19: a clock read crosses the
+   * recordable boundary, never a synchronous foreign function).
+   */
+  DoodleBuiltin_Time = 11,
+  /**
+   * `random() -> number` — a suspending entropy capability (E§5.3/S-19).
+   */
+  DoodleBuiltin_Random = 12,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L

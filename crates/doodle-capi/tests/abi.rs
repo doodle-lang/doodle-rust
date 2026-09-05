@@ -423,6 +423,39 @@ fn a_resolved_fn_capability_value_flows_into_the_program() {
 }
 
 #[test]
+fn time_and_random_builtins_register_and_suspend() {
+    // The M7.5e additive builtins `time`/`random` are suspending capabilities (S-19), registerable
+    // by identity like `read_line`. Registration order is replay identity (§11): print=0, time=1,
+    // random=2, so `time()` suspends as capability id 1 and its resolved value flows into `print`.
+    let inst = load_with(
+        "print(time())\n",
+        &[
+            DoodleBuiltin::Print,
+            DoodleBuiltin::Time,
+            DoodleBuiltin::Random,
+        ],
+    );
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Suspended);
+    assert_eq!(out.capability, 1, "time is the second registered builtin");
+    assert_eq!(out.request_count, 0, "time takes no arguments");
+    let mut h = 0u64;
+    assert_eq!(
+        unsafe { doodle_make_int(inst, 42, &mut h) },
+        DoodleStatus::Ok
+    );
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, h, &mut done) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Completed);
+    unsafe { doodle_release(inst, h) };
+    assert_eq!(read_output(inst), b"42\n");
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
 fn resolving_a_non_suspended_instance_is_a_contract_error() {
     let inst = load_with("print(1)\n", &[DoodleBuiltin::Print]);
     // Nothing has suspended yet.

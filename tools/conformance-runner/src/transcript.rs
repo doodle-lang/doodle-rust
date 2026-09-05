@@ -168,8 +168,10 @@ impl StackElem {
     }
 }
 
-/// Renders a scripted resolution (`res:`): a value literal, or `raise "<msg>"`.
-fn render_response(response: &ScriptResponse) -> String {
+/// Renders a scripted resolution (`res:`): a value literal, or `raise "<msg>"`. Shared with the
+/// C-host orchestrator (`c_host`), which passes it to the C host as the scripted response, so the
+/// echoed `res:` line matches this canonical rendering byte-for-byte.
+pub(crate) fn render_response(response: &ScriptResponse) -> String {
     match response {
         ScriptResponse::Value(value) => render_value(value),
         ScriptResponse::Raise(message) => format!("raise {}", quote_string(message)),

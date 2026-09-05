@@ -12,7 +12,7 @@ use crate::guard::catch;
 use doodle_core::machine::{
     Intrinsic, Registry, clear_canvas_intrinsic, cos_intrinsic, decode_intrinsic,
     draw_line_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic, print_intrinsic,
-    read_line_intrinsic, set_turtle_intrinsic, sin_intrinsic,
+    random_intrinsic, read_line_intrinsic, set_turtle_intrinsic, sin_intrinsic, time_intrinsic,
 };
 
 /// An engine-provided built-in intrinsic a host can register by identity (E§5.5), without
@@ -43,6 +43,11 @@ pub enum DoodleBuiltin {
     SetTurtle = 9,
     /// `clear_canvas()` — a suspending turtle capability.
     ClearCanvas = 10,
+    /// `time() -> number` — a suspending clock capability (E§5.3/S-19: a clock read crosses the
+    /// recordable boundary, never a synchronous foreign function).
+    Time = 11,
+    /// `random() -> number` — a suspending entropy capability (E§5.3/S-19).
+    Random = 12,
 }
 
 /// A host-extension registry under construction (E§5.5). Built with `doodle_registry_new`,
@@ -154,5 +159,7 @@ fn intrinsic_for(builtin: DoodleBuiltin) -> Intrinsic {
         DoodleBuiltin::DrawLine => draw_line_intrinsic(),
         DoodleBuiltin::SetTurtle => set_turtle_intrinsic(),
         DoodleBuiltin::ClearCanvas => clear_canvas_intrinsic(),
+        DoodleBuiltin::Time => time_intrinsic(),
+        DoodleBuiltin::Random => random_intrinsic(),
     }
 }

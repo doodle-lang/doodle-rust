@@ -17,6 +17,7 @@
 //! `expect-raise` (the uncaught exception) and `expect-out` (the captured output). A run test above
 //! the implemented stage still SKIPs.
 
+mod c_host;
 mod capability;
 mod directive;
 mod drive;
@@ -130,6 +131,58 @@ pub fn run(root: &Path) -> Result<usize, String> {
     }
     println!();
     println!("=== {passed} passed, {failed} failed, {skipped} skipped ===");
+    Ok(failed)
+}
+
+/// Runs every `mode: run` fixture under `root` through the example **C host** (M7.5e) and compares
+/// its finalized transcript to the canonical sidecar — the third surface, transitively identical to
+/// native/wasm through the shared oracle. Drive fixtures are the M7.5e-2 extension (skipped here).
+/// Returns the failed-fixture count (0 = green), or a runner-level `Err`.
+pub fn run_c_host(root: &Path, c_host: &Path) -> Result<usize, String> {
+    let fixtures = discover(root)?;
+    let (mut passed, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    for fixture in &fixtures {
+        let rel = rel_path(root, &fixture.logical);
+        let source = std::fs::read_to_string(&fixture.entry)
+            .map_err(|e| format!("reading {}: {e}", fixture.entry.display()))?;
+        let Ok(test) = directive::parse_test(&rel, &source) else {
+            continue; // malformed fixtures are `run`'s report, not the C surface's
+        };
+        // The C host handles `mode: run` only (drive is M7.5e-2); everything else SKIPs visibly.
+        if test.mode != Mode::Run || !stage_ready(&test) {
+            skipped += 1;
+            continue;
+        }
+        let sidecar = sidecar_path(&fixture.entry);
+        let canonical = match std::fs::read_to_string(&sidecar) {
+            Ok(text) => text,
+            Err(e) => {
+                println!("FAIL  {rel}: missing transcript sidecar ({e})");
+                failed += 1;
+                continue;
+            }
+        };
+        match c_host::transcript_through_c(
+            c_host,
+            &test,
+            &fixture.entry,
+            fixture.modules_dir.as_deref(),
+        ) {
+            Ok(produced) if produced == canonical => {
+                println!("PASS  {rel} (through C)");
+                passed += 1;
+            }
+            Ok(_) => {
+                println!("FAIL  {rel}: C-host transcript differs from the canonical oracle");
+                failed += 1;
+            }
+            Err(reason) => {
+                println!("FAIL  {rel}: {reason}");
+                failed += 1;
+            }
+        }
+    }
+    println!("\n=== {passed} passed, {failed} failed, {skipped} skipped (through the C host) ===");
     Ok(failed)
 }
 
