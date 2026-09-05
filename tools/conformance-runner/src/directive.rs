@@ -26,6 +26,8 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
     let mut expectations: Vec<Expectation> = Vec::new();
     // Scripted capability responses (`#! input:`, run mode), in header order.
     let mut inputs: Vec<ScriptInput> = Vec::new();
+    // Manifest primitives the fixture selects (`#! requires:`), in header order.
+    let mut requires: Vec<String> = Vec::new();
     // Drive-script directives (`mode: drive`), retained raw and in order, then parsed into a
     // `DriveScript` below (crate::drivescript) once the whole header is read.
     let mut drive_raw: Vec<(String, String)> = Vec::new();
@@ -58,6 +60,8 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
                 "expect-out" => expectations.push(Expectation::Out {
                     text: value.to_string(),
                 }),
+                "expect-fault" => expectations.push(parse_fault(value)?),
+                "requires" => parse_requires(value, &mut requires)?,
                 "input" => inputs.push(parse_input(value)?),
                 // Drive-script directives — retained raw, parsed as a unit below.
                 "break" | "raise-trap" | "obs" | "do" | "resolve" | "resolve-raise" | "expect"
@@ -116,8 +120,38 @@ pub(crate) fn parse_test(rel_path: &str, source: &str) -> Result<Test, String> {
         required,
         expectations,
         inputs,
+        requires,
         drive,
     })
+}
+
+/// Parses `#! expect-fault: <kind>` into a [`Expectation::Fault`]. The kind is the drive-script
+/// fault vocabulary (`nested-suspend`, `step-budget`, …); an empty kind is a fixture error.
+fn parse_fault(value: &str) -> Result<Expectation, String> {
+    let kind = value.trim();
+    if kind.is_empty() {
+        return Err("`#! expect-fault:` has no fault kind".to_string());
+    }
+    Ok(Expectation::Fault {
+        kind: kind.to_string(),
+    })
+}
+
+/// Parses a `#! requires:` line into `requires`: one or more manifest-primitive names, separated by
+/// commas and/or whitespace (repeatable across lines). Existence in the manifest is checked at
+/// execution (`matcher`), so a typo'd requirement fails loudly rather than binding nothing.
+fn parse_requires(value: &str, requires: &mut Vec<String>) -> Result<(), String> {
+    let names: Vec<&str> = value
+        .split([',', ' ', '\t'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        return Err("`#! requires:` names no manifest primitive".to_string());
+    }
+    for name in names {
+        requires.push(name.to_string());
+    }
+    Ok(())
 }
 
 /// Parses `#! input: <capability> -> <response>` (run mode): the capability name, then either a
@@ -392,5 +426,35 @@ mod tests {
     fn a_do_without_an_expect_is_an_error() {
         let src = "#! clause: E8\n#! mode: drive\n#! do: step\n#! do: step\nx\n";
         assert!(parse_test("f.doodle", src).is_err());
+    }
+
+    #[test]
+    fn parses_requires_and_expect_fault() {
+        let src = "#! clause: E5.4\n#! mode: run\n#! requires: each, read_line\n\
+                   #! expect-fault: nested-suspend\neach([1]) do (x)\n  read_line()\nend\n";
+        let t = parse_test("v0.1/eng/E5.4/x.doodle", src).unwrap();
+        assert_eq!(t.requires, ["each", "read_line"]);
+        assert!(
+            matches!(&t.expectations[0], Expectation::Fault { kind } if kind == "nested-suspend")
+        );
+    }
+
+    #[test]
+    fn requires_may_repeat_across_lines() {
+        let src = "#! clause: E5.1\n#! mode: run\n#! requires: test_greet\n#! requires: print\nx\n";
+        let t = parse_test("f.doodle", src).unwrap();
+        assert_eq!(t.requires, ["test_greet", "print"]);
+    }
+
+    #[test]
+    fn empty_requires_and_empty_fault_are_rejected() {
+        assert!(parse_test("f.doodle", "#! clause: E5\n#! requires:\nx\n").is_err());
+        assert!(
+            parse_test(
+                "f.doodle",
+                "#! clause: E5\n#! mode: run\n#! expect-fault:\nx\n"
+            )
+            .is_err()
+        );
     }
 }

@@ -1,0 +1,9 @@
+#! clause: E5.3
+#! mode: run
+#! requires: read_line
+#! expect-out: hello
+#! input: read_line -> "hello"
+# A suspending capability (E§5.3): `read_line` suspends the run, the host resolves it from the
+# scripted `input:` queue across the recordable boundary (E§7.5/§11, S-19), and the value flows
+# back as the call's result.
+print(read_line())

@@ -1,0 +1,12 @@
+#! clause: E5.4
+#! mode: run
+#! requires: each, read_line
+#! expect-fault: nested-suspend
+# R4 / forbid-and-fault (D-M7-1, S-15): a suspending capability reached inside a FOREIGN
+# block-consumer's reentrant drive is a terminal `NestedSuspend` fault. `each` drives its block on
+# the host stack, so the block's `read_line()` cannot suspend-and-resume through it — the engine
+# faults deterministically rather than freezing native progress. The idiom is inversion, not
+# suspend-the-outer-drive (see the parity control `reentry-002`). No `input:` — it never resolves.
+each([1]) do (x)
+  print(read_line())
+end

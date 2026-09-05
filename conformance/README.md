@@ -115,13 +115,30 @@ The expected **transcript** is the ordered list of:
 ```
 #! expect-out: <text>                          (one print line)
 #! expect-raise: <substring> @ <line>:<col>    (uncaught error terminating the test)
+#! expect-fault: <kind>                        (a non-resumable engine fault terminating the test)
 #! input: <capability> -> <response>           (scripted answer to the next request for it)
+#! requires: <name>[, <name>…]                 (manifest primitives the fixture selects)
 ```
 
 Each `input:` `<response>` is a `<value>` (a string `"…"`, integer, float,
 `true`/`false`, or `nil`) or `raise "<msg>"`; entries for one capability form an
 in-order FIFO drawn from as it suspends. An unscripted capability request is a
 fixture error (never a silent pass).
+
+`expect-fault:` asserts a non-resumable **engine fault** (E§10) as the run's
+terminal outcome — the S-15 `nested-suspend` (a capability inside a foreign
+block-consumer, D-M7-1), a limit (`step-budget`, `heap`, …), etc. A fault is not
+a Doodle-catchable raise, so it needs its own expectation; the `<kind>` spelling
+is the drive-script fault vocabulary. Output is matched independently, so a
+fixture may print and then fault.
+
+`requires:` names the **manifest primitives** (below) the fixture calls — a test
+capability (`read_line`) or the test foreign fn (`test_greet`). It is loud both
+ways: a name not in this harness's manifest fails the fixture at start (not
+mid-run with a confusing name-not-defined), and a typo'd requirement is a fixture
+error. It is a **selection**, not a definition — the primitive's shape lives in
+the manifest, identically on every surface. Comma- and/or whitespace-separated;
+repeatable across lines.
 
 A `run` test passes iff the produced transcript matches the expectations
 exactly (count, order, content) and the program terminates (a runner step
@@ -194,16 +211,28 @@ so the three surfaces MUST register this list in this order:
 ```
 0 print       6 time
 1 length      7 random
-2 each        (drawing/trig capabilities append here at M7.5d,
-3 encode       preserving indices 0–7)
-4 decode
+2 each        8 test_greet
+3 encode      (drawing/trig capabilities append here at M7.5d,
+4 decode       preserving indices 0–8)
 5 read_line
 ```
 
 `print`/`length`/`each`/`encode`/`decode` are synchronous natives; `read_line`/`time`/
 `random` are suspending capabilities a fixture scripts. Divergence in this order across
 surfaces is a determinism leak (E§11) and a release blocker; the cross-surface trace
-schema (M7.5d) is what catches it.
+schema (M7.5d) is what catches it. The manifest is **append-only ordered** — new test
+primitives append, never reorder, so existing transcripts (and capability ids, which
+are replay identity) stay valid.
+
+`test_greet(name, punct = "!", do body)` is the S-42 conformance foreign function
+(E§5.1): a host `fn` with an **immutable default** parameter and a **trailing block**
+parameter, both binding per L§8.3. It invokes the block once with `name`, then returns
+`name + punct`. Its default is immutable **by construction** (built from `ConstValue`,
+which has no list/dict/record variant) — the D-M7-8 mutable-default rejection, enforced
+identically on native (`ConstValue`) and C (typed `set_default_*`, no handle variant), so
+there is no runtime rejection to test; a fixture exercises it three ways (default omitted,
+`punct:` keyword, a block that makes a non-local exit). A fixture selects it with
+`#! requires: test_greet`.
 
 ## Rules
 

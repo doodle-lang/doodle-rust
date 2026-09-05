@@ -1,0 +1,11 @@
+#! clause: E5.1
+#! mode: run
+#! requires: test_greet
+#! expect-out: deco World
+#! expect-out: World?
+# The same foreign function, its default parameter supplied BY KEYWORD (`punct: "?"`, L§8.3): the
+# keyword argument overrides the default, so the result ends "?" rather than the default "!".
+let g = test_greet("World", punct: "?") do (n)
+  print("deco {n}")
+end
+print(g)

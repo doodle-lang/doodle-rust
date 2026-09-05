@@ -1,0 +1,8 @@
+#! clause: E5.3
+#! mode: run
+#! requires: random
+#! expect-out: 7
+#! input: random -> 7
+# `random` is a suspending capability for the same reason as `time` (S-19): entropy enters only as a
+# recorded resolution, so a run replays bit-for-bit. The host scripts the draw.
+print(random())

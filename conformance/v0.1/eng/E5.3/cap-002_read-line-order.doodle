@@ -1,0 +1,11 @@
+#! clause: E5.3
+#! mode: run
+#! requires: read_line
+#! expect-out: a
+#! expect-out: b
+#! input: read_line -> "a"
+#! input: read_line -> "b"
+# Two requests for one capability draw its scripted answers front-to-back (an in-order FIFO):
+# the resolution sequence is part of replay identity (E§11), so its order is asserted.
+print(read_line())
+print(read_line())

@@ -311,8 +311,9 @@ fn reason_name(reason: PauseReason) -> &'static str {
     }
 }
 
-/// The transcript name of an engine fault (E§7.2/§10).
-fn fault_kind(fault: EngineFault) -> String {
+/// The transcript name of an engine fault (E§7.2/§10). Shared with `run` mode's `expect-fault`
+/// (`matcher`), so a fault reads identically whether a drive script or a `run` fixture asserts it.
+pub(crate) fn fault_kind(fault: EngineFault) -> String {
     match fault {
         EngineFault::LimitExceeded(kind) => match kind {
             LimitKind::StepBudget => "step-budget",

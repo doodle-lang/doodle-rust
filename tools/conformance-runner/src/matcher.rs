@@ -8,7 +8,8 @@
 //! intrinsic is registered before load, S-43/M2b.2). A run expectation at a static
 //! stage (or vice versa) is a mis-authored test and fails loudly.
 
-use crate::capability::{capability_name, registry};
+use crate::capability::{capability_name, is_registered, registry};
+use crate::drive::fault_kind;
 use crate::model::{Expectation, Mode, ScriptInput, ScriptResponse, ScriptValue, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{
@@ -32,6 +33,21 @@ pub(crate) fn execute(
     source: &str,
     modules_dir: Option<&Path>,
 ) -> Result<(), Vec<String>> {
+    // A `#! requires:` names a manifest primitive the fixture calls (D-M7-21 rider): every one must
+    // be registered, or this harness cannot run the fixture — fail at fixture start (loud), not
+    // mid-run with a confusing name-not-defined. (Natively the manifest is fixed, so this catches a
+    // typo'd requirement; portably it catches a harness whose manifest lags the corpus.)
+    let missing: Vec<&String> = test
+        .requires
+        .iter()
+        .filter(|name| !is_registered(name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(missing
+            .iter()
+            .map(|name| format!("`#! requires: {name}` names no registered manifest primitive"))
+            .collect());
+    }
     match test.required {
         Stage::Lex | Stage::Parse | Stage::Full => run_static(test, source, test.required),
         // Both `run` and `drive` need the full machine; the mode picks the executor.
@@ -253,6 +269,29 @@ fn match_run_outcome(
         })
         .collect();
 
+    // A fault (E§10) is a distinct terminal outcome from a Doodle raise: when the fixture declares
+    // `expect-fault`, the run must fault with that kind (`nested-suspend`, a limit, …) and nothing
+    // else. Output is matched separately, so a fixture may print then fault.
+    if let Some(kind) = test.expectations.iter().find_map(|e| match e {
+        Expectation::Fault { kind } => Some(kind),
+        _ => None,
+    }) {
+        return match outcome {
+            Outcome::Faulted(fault) => {
+                let actual = fault_kind(*fault);
+                if &actual == kind {
+                    Ok(())
+                } else {
+                    Err(vec![format!("expected fault {kind}, got fault {actual}")])
+                }
+            }
+            other => Err(vec![format!(
+                "expected fault {kind}, but {}",
+                describe_outcome(other)
+            )]),
+        };
+    }
+
     match outcome {
         Outcome::Raised(value, trace) => {
             // The raised value is a Doodle value (an `Error` record, or any `raise`d
@@ -305,6 +344,18 @@ fn match_run_outcome(
     }
 }
 
+/// A short description of an actual outcome, for a FAIL report when a fixture expected a fault.
+fn describe_outcome(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Completed(_) => "the program completed".to_string(),
+        Outcome::Raised(..) => "the program raised".to_string(),
+        Outcome::Faulted(f) => format!("faulted {}", fault_kind(*f)),
+        Outcome::Suspended(_) => "the program suspended (capability)".to_string(),
+        Outcome::SuspendedImport(_) => "the program suspended (import)".to_string(),
+        Outcome::Paused(_) => "the program paused".to_string(),
+    }
+}
+
 /// Renders an actual raise (message + position) for a FAIL report.
 fn describe_raise(message: &str, pos: Option<Position>) -> String {
     match pos {
@@ -344,6 +395,9 @@ fn run_static(test: &Test, source: &str, stage: Stage) -> Result<(), Vec<String>
             Expectation::Raise { substring, pos } => reasons.push(format!(
                 "`expect-raise: {substring} @ {}:{}` is not valid at `stage: {label}`",
                 pos.line, pos.column
+            )),
+            Expectation::Fault { kind } => reasons.push(format!(
+                "`expect-fault: {kind}` is not valid at `stage: {label}`"
             )),
             Expectation::StaticError { .. } | Expectation::Warning { .. } => {}
         }
@@ -480,6 +534,51 @@ mod tests {
     }
 
     #[test]
+    fn a_run_fixture_matches_a_nested_suspend_fault() {
+        // A capability inside a foreign block-consumer (`each`) faults `nested-suspend` (S-15);
+        // `expect-fault` asserts the fault kind as a terminal run outcome. No `input:` — it never
+        // resolves.
+        let src = "#! clause: E5.4\n#! mode: run\n#! requires: each, read_line\n\
+                   #! expect-fault: nested-suspend\neach([1]) do (x)\n  read_line()\nend\n";
+        assert_eq!(
+            run_fixture(src),
+            Ok(()),
+            "each+capability faults nested-suspend"
+        );
+    }
+
+    #[test]
+    fn a_wrong_expected_fault_kind_fails() {
+        let src = "#! clause: E5.4\n#! mode: run\n#! requires: each, read_line\n\
+                   #! expect-fault: step-budget\neach([1]) do (x)\n  read_line()\nend\n";
+        assert!(run_fixture(src).is_err(), "wrong fault kind must fail");
+    }
+
+    #[test]
+    fn a_completing_program_with_expect_fault_fails() {
+        // `expect-fault` on a program that completes is a mismatch (a fault is a distinct terminal).
+        let src = "#! clause: E5\n#! mode: run\n#! expect-fault: nested-suspend\nlet x = 1\n";
+        assert!(
+            run_fixture(src).is_err(),
+            "completion must fail an expect-fault"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_requirement_fails_at_fixture_start() {
+        // A `requires:` naming a primitive not in the manifest is a fixture error (loud), not a
+        // mysterious name-not-defined mid-run.
+        let src = "#! clause: E5\n#! mode: run\n#! requires: no_such_primitive\nlet x = 1\n";
+        assert!(
+            run_fixture(src)
+                .unwrap_err()
+                .iter()
+                .any(|r| r.contains("no registered manifest primitive")),
+            "an unknown requirement fails loudly",
+        );
+    }
+
+    #[test]
     fn a_drive_fixture_can_raise_from_a_capability() {
         // `resolve-raise:` raises at the capability's call site (E§7.5). Program on line 7.
         let src = "#! clause: X1.1\n#! mode: drive\n#! do: run\n\
@@ -496,6 +595,7 @@ mod tests {
             required: Stage::Lex,
             expectations,
             inputs: Vec::new(),
+            requires: Vec::new(),
             drive: None,
         }
     }
@@ -583,6 +683,7 @@ mod tests {
             required: Stage::Parse,
             expectations,
             inputs: Vec::new(),
+            requires: Vec::new(),
             drive: None,
         }
     }
@@ -620,6 +721,7 @@ mod tests {
             required: Stage::Full,
             expectations,
             inputs: Vec::new(),
+            requires: Vec::new(),
             drive: None,
         }
     }

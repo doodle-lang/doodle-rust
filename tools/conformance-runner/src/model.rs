@@ -30,6 +30,11 @@ pub(crate) enum Expectation {
     Out { text: String },
     /// `expect-raise: <substring> @ <pos>` — an uncaught error (run mode).
     Raise { substring: String, pos: Position },
+    /// `expect-fault: <kind>` — a non-resumable engine fault terminating the run (run mode). A
+    /// fault (E§10) is not a Doodle-catchable raise, so it needs its own expectation: the S-15
+    /// `nested-suspend` (a capability inside a foreign block-consumer, D-M7-1), a limit, etc. The
+    /// `<kind>` spelling is the drive-script fault vocabulary (`nested-suspend`, `step-budget`, …).
+    Fault { kind: String },
 }
 
 /// A scripted primitive value used to resolve a suspending capability (D-M7-21): the literal a
@@ -83,6 +88,13 @@ pub(crate) struct Test {
     pub(crate) required: Stage,
     /// The declared `#! expect-…` directives, in file order (`run`/`static` modes).
     pub(crate) expectations: Vec<Expectation>,
+    /// The conformance manifest primitives this fixture selects (`#! requires:`, D-M7-21 rider):
+    /// names from the fixed portable manifest (M7.5b) — a test capability (`read_line`) or test
+    /// foreign fn (`test_greet`) the fixture calls. The declaration is loud both ways: a name not
+    /// in the manifest is a fixture error, and a harness whose manifest lacks a required name fails
+    /// at fixture start rather than mid-run. Shapes live in the manifest, not here (the "registration
+    /// declaration" is a *selection*, not a definition).
+    pub(crate) requires: Vec<String>,
     /// The scripted capability responses (`#! input:`, `run` mode): per capability, an in-order
     /// FIFO the runner draws from when that capability suspends (D-M7-21).
     pub(crate) inputs: Vec<ScriptInput>,

@@ -1,0 +1,8 @@
+#! clause: E5.3
+#! mode: run
+#! requires: read_line
+#! expect-raise: eof @ 8:1
+#! input: read_line -> raise "eof"
+# A capability resolution may RAISE at the call site instead of yielding a value (E§7.5): the host
+# answers `read_line` with `raise "eof"`, so the call raises `eof`, uncaught, terminating the run.
+read_line()

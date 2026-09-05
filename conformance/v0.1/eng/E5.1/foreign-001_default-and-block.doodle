@@ -1,0 +1,13 @@
+#! clause: E5.1
+#! mode: run
+#! requires: test_greet
+#! expect-out: deco World
+#! expect-out: World!
+# A host foreign function with an immutable DEFAULT parameter and a trailing BLOCK parameter
+# (S-42/E§5.1), both binding per L§8.3: `test_greet(name, punct = "!", do body)` invokes the block
+# once with `name` (here it prints), then returns `name + punct`. With `punct` omitted the default
+# "!" binds — the same L§8.3 rule Doodle callables use, now for host-registered code.
+let g = test_greet("World") do (n)
+  print("deco {n}")
+end
+print(g)

@@ -1,0 +1,9 @@
+#! clause: E5.3
+#! mode: run
+#! requires: time
+#! expect-out: 100
+#! input: time -> 100
+# `time` is a suspending capability, NOT a synchronous foreign function (S-19/D-M7-4): a clock read
+# must cross the recordable boundary, or each surface would compute it off-record and replay +
+# cross-surface identity break. The host's scripted resolution is the reading.
+print(time())

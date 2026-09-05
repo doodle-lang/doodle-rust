@@ -10,9 +10,12 @@
 //! too. Any divergence is a determinism leak (E§11); the M7.5d trace schema catches it.
 
 use doodle_core::machine::{
-    Intrinsic, Registry, decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic,
-    print_intrinsic, random_intrinsic, read_line_intrinsic, time_intrinsic,
+    BlockOutcome, ConstValue, ForeignBuilder, HostReply, Intrinsic, IntrinsicCtx, Registry,
+    decode_intrinsic, each_intrinsic, encode_intrinsic, length_intrinsic, print_intrinsic,
+    random_intrinsic, read_line_intrinsic, time_intrinsic,
 };
+use doodle_core::resolve::BodyKind;
+use std::sync::Arc;
 
 /// The registry manifest, in registration order: `(name, constructor, is_suspending_capability)`.
 /// The index is the `CapabilityId` for the suspending entries. `print`/`length`/`each`/`encode`/
@@ -29,7 +32,61 @@ const MANIFEST: &[(&str, fn() -> Intrinsic, bool)] = &[
     ("read_line", read_line_intrinsic, true),
     ("time", time_intrinsic, true),
     ("random", random_intrinsic, true),
+    ("test_greet", test_greet, false),
 ];
+
+/// The S-42 conformance foreign function `test_greet(name, punct = "!", do body)` (E§5.1): a host
+/// `fn` with an **immutable default** parameter and a **trailing block** parameter, both binding per
+/// L§8.3. It invokes the block once with `name` (a side effect the block owns — e.g. it prints),
+/// then returns `name + punct` (the default `"!"`, or a keyword-bound punctuation). A fixture calls
+/// it three ways — default omitted, `punct:` keyword, and a block that makes a non-local exit — and
+/// the transcript certifies identical L§8.3 binding across native/wasm/C (M7.5d). The C example host
+/// (M7.5e) registers the same shape; the D-M7-8 mutable-default rejection is a per-surface host-API
+/// unit test, not a fixture (a `List`/`Dict` default is unrepresentable in `ConstValue`).
+fn test_greet() -> Intrinsic {
+    ForeignBuilder::new("test_greet", BodyKind::Func)
+        .param("name")
+        .default_param("punct", ConstValue::Str("!".into()))
+        .block_param("body")
+        .host(Arc::new(|ctx: &mut IntrinsicCtx| {
+            let (Some(name), Some(punct)) = (ctx.arg_handle(0), ctx.arg_handle(1)) else {
+                ctx.fault_host();
+                return HostReply::Value(None);
+            };
+            // Read both string args to owned bytes before the reentrant drive / construction.
+            let (Ok(name_bytes), Ok(punct_bytes)) = (
+                ctx.string_bytes(name).map(<[u8]>::to_vec),
+                ctx.string_bytes(punct).map(<[u8]>::to_vec),
+            ) else {
+                ctx.fault_host();
+                return HostReply::Value(None);
+            };
+            // Invoke the trailing block once with `name`. A break/return/raise crossing the boundary
+            // means "return promptly, no result" (E§7.6): reply `Value(None)` so the apply site
+            // resumes the parked exit.
+            let outcome = ctx.invoke_block_handles(&[name]);
+            ctx.release(name).ok();
+            ctx.release(punct).ok();
+            if outcome != BlockOutcome::Completed {
+                return HostReply::Value(None);
+            }
+            let mut result = name_bytes;
+            result.extend_from_slice(&punct_bytes);
+            match ctx.make_string(&result) {
+                Ok(handle) => HostReply::Value(Some(handle)),
+                Err(_) => {
+                    ctx.fault_host();
+                    HostReply::Value(None)
+                }
+            }
+        }))
+}
+
+/// Whether `name` is a registered manifest primitive — the `#! requires:` existence check
+/// (`matcher`). Loud both ways: a fixture requiring an unregistered name is a fixture error.
+pub(crate) fn is_registered(name: &str) -> bool {
+    MANIFEST.iter().any(|(n, _, _)| *n == name)
+}
 
 /// Builds the conformance registry: every manifest entry registered in order (E§5.5).
 pub(crate) fn registry() -> Registry {
@@ -89,5 +146,24 @@ mod tests {
         }
         assert_eq!(capability_id("print"), None, "print is synchronous");
         assert_eq!(capability_id("nope"), None, "unknown name");
+    }
+
+    #[test]
+    fn test_greet_is_a_registered_non_capability_primitive() {
+        // The S-42 foreign fn is in the manifest (so a `#! requires: test_greet` fixture runs) but is
+        // synchronous, not a suspending capability — it never gets a capability id.
+        assert!(is_registered("test_greet"), "test_greet is in the manifest");
+        assert_eq!(
+            capability_id("test_greet"),
+            None,
+            "test_greet is synchronous"
+        );
+        // The manifest builds cleanly with `test_greet` appended (its default is an immutable
+        // `ConstValue::Str`, D-M7-8 immutable-by-construction — no mutable-default variant exists).
+        let _ = registry();
+        assert!(
+            !is_registered("no_such_primitive"),
+            "unknown name is unregistered"
+        );
     }
 }

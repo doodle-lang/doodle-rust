@@ -1,0 +1,15 @@
+#! clause: E5.4
+#! mode: run
+#! requires: read_line
+#! expect-out: hi
+#! input: read_line -> "hi"
+# The parity control for `reentry-001` (D-M7-1): the SAME shape — a consumer invoking a block whose
+# body suspends — but the consumer is written in DOODLE. Doodle owns the loop, so the block's
+# `read_line()` suspends the ordinary way and the host resolves it; no fault. This is the normative
+# idiom for suspension inside iteration (E§5.4): expose the capability, let Doodle drive.
+to consume(x, do body)
+  body(x)
+end
+consume(1) do (n)
+  print(read_line())
+end

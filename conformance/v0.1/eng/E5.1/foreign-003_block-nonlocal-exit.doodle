@@ -1,0 +1,16 @@
+#! clause: E5.1
+#! mode: run
+#! requires: test_greet
+#! expect-out: before
+# A block passed to a foreign function may make a NON-LOCAL EXIT across the host boundary (S-46,
+# E§7.6): the block `return`s, targeting the enclosing `demo`. The foreign callback returns promptly
+# with no result, and the parked `return` unwinds past the `test_greet` call — so `after` is never
+# printed and `demo` ends. The host cannot swallow the exit.
+to demo()
+  print("before")
+  let g = test_greet("World") do (n)
+    return
+  end
+  print("after {g}")
+end
+demo()
