@@ -80,7 +80,20 @@ struct Input {
 static struct Input g_inputs[MAX_INPUTS];
 static int g_input_count = 0;
 
-/* Parses the stdin job: a `mode run` line, then `input <cap> <response>` lines. */
+/* The drive-mode job (M7.5e-2): debug setup applied once, then the ordered driving actions whose
+ * `step:`/`stop:` transcript this host emits. */
+#define MAX_BREAKS 16
+#define MAX_ACTIONS 64
+static int g_drive = 0; /* 0 = run, 1 = drive */
+static uint32_t g_break_lines[MAX_BREAKS];
+static int g_break_count = 0;
+static int g_raise_trap = 0;
+static int g_subexpr = 0;
+static char *g_actions[MAX_ACTIONS]; /* each is a `step:` label: `continue`, `into`, `resolve "x"`… */
+static int g_action_count = 0;
+
+/* Parses the stdin job: a `mode` line, then either run-mode `input <cap> <response>` lines or
+ * drive-mode `break`/`raise-trap`/`obs` setup + `do <action>` lines. */
 static void read_job(void) {
     size_t len = 0;
     char *job = (char *)slurp(stdin, &len);
@@ -88,7 +101,8 @@ static void read_job(void) {
     int seen_mode = 0;
     while (line) {
         if (strncmp(line, "mode ", 5) == 0) {
-            if (strcmp(line + 5, "run") != 0) die("only `mode run` is supported by this host");
+            if (strcmp(line + 5, "drive") == 0) g_drive = 1;
+            else if (strcmp(line + 5, "run") != 0) die("unknown mode");
             seen_mode = 1;
         } else if (strncmp(line, "input ", 6) == 0) {
             if (g_input_count >= MAX_INPUTS) die("too many inputs");
@@ -100,10 +114,20 @@ static void read_job(void) {
             snprintf(in->cap, sizeof in->cap, "%s", rest);
             in->response = strdup(sp + 1);
             in->used = 0;
+        } else if (strncmp(line, "break ", 6) == 0) {
+            /* `break <canonical> <line>` — this host's fixtures all break in the entry module. */
+            char *sp = strrchr(line, ' ');
+            if (g_break_count < MAX_BREAKS) g_break_lines[g_break_count++] = (uint32_t)atoi(sp + 1);
+        } else if (strcmp(line, "raise-trap on") == 0) {
+            g_raise_trap = 1;
+        } else if (strcmp(line, "obs subexpr") == 0) {
+            g_subexpr = 1;
+        } else if (strncmp(line, "do ", 3) == 0) {
+            if (g_action_count < MAX_ACTIONS) g_actions[g_action_count++] = strdup(line + 3);
         }
         line = strtok(NULL, "\n");
     }
-    if (!seen_mode) die("job did not declare `mode run`");
+    if (!seen_mode) die("job did not declare a `mode`");
     /* `job` is intentionally leaked: the process is one-shot. */
 }
 
@@ -295,19 +319,109 @@ static void resolve_import(DoodleInstance *inst, const char *modules_dir, uint32
     doodle_resolve_import_not_found(inst, oc);
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) die("usage: conformance <fixture.doodle> [<modules_dir>]");
-    const char *modules_dir = argc >= 3 ? argv[2] : "";
-    size_t src_len = 0;
-    uint8_t *source = slurp_path(argv[1], &src_len);
-    read_job();
+/* --- drive mode (M7.5e-2): the E§8 debug surface, driven per the fixture's script --- */
 
-    DoodleRegistry *reg = build_registry();
-    DoodleInstance *inst = NULL;
-    DoodleStatus status =
-        doodle_load_with_registry(source, src_len, NULL, reg, &inst, NULL, 0, NULL);
-    if (status != DoodleStatus_Ok || !inst) die("load failed (a run fixture must load clean)");
+static const char *reason_name(DoodlePauseReason r) {
+    switch (r) {
+        case DoodlePauseReason_Step: return "step";
+        case DoodlePauseReason_Breakpoint: return "breakpoint";
+        case DoodlePauseReason_RaiseTrap: return "raise-trap";
+        case DoodlePauseReason_HostPause: return "host-pause";
+        default: return "slice-end";
+    }
+}
 
+/* Applies the drive setup once (breakpoints in the entry module, raise-trap, observation mode). */
+static void drive_setup(DoodleInstance *inst) {
+    for (int i = 0; i < g_break_count; i++) {
+        uint32_t id = 0;
+        doodle_set_breakpoint(inst, (const uint8_t *)"main", 4, g_break_lines[i], &id);
+    }
+    if (g_raise_trap) doodle_set_raise_trapping(inst, true);
+    if (g_subexpr) doodle_set_observation_mode(inst, DoodleObservationMode_Subexpression);
+}
+
+/* Drives one action (its `step:` label): a directive, or a capability resolve. */
+static void drive_action(DoodleInstance *inst, const char *label, DoodleOutcome *oc) {
+    if (strcmp(label, "run") == 0) {
+        doodle_drive(inst, DoodleDirective_RunToCompletion, oc);
+    } else if (strcmp(label, "continue") == 0) {
+        doodle_drive(inst, DoodleDirective_Continue, oc);
+    } else if (strcmp(label, "step") == 0) {
+        doodle_drive(inst, DoodleDirective_Step, oc);
+    } else if (strcmp(label, "into") == 0) {
+        doodle_drive(inst, DoodleDirective_StepInto, oc);
+    } else if (strcmp(label, "over") == 0) {
+        doodle_drive(inst, DoodleDirective_StepOver, oc);
+    } else if (strcmp(label, "out") == 0) {
+        doodle_drive(inst, DoodleDirective_StepOut, oc);
+    } else if (strncmp(label, "resolve-raise ", 14) == 0) {
+        doodle_resolve_raise(inst, make_value(inst, label + 14), oc);
+    } else if (strncmp(label, "resolve ", 8) == 0) {
+        doodle_resolve(inst, make_value(inst, label + 8), oc);
+    } else {
+        die("unknown drive action");
+    }
+}
+
+/* Emits the `stop:` line for a drive outcome (positions as <module>#<offset>). */
+static void emit_stop(DoodleInstance *inst, DoodleOutcome *oc) {
+    if (oc->kind == DoodleOutcomeKind_Completed) {
+        printf("stop: completed\n");
+    } else if (oc->kind == DoodleOutcomeKind_Paused) {
+        DoodlePosition pos;
+        bool has = false;
+        if (oc->pause_reason == DoodlePauseReason_RaiseTrap) {
+            doodle_trapped_raise_position(inst, &pos, &has);
+        } else {
+            doodle_completed_position(inst, &pos, &has);
+            if (!has) doodle_current_position(inst, &pos, &has);
+        }
+        printf("stop: paused %s @ ", reason_name(oc->pause_reason));
+        put_position(inst, pos.module, has ? pos.span_start : 0);
+        putchar('\n');
+    } else if (oc->kind == DoodleOutcomeKind_Raised) {
+        char kind[128];
+        size_t klen = 0;
+        doodle_raised_kind(inst, (uint8_t *)kind, sizeof kind, &klen);
+        printf("stop: raised %.*s @ main#%u\n", (int)klen, kind, oc->has_span ? oc->span_start : 0);
+    } else if (oc->kind == DoodleOutcomeKind_Faulted) {
+        printf("stop: faulted %s\n", fault_name(oc->fault));
+    } else {
+        die("unexpected drive stop (suspended/import are not in the drive corpus)");
+    }
+}
+
+/* Emits the live stack (`stack:`) after a stop, if any frame has a call site — innermost first,
+ * `<name>@<module>#<offset>` with a `×<tail>` suffix for a proper-tail-call-reused frame. */
+static void emit_stack(DoodleInstance *inst) {
+    uint32_t count = 0, gen = 0;
+    if (doodle_stack_frame_count(inst, &count, &gen) != DoodleStatus_Ok) return;
+    int printed = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        DoodleFrame f;
+        if (doodle_frame_at(inst, gen, i, &f) != DoodleStatus_Ok || !f.has_call_site) continue;
+        fputs(printed ? ", " : "stack: ", stdout);
+        printed = 1;
+        if (f.has_callable) {
+            DoodleHandle h = DOODLE_NULL_HANDLE;
+            char name[128];
+            size_t nl = 0;
+            bool has_name = false;
+            if (doodle_frame_callable(inst, gen, i, &h) == DoodleStatus_Ok) {
+                doodle_callable_name(inst, h, &has_name, (uint8_t *)name, sizeof name, &nl);
+                if (has_name) printf("%.*s@", (int)nl, name);
+                doodle_release(inst, h);
+            }
+        }
+        put_position(inst, f.call_site.module, f.call_site.span_start);
+        if (f.tail_count > 0) printf("\xc3\x97%llu", (unsigned long long)f.tail_count); /* × */
+    }
+    if (printed) putchar('\n');
+}
+
+/* Drives a `mode: run` fixture: interleaved output + capability I/O, then a terminal outcome. */
+static void run_loop(DoodleInstance *inst, const char *modules_dir) {
     printf("transcript v1\nmode: run\n");
     uint8_t *obuf = malloc(4096);
     size_t ocap = 4096, olast = 0;
@@ -343,9 +457,7 @@ int main(int argc, char **argv) {
             if (!in) die("no scripted input for a capability request");
             printf("res: %s\n", in->response);
             if (strncmp(in->response, "raise ", 6) == 0) {
-                const char *msg = in->response + 6; /* a `"…"` literal */
-                DoodleHandle h = make_value(inst, msg);
-                doodle_resolve_raise(inst, h, &oc);
+                doodle_resolve_raise(inst, make_value(inst, in->response + 6), &oc);
             } else {
                 doodle_resolve(inst, make_value(inst, in->response), &oc);
             }
@@ -353,8 +465,42 @@ int main(int argc, char **argv) {
             die("run mode produced a Paused outcome");
         }
     }
-    doodle_free(inst);
     free(obuf);
+}
+
+/* Drives a `mode: drive` fixture: apply setup, then each action's `step:`/`stop:`/`stack:`. */
+static void drive_loop(DoodleInstance *inst) {
+    printf("transcript v1\nmode: drive\n");
+    drive_setup(inst);
+    for (int i = 0; i < g_action_count; i++) {
+        DoodleOutcome oc;
+        drive_action(inst, g_actions[i], &oc);
+        printf("step: %s\n", g_actions[i]);
+        emit_stop(inst, &oc);
+        emit_stack(inst);
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) die("usage: conformance <fixture.doodle> [<modules_dir>]");
+    const char *modules_dir = argc >= 3 ? argv[2] : "";
+    size_t src_len = 0;
+    uint8_t *source = slurp_path(argv[1], &src_len);
+    read_job();
+
+    DoodleRegistry *reg = build_registry();
+    DoodleInstance *inst = NULL;
+    DoodleStatus status =
+        doodle_load_with_registry(source, src_len, NULL, reg, &inst, NULL, 0, NULL);
+    if (status != DoodleStatus_Ok || !inst) die("load failed (a run/drive fixture must load clean)");
+
+    if (g_drive) {
+        drive_loop(inst);
+    } else {
+        run_loop(inst, modules_dir);
+    }
+
+    doodle_free(inst);
     free(source);
     return 0;
 }

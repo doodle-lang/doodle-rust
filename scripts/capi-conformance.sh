@@ -4,13 +4,12 @@
 # The M7.5e cross-surface conformance gate THROUGH THE C ABI: builds doodle-capi
 # (release static library), compiles + statically links the example C conformance
 # host (examples/c-host/conformance.c) against it, then drives every `mode: run`
-# conformance fixture through that host with the Rust orchestrator
-# (`conformance-runner --c-host`), comparing each transcript to the committed
-# canonical `.transcript` oracle (M7.5d). Passing certifies the C surface produces
-# traces identical to native/wasm — transitively, via the shared oracle.
+# and `mode: drive` conformance fixture through that host with the Rust
+# orchestrator (`conformance-runner --c-host`), comparing each transcript to the
+# committed canonical `.transcript` oracle (M7.5d). Passing certifies the C surface
+# produces traces identical to native/wasm — transitively, via the shared oracle.
 #
 # The C compiler defaults to `cc`; override with the CC environment variable.
-# (Drive-mode fixtures are the M7.5e-2 extension; this host handles `mode: run`.)
 
 set -e
 

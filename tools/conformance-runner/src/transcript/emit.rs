@@ -8,7 +8,7 @@ use super::{Event, Pos, StackElem, Stop, Terminal, Transcript};
 use crate::capability::{capability_name, registry};
 use crate::drive::{apply_setup, drive_action, fault_kind, paused_position, reason_name};
 use crate::matcher::{CapabilityQueues, build_resolution, error_messages};
-use crate::model::{DriveAction, Mode, Test};
+use crate::model::{Mode, Test};
 use doodle_core::drive::{
     Directive, ImportResolution, Limits, Outcome, resolve as resolve_capability, resolve_import,
     run,
@@ -106,7 +106,7 @@ pub(crate) fn record_drive(
     for step in &script.steps {
         let outcome = drive_action(&mut instance, &step.action, &step.expect, modules_dir)
             .map_err(|e| vec![e])?;
-        events.push(Event::Step(action_label(&step.action)));
+        events.push(Event::Step(super::render_action(&step.action)));
         events.push(Event::Stop(outcome_to_stop(
             &instance, &outcome, &index, &nfc,
         )));
@@ -211,22 +211,6 @@ fn position(instance: &Instance, index: &LineIndex, nfc: &str, offset: Option<u3
         module,
         line,
         column,
-    }
-}
-
-/// The transcript label for a drive action (`step:`), reusing the `#! do:`/`resolve:` spellings.
-fn action_label(action: &DriveAction) -> String {
-    match action {
-        DriveAction::Run => "run".to_string(),
-        DriveAction::Continue => "continue".to_string(),
-        DriveAction::Step => "step".to_string(),
-        DriveAction::Into => "into".to_string(),
-        DriveAction::Over => "over".to_string(),
-        DriveAction::Out => "out".to_string(),
-        DriveAction::Resolve(value) => format!("resolve {}", super::render_value(value)),
-        DriveAction::ResolveRaise(message) => {
-            format!("resolve-raise {}", super::quote_string(message))
-        }
     }
 }
 

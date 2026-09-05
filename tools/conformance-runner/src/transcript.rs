@@ -168,6 +168,22 @@ impl StackElem {
     }
 }
 
+/// The transcript label for a drive action (`step:`), reusing the `#! do:`/`resolve:` spellings.
+/// Shared by the native emitter and the C-host job builder (`c_host`) so a C `step:` line matches.
+pub(crate) fn render_action(action: &crate::model::DriveAction) -> String {
+    use crate::model::DriveAction;
+    match action {
+        DriveAction::Run => "run".to_string(),
+        DriveAction::Continue => "continue".to_string(),
+        DriveAction::Step => "step".to_string(),
+        DriveAction::Into => "into".to_string(),
+        DriveAction::Over => "over".to_string(),
+        DriveAction::Out => "out".to_string(),
+        DriveAction::Resolve(value) => format!("resolve {}", render_value(value)),
+        DriveAction::ResolveRaise(message) => format!("resolve-raise {}", quote_string(message)),
+    }
+}
+
 /// Renders a scripted resolution (`res:`): a value literal, or `raise "<msg>"`. Shared with the
 /// C-host orchestrator (`c_host`), which passes it to the C host as the scripted response, so the
 /// echoed `res:` line matches this canonical rendering byte-for-byte.

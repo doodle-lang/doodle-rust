@@ -134,10 +134,10 @@ pub fn run(root: &Path) -> Result<usize, String> {
     Ok(failed)
 }
 
-/// Runs every `mode: run` fixture under `root` through the example **C host** (M7.5e) and compares
-/// its finalized transcript to the canonical sidecar — the third surface, transitively identical to
-/// native/wasm through the shared oracle. Drive fixtures are the M7.5e-2 extension (skipped here).
-/// Returns the failed-fixture count (0 = green), or a runner-level `Err`.
+/// Runs every `mode: run` / `mode: drive` fixture under `root` through the example **C host**
+/// (M7.5e) and compares its finalized transcript to the canonical sidecar — the third surface,
+/// transitively identical to native/wasm through the shared oracle. Static fixtures have no
+/// transcript. Returns the failed-fixture count (0 = green), or a runner-level `Err`.
 pub fn run_c_host(root: &Path, c_host: &Path) -> Result<usize, String> {
     let fixtures = discover(root)?;
     let (mut passed, mut failed, mut skipped) = (0usize, 0usize, 0usize);
@@ -148,8 +148,8 @@ pub fn run_c_host(root: &Path, c_host: &Path) -> Result<usize, String> {
         let Ok(test) = directive::parse_test(&rel, &source) else {
             continue; // malformed fixtures are `run`'s report, not the C surface's
         };
-        // The C host handles `mode: run` only (drive is M7.5e-2); everything else SKIPs visibly.
-        if test.mode != Mode::Run || !stage_ready(&test) {
+        // The C host handles `run` + `drive` (the transcript oracle's scope); static SKIPs visibly.
+        if !matches!(test.mode, Mode::Run | Mode::Drive) || !stage_ready(&test) {
             skipped += 1;
             continue;
         }
