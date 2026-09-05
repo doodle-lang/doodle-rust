@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: 1\x0a5\x0a
+outcome: completed

@@ -1,0 +1,6 @@
+transcript v1
+mode: run
+req: read_line @ main:9:1
+res: "hello"
+out: hello\x0a
+outcome: completed

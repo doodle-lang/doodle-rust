@@ -1,0 +1,6 @@
+transcript v1
+mode: run
+req: time @ main:9:1
+res: 100
+out: 100\x0a
+outcome: completed

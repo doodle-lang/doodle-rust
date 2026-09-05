@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: raised missing-argument @ main:5:9

@@ -1,0 +1,8 @@
+transcript v1
+mode: drive
+step: continue
+stop: paused breakpoint @ main:14:1
+step: continue
+stop: paused raise-trap @ main:16:1
+step: continue
+stop: raised raised @ main:16:1

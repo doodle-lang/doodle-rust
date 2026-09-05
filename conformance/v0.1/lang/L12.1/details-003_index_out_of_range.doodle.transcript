@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: index-out-of-range\x0a5\x0a2\x0a
+outcome: completed

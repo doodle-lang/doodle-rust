@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: Hello, Ada! You have 3 messages.\x0a
+outcome: completed

@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: no-such-field\x0az\x0aPoint\x0a
+outcome: completed

@@ -1,0 +1,10 @@
+transcript v1
+mode: drive
+step: step
+stop: paused step @ main:14:9
+step: step
+stop: paused step @ main:14:13
+step: step
+stop: paused step @ main:14:9
+step: step
+stop: paused step @ main:14:18

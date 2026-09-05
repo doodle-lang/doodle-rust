@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: hi from the default\x0a
+outcome: completed

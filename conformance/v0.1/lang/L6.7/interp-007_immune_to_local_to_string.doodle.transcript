@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: HIJACKED\x0a7\x0a
+outcome: completed

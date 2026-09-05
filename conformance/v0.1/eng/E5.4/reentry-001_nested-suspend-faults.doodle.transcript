@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: faulted nested-suspend

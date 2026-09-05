@@ -1,0 +1,10 @@
+transcript v1
+mode: drive
+step: continue
+stop: paused breakpoint @ main:15:7
+step: continue
+stop: paused breakpoint @ main:15:7
+step: continue
+stop: paused breakpoint @ main:15:7
+step: continue
+stop: completed

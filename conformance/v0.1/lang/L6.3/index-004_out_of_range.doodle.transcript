@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: raised index-out-of-range @ main:5:7

@@ -1,0 +1,18 @@
+transcript v1
+mode: drive
+step: into
+stop: paused step @ main:19:1
+step: into
+stop: paused step @ main:25:1
+step: into
+stop: paused step @ main:20:3
+stack: go@25
+step: into
+stop: paused step @ main:20:3
+stack: go@25
+step: over
+stop: paused step @ main:23:3
+stack: go@25
+step: over
+stop: paused step @ main:20:3
+stack: go@23×1

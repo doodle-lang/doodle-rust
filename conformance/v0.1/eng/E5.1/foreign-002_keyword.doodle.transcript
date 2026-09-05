@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: deco World\x0aWorld?\x0a
+outcome: completed

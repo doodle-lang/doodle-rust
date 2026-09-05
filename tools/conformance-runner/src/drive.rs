@@ -70,8 +70,9 @@ pub(crate) fn run_drive(
     }
 }
 
-/// Applies the script's debug setup to a freshly loaded instance (E§8.6/§8.7/§8.8).
-fn apply_setup(instance: &mut Instance, script: &DriveScript) {
+/// Applies the script's debug setup to a freshly loaded instance (E§8.6/§8.7/§8.8). Shared with the
+/// transcript emitter (`transcript::emit`), so a recorded drive applies the identical setup.
+pub(crate) fn apply_setup(instance: &mut Instance, script: &DriveScript) {
     for (canonical, line) in &script.breakpoints {
         instance.set_breakpoint(canonical, *line);
     }
@@ -89,7 +90,10 @@ fn apply_setup(instance: &mut Instance, script: &DriveScript) {
 /// `NotFound`) so imports need no explicit step — **unless** this step asserts an `import` stop, in
 /// which case the suspension is left for [`check_step`] to inspect. A **capability** suspension is
 /// never auto-resolved: it is a stop the fixture asserts and then a `resolve:` step resumes.
-fn drive_action(
+///
+/// Shared with the transcript emitter (`transcript::emit`), so a recorded step drives identically —
+/// including the import auto-resolution — as the step the matcher checks.
+pub(crate) fn drive_action(
     instance: &mut Instance,
     action: &DriveAction,
     expect: &StopAssertion,
@@ -236,7 +240,7 @@ fn check_step(
 
 /// The source position a `paused` stop reports: the raise site for a raise-trap; the completed
 /// subexpression for a fine (subexpression-mode) stop; otherwise the construct about to run.
-fn paused_position(instance: &Instance, reason: PauseReason) -> Option<u32> {
+pub(crate) fn paused_position(instance: &Instance, reason: PauseReason) -> Option<u32> {
     let engine = match reason {
         PauseReason::RaiseTrap => instance.trapped_raise_position(),
         _ => instance
@@ -301,7 +305,7 @@ fn check_stack(
 }
 
 /// The transcript name of a pause reason (E§7.2).
-fn reason_name(reason: PauseReason) -> &'static str {
+pub(crate) fn reason_name(reason: PauseReason) -> &'static str {
     match reason {
         PauseReason::Step => "step",
         PauseReason::Breakpoint(_) => "breakpoint",

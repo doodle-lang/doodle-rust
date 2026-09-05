@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: raised invalid-utf8 @ main:5:7

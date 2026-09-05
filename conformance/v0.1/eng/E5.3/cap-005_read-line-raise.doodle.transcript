@@ -1,0 +1,5 @@
+transcript v1
+mode: run
+req: read_line @ main:8:1
+res: raise "eof"
+outcome: raised raised @ main:8:1

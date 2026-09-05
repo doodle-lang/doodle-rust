@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: true\x0atype-mismatch\x0a
+outcome: completed

@@ -1,0 +1,6 @@
+transcript v1
+mode: run
+req: read_line @ main:14:3
+res: "hi"
+out: hi\x0a
+outcome: completed

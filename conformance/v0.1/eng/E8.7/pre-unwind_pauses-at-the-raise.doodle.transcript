@@ -1,0 +1,6 @@
+transcript v1
+mode: drive
+step: continue
+stop: paused raise-trap @ main:10:1
+step: continue
+stop: raised raised @ main:10:1

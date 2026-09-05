@@ -155,13 +155,14 @@ fn drive_to_terminal(
 }
 
 /// Per-capability FIFO queues of scripted `input:` responses, drawn from as each capability
-/// suspends (responses for one capability are consumed in header order).
-struct CapabilityQueues {
+/// suspends (responses for one capability are consumed in header order). Shared with the transcript
+/// emitter (`transcript::emit`), so a recorded run draws the identical resolutions.
+pub(crate) struct CapabilityQueues {
     queues: Vec<(String, std::collections::VecDeque<ScriptResponse>)>,
 }
 
 impl CapabilityQueues {
-    fn new(inputs: &[ScriptInput]) -> Self {
+    pub(crate) fn new(inputs: &[ScriptInput]) -> Self {
         let mut queues: Vec<(String, std::collections::VecDeque<ScriptResponse>)> = Vec::new();
         for input in inputs {
             match queues
@@ -179,7 +180,7 @@ impl CapabilityQueues {
     }
 
     /// The next scripted response for `capability`, or `None` if its queue is empty/absent.
-    fn next(&mut self, capability: &str) -> Option<ScriptResponse> {
+    pub(crate) fn next(&mut self, capability: &str) -> Option<ScriptResponse> {
         self.queues
             .iter_mut()
             .find(|(name, _)| name == capability)

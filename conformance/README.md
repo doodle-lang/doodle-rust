@@ -234,6 +234,58 @@ there is no runtime rejection to test; a fixture exercises it three ways (defaul
 `punct:` keyword, a block that makes a non-local exit). A fixture selects it with
 `#! requires: test_greet`.
 
+## Transcript oracle (`transcript v1`, M7.5d)
+
+Every `mode: run` / `mode: drive` fixture carries a committed, byte-exact **transcript**
+beside it, `<entry>.doodle.transcript` — the cross-surface determinism oracle (D-M7-20).
+The **native** runner generates it (`conformance-runner --write`) and drift-checks it by
+default (a drift or a missing sidecar is a FAIL); every other surface (the wasm harness,
+the M7 C example host) emits its own transcript for the same fixture and compares to this
+one, so C↔wasm identity is transitive through the canonical file. Static-family fixtures
+have **no** transcript (the three surfaces share doodle-core's front end, so a static
+golden would add no surface-variance coverage — D-M7-20 scope: run/drive ⇒ transcript,
+static ⇒ `expect-*`). The fixture's own `expect-*`/`do:`/`expect:` lines stay as
+human-readable intent; both are checked every run, so a transcript can't silently diverge
+from them.
+
+The format is a version line, a `mode:` line, then tagged event lines (an unknown prefix
+is a parse error — the loud-fixture rule):
+
+```
+transcript v1
+mode: run                                  # or  mode: drive
+# run mode — interleaved output + capability I/O, then one terminal outcome:
+out: <escaped-bytes>                        # a coalesced run of captured output
+req: <capability> @ <mod>:<line>:<col>      # a capability request: identity + call-site position
+res: <value>                                # the scripted resolution (as a `#! input:` response)
+outcome: completed
+outcome: raised <kind> @ <mod>:<line>:<col>
+outcome: faulted <kind>
+# drive mode — each step's action, the stop it produced, and the live stack (when non-empty):
+step: <action>                             # run | continue | step | into | over | out | resolve <value> | resolve-raise "msg"
+stop:  completed | paused <reason> @ m:L:C | raised <kind> @ m:L:C | suspended <cap> @ m:L:C | import <path> @ m:L:C | faulted <kind>
+stack: <elem>, <elem>, …                    # innermost first; `name@line`, `line`, or `…×tail` (drive-script encoding)
+```
+
+Field encodings (one rule, shared with the drive-script format):
+
+- **Positions** are `<module>:<line>:<col>`, the module rendered **entry-relative** (the
+  entry module is `main`, an import by its canonical id) so a transcript never depends on
+  the working directory (D-M7-20 rider 4). Line/column are 1-based in the NFC'd source.
+- **`out:`** carries output bytes: control bytes (`< 0x20`), `\`, and DEL as `\xNN`
+  (lowercase hex), every other byte verbatim (valid UTF-8 stays readable; the file stays
+  UTF-8). Output between events is coalesced into one run. Files are LF-only with a
+  trailing newline; comparison is byte-exact.
+- **Values** (`res:`, `resolve`) reuse the drive-script literals: `"str"` (same `\xNN`
+  escaping, plus `"`), an integer, a float (has a `.`), `true`/`false`, `nil`, or
+  `raise "msg"` — a *scripted* resolution echoed verbatim (not an engine message).
+- **Raises** record the **kind (slug)** and position — **never message text** (S-58,
+  "messages are not API"); a bare `raise "x"` has kind `raised`, an `Error` raise its
+  slug (e.g. `type-mismatch`). The Error's structured **`details`** are a designated
+  **v1.1** addition, deferred until M9a stabilizes structural value serialization
+  (committing today's placeholder rendering would freeze it); the version line is the
+  evolution mechanism — v1.1 will regenerate every sidecar in one wholesale commit.
+
 ## Rules
 
 - Expected text uses **substring** match per event (full-match is too brittle

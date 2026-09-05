@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: raised unhashable-key @ main:5:1

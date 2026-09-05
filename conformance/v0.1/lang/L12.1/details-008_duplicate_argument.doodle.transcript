@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: duplicate-argument\x0aa\x0a
+outcome: completed

@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: too-many-arguments\x0a1\x0a2\x0a
+outcome: completed

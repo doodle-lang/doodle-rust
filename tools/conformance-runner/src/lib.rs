@@ -23,9 +23,10 @@ mod drive;
 mod drivescript;
 mod matcher;
 mod model;
+mod transcript;
 
 use doodle_core::stage::implemented_through;
-use model::Test;
+use model::{Mode, Test};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -77,8 +78,7 @@ pub fn run(root: &Path) -> Result<usize, String> {
                 for clause in &test.clauses {
                     *clause_tests.entry(clause.clone()).or_default() += 1;
                 }
-                let stage_ready =
-                    implemented_through().is_some_and(|impl_stage| impl_stage >= test.required);
+                let ready = stage_ready(&test);
                 let header = format!(
                     "{}  [{}]  mode={:?} stage={:?}",
                     test.id,
@@ -86,25 +86,37 @@ pub fn run(root: &Path) -> Result<usize, String> {
                     test.mode,
                     test.required
                 );
-                if !stage_ready {
+                if !ready {
                     println!(
                         "SKIP  {header}  ({} expectation(s), matched once its stage lands)",
                         test.expectations.len()
                     );
                     skipped += 1;
                 } else {
-                    match matcher::execute(&test, &source, fixture.modules_dir.as_deref()) {
-                        Ok(()) => {
-                            println!("PASS  {header}");
-                            passed += 1;
+                    let mut reasons =
+                        matcher::execute(&test, &source, fixture.modules_dir.as_deref())
+                            .err()
+                            .unwrap_or_default();
+                    // A `run`/`drive` fixture also carries a committed transcript oracle (D-M7-20):
+                    // the produced transcript must match its `<entry>.transcript` sidecar. Drift (or a
+                    // missing sidecar) is a FAIL — regenerate with `--write`.
+                    if let Err(mut drift) = check_transcript(
+                        &test,
+                        &source,
+                        fixture.modules_dir.as_deref(),
+                        &fixture.entry,
+                    ) {
+                        reasons.append(&mut drift);
+                    }
+                    if reasons.is_empty() {
+                        println!("PASS  {header}");
+                        passed += 1;
+                    } else {
+                        println!("FAIL  {header}");
+                        for reason in &reasons {
+                            println!("        {reason}");
                         }
-                        Err(reasons) => {
-                            println!("FAIL  {header}");
-                            for reason in &reasons {
-                                println!("        {reason}");
-                            }
-                            failed += 1;
-                        }
+                        failed += 1;
                     }
                 }
             }
@@ -119,6 +131,91 @@ pub fn run(root: &Path) -> Result<usize, String> {
     println!();
     println!("=== {passed} passed, {failed} failed, {skipped} skipped ===");
     Ok(failed)
+}
+
+/// Regenerates the committed transcript sidecar (`<entry>.transcript`) for every `run`/`drive`
+/// fixture under `root` (D-M7-20): the native surface **generates** the canonical oracle, and the
+/// default [`run`] drift-checks against it (the M1.12 lang-corpus-sync house pattern). Static
+/// fixtures have no transcript. Returns the number of sidecars written, or a runner-level `Err`.
+pub fn write(root: &Path) -> Result<usize, String> {
+    let fixtures = discover(root)?;
+    let mut written = 0usize;
+    for fixture in &fixtures {
+        let source = std::fs::read_to_string(&fixture.entry)
+            .map_err(|e| format!("reading {}: {e}", fixture.entry.display()))?;
+        let rel = rel_path(root, &fixture.logical);
+        let Ok(test) = directive::parse_test(&rel, &source) else {
+            continue; // a malformed fixture is reported by `run`, not regenerated here
+        };
+        if !is_transcript_mode(test.mode) || !stage_ready(&test) {
+            continue;
+        }
+        let transcript = produce_transcript(&test, &source, fixture.modules_dir.as_deref())
+            .map_err(|reasons| format!("{}: {}", rel, reasons.join("; ")))?;
+        let sidecar = sidecar_path(&fixture.entry);
+        std::fs::write(&sidecar, transcript.serialize())
+            .map_err(|e| format!("writing {}: {e}", sidecar.display()))?;
+        println!("wrote {}", sidecar.display());
+        written += 1;
+    }
+    println!("\n=== {written} transcript(s) written ===");
+    Ok(written)
+}
+
+/// Checks a stage-ready fixture's committed transcript sidecar against the freshly produced one
+/// (D-M7-20). A static fixture has no transcript (`Ok`). A drift or a missing sidecar is the FAIL.
+fn check_transcript(
+    test: &Test,
+    source: &str,
+    modules_dir: Option<&Path>,
+    entry: &Path,
+) -> Result<(), Vec<String>> {
+    if !is_transcript_mode(test.mode) {
+        return Ok(());
+    }
+    let produced = produce_transcript(test, source, modules_dir)?.serialize();
+    let sidecar = sidecar_path(entry);
+    match std::fs::read_to_string(&sidecar) {
+        Ok(committed) if committed == produced => Ok(()),
+        Ok(_) => Err(vec![format!(
+            "transcript drift: {} differs from the produced transcript (regenerate with `--write`)",
+            sidecar.display()
+        )]),
+        Err(_) => Err(vec![format!(
+            "missing transcript sidecar {} (regenerate with `--write`)",
+            sidecar.display()
+        )]),
+    }
+}
+
+/// Produces a fixture's transcript by mode (`run`/`drive`); the emitter runs the program.
+fn produce_transcript(
+    test: &Test,
+    source: &str,
+    modules_dir: Option<&Path>,
+) -> Result<transcript::Transcript, Vec<String>> {
+    match test.mode {
+        Mode::Run => transcript::record_run(test, source, modules_dir),
+        Mode::Drive => transcript::record_drive(test, source, modules_dir),
+        Mode::Static => unreachable!("a static fixture has no transcript"),
+    }
+}
+
+/// The committed transcript sidecar path for a fixture's entry file (`<entry>.transcript`).
+fn sidecar_path(entry: &Path) -> PathBuf {
+    let mut name = entry.as_os_str().to_os_string();
+    name.push(".transcript");
+    PathBuf::from(name)
+}
+
+/// Whether a fixture's mode carries a transcript oracle (D-M7-20 scope: `run`/`drive`, not static).
+fn is_transcript_mode(mode: Mode) -> bool {
+    matches!(mode, Mode::Run | Mode::Drive)
+}
+
+/// Whether doodle-core implements the stage this test requires (else it SKIPs, no transcript).
+fn stage_ready(test: &Test) -> bool {
+    implemented_through().is_some_and(|impl_stage| impl_stage >= test.required)
 }
 
 /// Discovers fixtures under `root`, in a deterministic sorted order (by logical path).

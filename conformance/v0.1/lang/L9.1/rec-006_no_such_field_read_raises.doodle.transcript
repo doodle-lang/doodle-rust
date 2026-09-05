@@ -1,0 +1,3 @@
+transcript v1
+mode: run
+outcome: raised no-such-field @ main:6:7

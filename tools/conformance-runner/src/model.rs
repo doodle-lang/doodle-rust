@@ -57,7 +57,7 @@ pub(crate) enum ScriptValue {
 
 /// How a scripted `input:`/`resolve:` fulfils a capability request (E§7.5): a value the capability
 /// produces, or an exception raised at its call site.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ScriptResponse {
     /// Resolve with this value (`Resolution::Value`).
     Value(ScriptValue),

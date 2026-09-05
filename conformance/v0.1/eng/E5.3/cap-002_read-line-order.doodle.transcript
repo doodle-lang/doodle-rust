@@ -1,0 +1,9 @@
+transcript v1
+mode: run
+req: read_line @ main:10:1
+res: "a"
+out: a\x0a
+req: read_line @ main:11:1
+res: "b"
+out: b\x0a
+outcome: completed

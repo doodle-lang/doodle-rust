@@ -1,0 +1,4 @@
+transcript v1
+mode: run
+out: ababab\x0aababab\x0a
+outcome: completed
