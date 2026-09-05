@@ -265,11 +265,14 @@ pub unsafe extern "C" fn doodle_trapped_raise_position(
 // ---- host pause + observation mode ----------------------------------------------------------
 
 /// Requests a pause (E§8.8): the drive stops `Paused(HostPause)` at its next safe point.
-/// Idempotent; callable from another thread while a drive runs (the flag is atomic, like
-/// `doodle_cancel`). No-op on NULL.
+/// Idempotent; no-op on NULL. **Call from the thread that owns `instance`.** To pause from ANOTHER
+/// thread while a drive is running, obtain a `doodle_control` first and use `doodle_control_pause`
+/// — calling this cross-thread forms `&instance`, which would alias the drive thread's `&mut
+/// Instance` (D-M7-5).
 ///
 /// # Safety
-/// `instance` must be a live pointer from `doodle_load` (or NULL).
+/// `instance` must be a live pointer from `doodle_load` (or NULL), and not concurrently driven on
+/// another thread (use `doodle_control` for that).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_pause(instance: *const DoodleInstance) {
     if let Some(di) = di_ref(instance) {

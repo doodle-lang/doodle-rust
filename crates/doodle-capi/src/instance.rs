@@ -85,12 +85,15 @@ pub unsafe extern "C" fn doodle_drive_slice(
     })
 }
 
-/// Requests cancellation (E§10.1): the drive tears down to `Faulted(Cancelled)` at its next
-/// safe point. Idempotent; callable from another thread while a drive runs (the cancel flag
-/// is atomic). No-op on NULL.
+/// Requests cancellation (E§10.1): the drive tears down to `Faulted(Cancelled)` at its next safe
+/// point. Idempotent; no-op on NULL. **Call from the thread that owns `instance`.** To cancel from
+/// ANOTHER thread while a drive is running, obtain a `doodle_control` first and use
+/// `doodle_control_cancel` — calling this cross-thread forms `&instance`, which would alias the
+/// drive thread's `&mut Instance` (D-M7-5).
 ///
 /// # Safety
-/// `instance` must be a live pointer from [`doodle_load`] (or NULL).
+/// `instance` must be a live pointer from [`doodle_load`] (or NULL), and not concurrently driven on
+/// another thread (use `doodle_control` for that).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_cancel(instance: *const DoodleInstance) {
     if let Some(di) = di_ref(instance) {

@@ -42,6 +42,7 @@ pub mod call;
 pub mod call_read;
 pub mod call_value;
 pub mod config;
+pub mod control;
 pub mod desc;
 pub mod guard;
 pub mod inspect;

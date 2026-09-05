@@ -617,6 +617,13 @@ typedef struct DoodleCallCtx DoodleCallCtx;
 typedef struct DoodleConfig DoodleConfig;
 
 /**
+ * An instance's cross-thread control handle (E§8.8/§10.1): its cancel + pause tokens, each an
+ * `Arc<AtomicBool>` clone. `Send + Sync`, so a host obtains it on the owning thread and may hand
+ * it to another thread. Opaque to C; free with [`doodle_control_free`]. Outlives drives.
+ */
+typedef struct DoodleControl DoodleControl;
+
+/**
  * A host foreign-function descriptor under construction (E§5.1). Built with
  * `doodle_foreign_desc_new`, filled with the `doodle_foreign_desc_*` builders, then
  * **consumed** by `doodle_registry_add_foreign` (or discarded with `doodle_foreign_desc_free`).
@@ -1242,6 +1249,46 @@ void doodle_config_set_target_unicode(struct DoodleConfig *config,
                                       uint16_t micro);
 
 /**
+ * Obtains a [`DoodleControl`] for `instance` (D-M7-5). **Call on the thread that owns the
+ * instance** — typically before handing the instance to a drive thread; it forms `&instance`
+ * exactly here, so it must not race a concurrent drive. Returns NULL on a NULL instance. The
+ * returned control is thread-safe and the host frees it with [`doodle_control_free`].
+ *
+ * # Safety
+ * `instance` must be a live pointer from `doodle_load` (or NULL), not concurrently driven on
+ * another thread at the moment of this call.
+ */
+struct DoodleControl *doodle_control(const struct DoodleInstance *instance);
+
+/**
+ * Requests cancellation through `control` (E§10.1): the drive tears down to `Faulted(Cancelled)`
+ * at its next safe point. Sound from any thread — it touches only the token's own atomic, never
+ * the instance. Idempotent; no-op on NULL.
+ *
+ * # Safety
+ * `control` must be a live pointer from [`doodle_control`] (or NULL).
+ */
+void doodle_control_cancel(const struct DoodleControl *control);
+
+/**
+ * Requests a pause through `control` (E§8.8): the drive stops `Paused(HostPause)` at its next
+ * safe point, resumable. Sound from any thread. No-op on NULL.
+ *
+ * # Safety
+ * `control` must be a live pointer from [`doodle_control`] (or NULL).
+ */
+void doodle_control_pause(const struct DoodleControl *control);
+
+/**
+ * Frees a [`DoodleControl`] from [`doodle_control`]. NULL is a no-op. Do not free while another
+ * thread may still call `doodle_control_cancel`/`_pause` on it.
+ *
+ * # Safety
+ * `control` must be a pointer from [`doodle_control`] not already freed, and no longer in use.
+ */
+void doodle_control_free(struct DoodleControl *control);
+
+/**
  * Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind`. Returns
  * NULL on allocation failure, a NULL name (with a non-zero length), or a non-UTF-8 name.
  * Populate it with the `doodle_foreign_desc_*` builders (in the parameter order wanted), then
@@ -1605,12 +1652,15 @@ DoodleStatus doodle_drive_slice(struct DoodleInstance *instance,
                                 struct DoodleOutcome *out_outcome);
 
 /**
- * Requests cancellation (E§10.1): the drive tears down to `Faulted(Cancelled)` at its next
- * safe point. Idempotent; callable from another thread while a drive runs (the cancel flag
- * is atomic). No-op on NULL.
+ * Requests cancellation (E§10.1): the drive tears down to `Faulted(Cancelled)` at its next safe
+ * point. Idempotent; no-op on NULL. **Call from the thread that owns `instance`.** To cancel from
+ * ANOTHER thread while a drive is running, obtain a `doodle_control` first and use
+ * `doodle_control_cancel` — calling this cross-thread forms `&instance`, which would alias the
+ * drive thread's `&mut Instance` (D-M7-5).
  *
  * # Safety
- * `instance` must be a live pointer from [`doodle_load`] (or NULL).
+ * `instance` must be a live pointer from [`doodle_load`] (or NULL), and not concurrently driven on
+ * another thread (use `doodle_control` for that).
  */
 void doodle_cancel(const struct DoodleInstance *instance);
 
@@ -2114,11 +2164,14 @@ DoodleStatus doodle_trapped_raise_position(const struct DoodleInstance *instance
 
 /**
  * Requests a pause (E§8.8): the drive stops `Paused(HostPause)` at its next safe point.
- * Idempotent; callable from another thread while a drive runs (the flag is atomic, like
- * `doodle_cancel`). No-op on NULL.
+ * Idempotent; no-op on NULL. **Call from the thread that owns `instance`.** To pause from ANOTHER
+ * thread while a drive is running, obtain a `doodle_control` first and use `doodle_control_pause`
+ * — calling this cross-thread forms `&instance`, which would alias the drive thread's `&mut
+ * Instance` (D-M7-5).
  *
  * # Safety
- * `instance` must be a live pointer from `doodle_load` (or NULL).
+ * `instance` must be a live pointer from `doodle_load` (or NULL), and not concurrently driven on
+ * another thread (use `doodle_control` for that).
  */
 void doodle_pause(const struct DoodleInstance *instance);
 

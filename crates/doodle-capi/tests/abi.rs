@@ -26,6 +26,7 @@ use doodle_capi::call::{
 use doodle_capi::call_read::{doodle_call_as_int, doodle_call_release};
 use doodle_capi::call_value::{doodle_call_make_int, doodle_call_make_string};
 use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_set_limits};
+use doodle_capi::control::{doodle_control, doodle_control_cancel, doodle_control_free};
 use doodle_capi::desc::{
     DoodleForeignDesc, doodle_foreign_desc_block_param, doodle_foreign_desc_default_string,
     doodle_foreign_desc_new, doodle_foreign_desc_param, doodle_foreign_desc_set_callback,
@@ -1448,5 +1449,88 @@ fn debug_mode_pause_tail_and_diagnostics() {
         unsafe { doodle_diagnostic_at(inst, 0, 0, &mut diag) },
         DoodleStatus::ErrIndexOutOfBounds
     );
+    unsafe { doodle_free(inst) };
+}
+
+// A raw pointer handed to exactly one other thread, which then owns the pointee exclusively for the
+// duration of the drive — the C-host pattern of moving an instance to its drive thread. Sound
+// because only the receiving thread touches the pointee while the drive runs, and the sender only
+// after `join`.
+struct Handoff<T>(*mut T);
+// SAFETY: the pointee (a `DoodleInstance`/`DoodleControl`) is handed to one thread that owns it for
+// the drive; the C ABI's own contract (single-threaded-per-instance) is what the test upholds.
+unsafe impl<T> Send for Handoff<T> {}
+
+impl<T> Handoff<T> {
+    /// Unwraps the pointer. Takes `self` by value so a closure calling it captures the whole
+    /// (`Send`) `Handoff`, not just the bare `*mut` field (disjoint closure capture would otherwise
+    /// take only the field, which is not `Send`).
+    fn into_inner(self) -> *mut T {
+        self.0
+    }
+}
+
+#[test]
+fn two_instances_run_independently_on_two_threads() {
+    // Instances are `Send` (M7.0): each is created here, moved into its own thread, and driven
+    // there with no shared state, so the two runs are independent with their own output.
+    let handles: Vec<_> = ["print(1)\n", "print(2)\n"]
+        .iter()
+        .map(|src| {
+            let handoff = Handoff(load_with(src, &[DoodleBuiltin::Print]));
+            std::thread::spawn(move || {
+                let inst = handoff.into_inner();
+                assert_eq!(drive(inst).kind, DoodleOutcomeKind::Completed);
+                let out = read_output(inst);
+                unsafe { doodle_free(inst) };
+                out
+            })
+        })
+        .collect();
+    let outputs: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(outputs[0], b"1\n");
+    assert_eq!(outputs[1], b"2\n");
+}
+
+#[test]
+fn a_drive_is_cancelled_from_another_thread_via_the_control() {
+    // The D-M7-5 cross-thread control: `to spin() spin() end` (unbounded tail recursion, with a
+    // huge step budget so it never faults StepBudget) is driven on one thread and cancelled from
+    // this one through a `DoodleControl` — which owns the cancel token's `Arc` and never re-forms
+    // `&Instance` (the M7.6 fix for the cross-thread `&Instance` aliasing). The loop can only end
+    // when the cancel flag is seen, so the outcome is deterministically Faulted(Cancelled).
+    let src = "to spin()\n  spin()\nend\nspin()\n";
+    let config = doodle_config_new();
+    unsafe { doodle_config_set_limits(config, u64::MAX, 1 << 26, 10_000, 1 << 26) };
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            doodle_load(
+                src.as_ptr(),
+                src.len(),
+                config,
+                &mut inst,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        DoodleStatus::Ok
+    );
+    unsafe { doodle_config_free(config) };
+
+    let control = unsafe { doodle_control(inst) };
+    assert!(!control.is_null());
+    let driver = {
+        let handoff = Handoff(inst);
+        std::thread::spawn(move || drive(handoff.into_inner()))
+    };
+    // Cancel while the driver holds `&mut Instance`; the control touches only the shared atomic.
+    unsafe { doodle_control_cancel(control) };
+    let out = driver.join().unwrap();
+    assert_eq!(out.kind, DoodleOutcomeKind::Faulted);
+    assert_eq!(out.fault, DoodleFault::Cancelled);
+
+    unsafe { doodle_control_free(control) };
     unsafe { doodle_free(inst) };
 }
