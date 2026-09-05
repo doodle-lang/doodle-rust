@@ -95,3 +95,17 @@ jobs:
         run: ./scripts/capi-header.sh
       - name: C smoke test
         run: ./scripts/capi-smoke.sh
+
+  # The cross-surface conformance gate through the C ABI (M7.5f): the example C host runs every
+  # run/drive fixture and its transcript is compared to the canonical oracle, so the C surface stays
+  # trace-identical to native/wasm.  Linux-only per D-M7-9 (the sanitizer/C-embedding scope).  No
+  # cbindgen (this does not regenerate the header); `cc` is present on the ubuntu runner.
+  capi-conformance:
+    name: capi conformance (through the C ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: Conformance through the C ABI
+        run: ./scripts/capi-conformance.sh
