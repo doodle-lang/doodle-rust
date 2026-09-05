@@ -1,0 +1,5 @@
+# Transcript oracles (M7.5d) are byte-exact artifacts, defined LF-only (conformance/README.md).
+# The drift-check compares them byte-for-byte, so they must check out with the same line endings on
+# every platform — force LF, or Windows autocrlf would convert them to CRLF and every transcript
+# would read as drifted (the `doodle test` in-process suite runs on the Windows CI matrix leg).
+*.transcript text eol=lf
