@@ -14,8 +14,9 @@ on:
 # single argument-free command makes it behave identically under the default
 # shells (bash on Linux/macOS, PowerShell on Windows).
 #
-# Deferred per implementation-plan AD8: Node-executed wasm tests land with the
-# JS facade at M3, and a Miri job at M2a once doodle-core has nontrivial code.
+# Node-executed wasm tests land with the JS facade at M3 (deferred per AD8). The
+# `miri` job below (M7.6, D-M7-11) certifies doodle-capi's `unsafe` under a pinned
+# nightly; the shipped build stays on the pinned stable in rust-toolchain.toml.
 
 jobs:
   test:
@@ -109,3 +110,20 @@ jobs:
         run: rustup toolchain install
       - name: Conformance through the C ABI
         run: ./scripts/capi-conformance.sh
+
+  # Miri over the C ABI (D-M7-11): interprets doodle-capi's `unsafe` -- all of AD1's raw-pointer
+  # marshalling, the callback trampoline, the cross-thread control, the handle guard -- to certify
+  # no aliasing/use-after-free/provenance UB.  Miri needs nightly, so this installs a *pinned*
+  # nightly with the `miri` component (must match scripts/miri.sh; bump the two in lockstep) -- the
+  # shipped build stays on the pinned stable in rust-toolchain.toml, untouched.  Linux-only, matching
+  # the sanitizer/C-embedding scope (D-M7-9).  The pinned nightly also means nightly churn can never
+  # spontaneously break this gate.
+  miri:
+    name: miri (capi unsafe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned nightly + miri (must match scripts/miri.sh)
+        run: rustup toolchain install nightly-2026-09-05 --profile minimal --component miri
+      - name: Miri over doodle-capi
+        run: ./scripts/miri.sh
