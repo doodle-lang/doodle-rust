@@ -127,3 +127,22 @@ jobs:
         run: rustup toolchain install nightly-2026-09-05 --profile minimal --component miri
       - name: Miri over doodle-capi
         run: ./scripts/miri.sh
+
+  # The sanitizer half of the D-M7-11 split (Miri covers the Rust side; this covers the C side):
+  # builds the example C hosts with ASAN + UBSan + LeakSanitizer and runs them, so C-host memory
+  # misuse / undefined behavior / leaked host resources abort the gate.  Linux-only per D-M7-9 --
+  # LSAN is Linux-only, and this is the C-embedding scope.  `cc` (gcc) + libasan/libubsan are
+  # preinstalled on the ubuntu runner.
+  capi-sanitize:
+    name: capi sanitize (ASAN/LSAN/UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      # Newer kernels raise mmap randomness beyond what ASan's shadow mapping tolerates; lower it
+      # so ASan can reserve its shadow region.  Best-effort: a no-op where it is already fine.
+      - name: Lower ASLR entropy for AddressSanitizer
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: ASAN/LSAN/UBSan over the C hosts
+        run: ./scripts/capi-sanitize.sh
