@@ -10,6 +10,11 @@
 // actual pointer marshalling) is fully documented; this allow is scoped to the test file.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
+// `doodle-core` is a dependency of the `doodle-capi` library but this test crate reaches it only
+// through re-exports; naming it here marks it used so `cargo miri test`'s
+// `unused-crate-dependencies` force-warn stays quiet (a no-op for ordinary builds).
+use doodle_core as _;
+
 use doodle_capi::abi::{
     DOODLE_NULL_HANDLE, DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault,
     DoodleHandle, DoodleKind, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
