@@ -196,6 +196,18 @@ fn load_program(source: &str, config: Config, registry: Registry) -> Result<Inst
         DEFAULT_MODULE_PATH,
     );
     instance.set_observation_mode(config.observation_mode);
+    // The `DOODLE_GC_STRESS` certification hook (M7.6, D-M7-11): a host-side test toggle that makes
+    // every safe point collect, so a determinism gate can drive the corpus through this C ABI under
+    // GC pressure and confirm the trace matches the un-stressed oracle — exercising what in-crate
+    // GC tests cannot (host-held handles as roots, finalizers firing at GC time across the C
+    // trampoline). Read here in the host layer (the engine takes no ambient input); latched
+    // pre-first-drive, so a freshly loaded instance always accepts it. NOT part of the frozen ABI:
+    // it adds no `doodle.h` symbol.
+    if std::env::var_os("DOODLE_GC_STRESS").is_some_and(|v| !v.is_empty()) {
+        instance
+            .enable_gc_stress()
+            .expect("GC-stress latched on a freshly loaded instance (pre-first-drive)");
+    }
     Ok(instance)
 }
 

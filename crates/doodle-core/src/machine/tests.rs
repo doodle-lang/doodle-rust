@@ -2351,6 +2351,42 @@ fn gc_stress_determinism_gate_over_the_corpus() {
     }
 }
 
+/// The public GC-stress hook ([`Instance::enable_gc_stress`], D-M7-11) is **latch-once** and
+/// **pre-first-drive only** — the host layers (CLI/runner, C ABI) call it from the
+/// `DOODLE_GC_STRESS` env toggle right after load. The latch is part of the run's identity, so
+/// re-latching or latching an already-driven instance is a [`GcStressRefused`] contract error: a
+/// mid-run change would let GC timing leak into the trace (E§11).
+#[test]
+fn enable_gc_stress_is_latch_once_and_pre_first_drive_only() {
+    let mut pristine = load_source("1 + 1\n");
+    assert_eq!(pristine.state(), InstanceState::Ready);
+    assert_eq!(
+        pristine.enable_gc_stress(),
+        Ok(()),
+        "a pristine instance accepts the latch"
+    );
+    assert_eq!(
+        pristine.enable_gc_stress(),
+        Err(GcStressRefused),
+        "latch-once: a second call is refused even before the first drive"
+    );
+
+    // Drive through the public entry the host layers use (it transitions the E§3.3 state, unlike
+    // the raw-step `drive_terminal` helper); the instance is then no longer pristine.
+    let mut driven = load_source("1 + 1\n");
+    let _ = crate::drive::run(&mut driven, crate::drive::Directive::RunToCompletion);
+    assert_ne!(
+        driven.state(),
+        InstanceState::Ready,
+        "the drive left the pristine state"
+    );
+    assert_eq!(
+        driven.enable_gc_stress(),
+        Err(GcStressRefused),
+        "pre-first-drive only: refused after the instance has been driven"
+    );
+}
+
 /// The determinism gate extends to the resource-limit faults: a program stopped by a
 /// limit faults at the **same** terminal outcome under GC pressure. (Driven under a
 /// small step budget so the intentional non-terminating cases stop deterministically.)

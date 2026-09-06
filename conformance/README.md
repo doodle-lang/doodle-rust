@@ -295,11 +295,24 @@ Field encodings (one rule, shared with the drive-script format):
   encouraged where the clause demands it.
 - `clause:` is mandatory; the coverage report (M10) is computed from it.
 
+## GC-stress determinism gate (M7.6, D-M7-11)
+
+GC timing must be unobservable (E§11): a collection at any safe point may not change a trace.
+The gate proves it over the whole corpus by running it **twice against the same committed
+oracle** — once normally, once under GC-stress — on the **native** and **C** surfaces.
+
+Set the host hook **`DOODLE_GC_STRESS=1`** and re-run the suite: every instance the runner drives
+(and every instance the C host loads) then collects at every safe point, and each transcript is
+compared to the same un-stressed sidecar. `scripts/gc-stress-conformance.sh` runs both surfaces.
+The C surface is what makes this more than doodle-core's in-crate GC tests: it exercises
+host-held handles as GC roots and foreign-value finalizers firing at GC time across the C
+trampoline. The hook is host-side only — the engine never reads the environment, and it is **not**
+a `doodle.h` symbol; `write` (`--write`) refuses to regenerate the oracle while it is set, so the
+oracle stays the canonical un-stressed trace.
+
 ## Deferred (placeholders)
 
 - Value/local **inspection** assertions (`local:`, `render:`) are
   reserved-but-unimplemented named slots (§ `mode: drive`). (Capability-resolution
   steps — `resolve:`/`resolve-raise:` in a drive script, and `input:` in a `run`
   fixture — landed at M7.5a.)
-- **Determinism harness** (run twice + GC-stress, diff traces) — a runner
-  flag, M2a.

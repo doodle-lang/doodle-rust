@@ -136,7 +136,8 @@ fn load(source: &str) -> Result<(Instance, String), Vec<String>> {
         return Err(errs);
     }
     // Entry id `main` matches the matcher/drive runner (E§3.2) — the entry-relative module label.
-    let instance = Instance::load(resolved.module, Limits::default(), registry(), "main");
+    let mut instance = Instance::load(resolved.module, Limits::default(), registry(), "main");
+    crate::apply_gc_stress(&mut instance);
     Ok((instance, nfc))
 }
 

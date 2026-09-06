@@ -42,6 +42,25 @@ struct Fixture {
     modules_dir: Option<PathBuf>,
 }
 
+/// The `DOODLE_GC_STRESS` certification hook (M7.6, D-M7-11): set to any non-empty value to make
+/// every instance the runner drives collect at every safe point, so the whole corpus is checked
+/// for GC-timing determinism against the **same** committed oracle (E§11). A pure host-side test
+/// hook — the engine never reads it (see `doodle_core::machine::Instance::enable_gc_stress`).
+pub(crate) fn gc_stress_requested() -> bool {
+    std::env::var_os("DOODLE_GC_STRESS").is_some_and(|v| !v.is_empty())
+}
+
+/// Latches GC-stress on a freshly-loaded instance when the env hook asks for it — called right
+/// after every `Instance::load`, before the first drive (the latch is pre-drive-only, so a
+/// freshly-loaded instance always accepts it).
+pub(crate) fn apply_gc_stress(instance: &mut doodle_core::machine::Instance) {
+    if gc_stress_requested() {
+        instance
+            .enable_gc_stress()
+            .expect("GC-stress latched on a freshly loaded instance (pre-first-drive)");
+    }
+}
+
 /// Runs the suite rooted at `root`, printing the report. Returns the number of failed tests
 /// (0 = green), or an `Err` for a runner-level failure (a missing/unreadable suite root).
 pub fn run(root: &Path) -> Result<usize, String> {
@@ -191,6 +210,16 @@ pub fn run_c_host(root: &Path, c_host: &Path) -> Result<usize, String> {
 /// default [`run`] drift-checks against it (the M1.12 lang-corpus-sync house pattern). Static
 /// fixtures have no transcript. Returns the number of sidecars written, or a runner-level `Err`.
 pub fn write(root: &Path) -> Result<usize, String> {
+    // The committed oracle must be the un-stressed canonical trace: regenerating it while the
+    // GC-stress hook is on would bake GC-timing artifacts into the very file the stress run checks
+    // against. Refuse rather than silently corrupt it.
+    if gc_stress_requested() {
+        return Err(
+            "refusing to regenerate the transcript oracle while DOODLE_GC_STRESS is set — \
+             the oracle is the canonical un-stressed trace (unset the variable to write)"
+                .to_string(),
+        );
+    }
     let fixtures = discover(root)?;
     let mut written = 0usize;
     for fixture in &fixtures {

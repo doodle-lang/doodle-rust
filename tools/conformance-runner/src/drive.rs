@@ -48,6 +48,7 @@ pub(crate) fn run_drive(
     // The entry id is `main` — the id a drive fixture's `break:` defaults to (drivescript.rs), so
     // its breakpoints bind to this module (E§3.2).
     let mut instance = Instance::load(resolved.module, Limits::default(), registry(), "main");
+    crate::apply_gc_stress(&mut instance);
     apply_setup(&mut instance, script);
 
     let mut reasons = Vec::new();

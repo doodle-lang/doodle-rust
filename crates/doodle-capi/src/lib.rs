@@ -49,6 +49,17 @@
 //! wrong-but-live value from that instance (or a boundary error), never undefined behavior. The
 //! Rust-side memory safety of the boundary (AD1) holds in every build; only the *diagnosis* of a
 //! cross-instance mixup is debug-only.
+//!
+//! # Certification hooks (NOT part of the ABI)
+//!
+//! For determinism certification (D-M7-11), `doodle_load` honors one environment variable:
+//! **`DOODLE_GC_STRESS`**: when set to any non-empty value, every instance it creates collects at
+//! **every** safe point, so a test harness can drive a corpus under maximal GC pressure and confirm
+//! the trace is byte-identical to an un-stressed run (GC timing is unobservable, E§11). This is a
+//! **test/CI hook, deliberately not a `doodle.h` symbol**: it is read once, in this host layer, and
+//! latched before the first drive (the engine never reads the environment, so the E§11 determinism
+//! boundary stays exact). Production embedders can ignore it; leaving it unset is the default and
+//! has zero effect.
 
 use std::ffi::{CString, c_char};
 use std::sync::OnceLock;

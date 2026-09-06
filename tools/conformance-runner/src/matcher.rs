@@ -82,6 +82,7 @@ fn run_dynamic(test: &Test, source: &str, modules_dir: Option<&Path>) -> Result<
     // The entry id `main` matches the drive runner (E§3.2); it does not appear in program output,
     // so a `run` fixture's transcript is unaffected by it.
     let mut instance = Instance::load(resolved.module, Limits::default(), registry(), "main");
+    crate::apply_gc_stress(&mut instance);
     let outcome = match drive_to_terminal(&mut instance, modules_dir, &test.inputs) {
         Ok(outcome) => outcome,
         Err(reason) => return Err(vec![reason]),

@@ -146,3 +146,19 @@ jobs:
         run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
       - name: ASAN/LSAN/UBSan over the C hosts
         run: ./scripts/capi-sanitize.sh
+
+  # The GC-stress determinism gate (D-M7-11): drives the whole conformance corpus under maximal GC
+  # pressure (the DOODLE_GC_STRESS host hook -> collect at every safe point) on the native AND C
+  # surfaces, comparing each trace to the same committed un-stressed oracle.  GC timing is
+  # unobservable (E§11), so a divergence is a determinism leak.  The C surface additionally
+  # exercises host-held handles as roots and foreign finalizers firing at GC time across the C
+  # trampoline.  Linux-only per D-M7-9 (the C-embedding scope); `cc` is on the ubuntu runner.
+  gc-stress-conformance:
+    name: gc-stress conformance (native + C)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Warm toolchain
+        run: rustup toolchain install
+      - name: GC-stress determinism over the corpus
+        run: ./scripts/gc-stress-conformance.sh
