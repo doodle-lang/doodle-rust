@@ -35,11 +35,11 @@ pub struct DoodleControl {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_control(instance: *const DoodleInstance) -> *mut DoodleControl {
     match di_ref(instance) {
-        Some(di) => Box::into_raw(Box::new(DoodleControl {
+        Ok(di) => Box::into_raw(Box::new(DoodleControl {
             cancel: di.inner.cancel_token(),
             pause: di.inner.pause_token(),
         })),
-        None => ptr::null_mut(),
+        Err(_) => ptr::null_mut(),
     }
 }
 

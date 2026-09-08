@@ -9,21 +9,28 @@
 //! releases. Distinct from the `DoodleCallCtx` `doodle_call_*` readers (those are M7.2b, on a
 //! foreign-callback ctx); these are on `*DoodleInstance`.
 
-use crate::abi::{
-    self, DoodleAuxOutcome, DoodleAuxOutcomeKind, DoodleHandle, DoodlePosition, DoodleStatus,
-};
+use crate::abi::{self, DoodleHandle, DoodlePosition, DoodleStatus};
 use crate::guard::catch;
 use crate::instance::{DoodleInstance, di_mut, di_ref};
 use crate::value::{copy_out, write_out};
-use doodle_core::machine::{AuxOutcome, Handle, Instance, ValueError};
+use doodle_core::machine::{Handle, Instance, ValueError};
 
-/// The engine [`Instance`] behind a `DoodleInstance` (shared), or `None` if NULL.
-fn inst_ref<'a>(instance: *const DoodleInstance) -> Option<&'a Instance> {
+/// Auxiliary evaluation (`doodle_eval_to_string`), split out for length; re-exported so it stays
+/// `crate::inspect::doodle_eval_to_string`.
+mod aux;
+pub use aux::doodle_eval_to_string;
+
+/// The engine [`Instance`] behind a `DoodleInstance` (shared); `ErrNullPointer` for NULL,
+/// `ErrContract` on a reentrant call from inside a drive (see [`di_ref`]).
+fn inst_ref<'a>(instance: *const DoodleInstance) -> Result<&'a Instance, DoodleStatus> {
     di_ref(instance).map(|di| &di.inner)
 }
 
-/// The engine [`Instance`] behind a `DoodleInstance` (mutable, for the minting readers).
-fn inst_mut<'a>(instance: *mut DoodleInstance) -> Option<&'a mut Instance> {
+/// The engine [`Instance`] behind a `DoodleInstance` (mutable, for the minting readers); errors as
+/// [`inst_ref`].
+pub(super) fn inst_mut<'a>(
+    instance: *mut DoodleInstance,
+) -> Result<&'a mut Instance, DoodleStatus> {
     di_mut(instance).map(|di| &mut di.inner)
 }
 
@@ -34,8 +41,9 @@ fn count(
     out_count: *mut u32,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = inst_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match reader(inst) {
             Ok(n) if write_out(out_count, u32::try_from(n).unwrap_or(u32::MAX)) => DoodleStatus::Ok,
@@ -59,8 +67,9 @@ fn minted(
         if out_handle.is_null() {
             return DoodleStatus::ErrNullPointer;
         }
-        let Some(inst) = inst_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_mut(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match reader(inst) {
             Ok(handle) if write_out(out_handle, handle.bits()) => DoodleStatus::Ok,
@@ -85,11 +94,11 @@ pub unsafe extern "C" fn doodle_record_type_name(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| match inst_ref(instance) {
-        Some(inst) => match inst.record_type_name(Handle::from_bits(handle)) {
+        Ok(inst) => match inst.record_type_name(Handle::from_bits(handle)) {
             Ok(name) => copy_out(name.as_bytes(), buf, cap, out_len),
             Err(err) => abi::value_error(err),
         },
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -125,11 +134,11 @@ pub unsafe extern "C" fn doodle_record_field_name(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| match inst_ref(instance) {
-        Some(inst) => match inst.record_field_name(Handle::from_bits(handle), index as usize) {
+        Ok(inst) => match inst.record_field_name(Handle::from_bits(handle), index as usize) {
             Ok(name) => copy_out(name.as_bytes(), buf, cap, out_len),
             Err(err) => abi::value_error(err),
         },
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -265,8 +274,9 @@ pub unsafe extern "C" fn doodle_callable_name(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = inst_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.callable_name(Handle::from_bits(handle)) {
             Ok(Some(name)) => {
@@ -300,8 +310,9 @@ pub unsafe extern "C" fn doodle_callable_is_function(
     out_is_function: *mut bool,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = inst_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.callable_is_function(Handle::from_bits(handle)) {
             Ok(opt) => {
@@ -359,8 +370,9 @@ fn optional_position(
     reader: impl FnOnce(&Instance) -> Result<Option<doodle_core::machine::Position>, ValueError>,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = inst_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match reader(inst) {
             Ok(Some(pos)) => {
@@ -395,11 +407,11 @@ pub unsafe extern "C" fn doodle_type_name(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| match inst_ref(instance) {
-        Some(inst) => match inst.type_name(Handle::from_bits(handle)) {
+        Ok(inst) => match inst.type_name(Handle::from_bits(handle)) {
             Ok(name) => copy_out(name.as_bytes(), buf, cap, out_len),
             Err(err) => abi::value_error(err),
         },
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -438,8 +450,9 @@ pub unsafe extern "C" fn doodle_module_member_name(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = inst_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match inst_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.module_member_names(Handle::from_bits(handle)) {
             Ok(members) => match members.get(index as usize) {
@@ -447,60 +460,6 @@ pub unsafe extern "C" fn doodle_module_member_name(
                 None => DoodleStatus::ErrIndexOutOfBounds,
             },
             Err(err) => abi::value_error(err),
-        }
-    })
-}
-
-// ---- auxiliary evaluation -------------------------------------------------------------------
-
-/// Renders `handle`'s value to its `to_string` (E§8.4) with its **own** `fuel` budget, writing
-/// the result to `out_outcome` — **without disturbing the instance's pause** (S-22). It runs
-/// Doodle code, so it may render, raise, or fault (see [`DoodleAuxOutcome`]); breakpoints and the
-/// raise-trap are suppressed, and the pause generation is **not** bumped (frame addressing stays
-/// valid across it). `Rendered`/`Raised` carry host-owned handles the host releases.
-///
-/// # Safety
-/// `instance` live; `out_outcome` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn doodle_eval_to_string(
-    instance: *mut DoodleInstance,
-    handle: DoodleHandle,
-    fuel: u64,
-    out_outcome: *mut DoodleAuxOutcome,
-) -> DoodleStatus {
-    catch(|| {
-        // Validate the out-param before the (effectful, handle-minting) eval, so a NULL out never
-        // orphans the Rendered/Raised handle.
-        if out_outcome.is_null() {
-            return DoodleStatus::ErrNullPointer;
-        }
-        let Some(inst) = inst_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
-        };
-        let outcome = match inst.eval_to_string(Handle::from_bits(handle), fuel) {
-            AuxOutcome::Rendered(h) => DoodleAuxOutcome {
-                kind: DoodleAuxOutcomeKind::Rendered,
-                value: h.bits(),
-                fault: abi::fault(doodle_core::drive::EngineFault::Internal),
-                reserved: [0; 2],
-            },
-            AuxOutcome::Raised(h) => DoodleAuxOutcome {
-                kind: DoodleAuxOutcomeKind::Raised,
-                value: h.bits(),
-                fault: abi::fault(doodle_core::drive::EngineFault::Internal),
-                reserved: [0; 2],
-            },
-            AuxOutcome::Faulted(f) => DoodleAuxOutcome {
-                kind: DoodleAuxOutcomeKind::Faulted,
-                value: crate::abi::DOODLE_NULL_HANDLE,
-                fault: abi::fault(f),
-                reserved: [0; 2],
-            },
-        };
-        if write_out(out_outcome, outcome) {
-            DoodleStatus::Ok
-        } else {
-            DoodleStatus::ErrNullPointer
         }
     })
 }

@@ -96,7 +96,7 @@ pub unsafe extern "C" fn doodle_drive_slice(
 /// another thread (use `doodle_control` for that).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_cancel(instance: *const DoodleInstance) {
-    if let Some(di) = di_ref(instance) {
+    if let Ok(di) = di_ref(instance) {
         di.inner.cancel_token().cancel();
     }
 }
@@ -115,8 +115,9 @@ pub unsafe extern "C" fn doodle_capability_arg(
     out_handle: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         match &di.pending_args {
             Some(args) => match args.get(index as usize) {
@@ -218,27 +219,68 @@ pub unsafe extern "C" fn doodle_output(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => copy_out(di.inner.output(), buf, cap, out_len),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => copy_out(di.inner.output(), buf, cap, out_len),
+        Err(status) => status,
     })
 }
 
 // --- internals ---
 
-/// Borrows the `DoodleInstance` behind a raw pointer, or `None` if NULL — the one documented
-/// mutable deref the drive/handle entry points share (also the observation surface,
-/// [`crate::observe`]).
-pub(crate) fn di_mut<'a>(instance: *mut DoodleInstance) -> Option<&'a mut DoodleInstance> {
-    // SAFETY: `as_mut` returns None for NULL; a non-null `instance` is a live `DoodleInstance`
-    // from `doodle_load` (not freed) by the caller's `# Safety` contract, and the host drives
-    // one instance from one thread at a time (`!Sync`), so a `&mut` for `'a` is sound.
-    unsafe { instance.as_mut() }
+thread_local! {
+    /// True while a drive/resolve holds `&mut Instance` on this thread (set by [`DriveScope`]
+    /// around the engine `run`/`resolve`). A foreign callback — or a finalizer fired at GC —
+    /// runs *inside* that borrow; if it re-enters through any instance-pointer entry, forming a
+    /// second `&mut`/`&Instance` would alias the live `&mut` (instantaneous UB). The accessors
+    /// below check this and refuse (`ErrContract`) rather than form the aliasing reference. It is
+    /// drive-scoped, **not** ctx-scoped (`CURRENT_CTX` is null during a finalizer), and the C ABI
+    /// is single-threaded per instance (`!Sync`), so a thread-local is the whole story.
+    static IN_DRIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Borrows the `DoodleInstance` behind a raw pointer for a shared read, or `None` if NULL.
-pub(crate) fn di_ref<'a>(instance: *const DoodleInstance) -> Option<&'a DoodleInstance> {
+/// RAII marker for "a drive/resolve is in progress on this thread"; set around the engine
+/// `run`/`resolve` (the window in which a callback can re-enter). Restores the previous value on
+/// drop, so it is panic-safe and robust to any nesting.
+struct DriveScope(bool);
+
+impl DriveScope {
+    fn enter() -> Self {
+        DriveScope(IN_DRIVE.replace(true))
+    }
+}
+
+impl Drop for DriveScope {
+    fn drop(&mut self) {
+        IN_DRIVE.set(self.0);
+    }
+}
+
+/// Borrows the `DoodleInstance` behind a raw pointer — the one documented mutable deref the
+/// drive/handle entry points share (also the observation surface, [`crate::observe`]). Returns
+/// `ErrNullPointer` for NULL, or `ErrContract` if a drive is already in progress on this thread
+/// (a reentrant instance-pointer call from inside a foreign callback/finalizer; see [`IN_DRIVE`]).
+pub(crate) fn di_mut<'a>(
+    instance: *mut DoodleInstance,
+) -> Result<&'a mut DoodleInstance, DoodleStatus> {
+    if IN_DRIVE.get() {
+        return Err(DoodleStatus::ErrContract);
+    }
+    // SAFETY: `as_mut` returns None for NULL; a non-null `instance` is a live `DoodleInstance`
+    // from `doodle_load` (not freed) by the caller's `# Safety` contract; the host drives one
+    // instance from one thread at a time (`!Sync`); and the `IN_DRIVE` guard above rules out a
+    // reentrant alias of a drive's live `&mut Instance`, so a `&mut` for `'a` is sound.
+    unsafe { instance.as_mut() }.ok_or(DoodleStatus::ErrNullPointer)
+}
+
+/// Borrows the `DoodleInstance` behind a raw pointer for a shared read; `ErrNullPointer` for NULL,
+/// `ErrContract` on a reentrant call (see [`di_mut`]).
+pub(crate) fn di_ref<'a>(
+    instance: *const DoodleInstance,
+) -> Result<&'a DoodleInstance, DoodleStatus> {
+    if IN_DRIVE.get() {
+        return Err(DoodleStatus::ErrContract);
+    }
     // SAFETY: as `di_mut`, for a shared borrow.
-    unsafe { instance.as_ref() }
+    unsafe { instance.as_ref() }.ok_or(DoodleStatus::ErrNullPointer)
 }
 
 /// Shared body of `doodle_drive`/`doodle_drive_slice`: run the drive, fill the out-outcome.
@@ -247,13 +289,19 @@ fn drive_and_fill(
     out_outcome: *mut DoodleOutcome,
     run: impl FnOnce(&mut Instance) -> Outcome,
 ) -> DoodleStatus {
-    let Some(di) = di_mut(instance) else {
-        return DoodleStatus::ErrNullPointer;
+    let di = match di_mut(instance) {
+        Ok(di) => di,
+        Err(status) => return status,
     };
     if out_outcome.is_null() {
         return DoodleStatus::ErrNullPointer;
     }
-    let outcome = run(&mut di.inner);
+    // Mark the drive in progress so a reentrant instance-pointer call from a foreign callback is
+    // refused (`ErrContract`) instead of aliasing this `&mut Instance`.
+    let outcome = {
+        let _drive = DriveScope::enter();
+        run(&mut di.inner)
+    };
     let filled = fill_outcome(di, outcome);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`
     // by the caller's `# Safety` contract.
@@ -268,8 +316,9 @@ fn resolve_and_fill(
     out_outcome: *mut DoodleOutcome,
     resolution: Resolution,
 ) -> DoodleStatus {
-    let Some(di) = di_mut(instance) else {
-        return DoodleStatus::ErrNullPointer;
+    let di = match di_mut(instance) {
+        Ok(di) => di,
+        Err(status) => return status,
     };
     if out_outcome.is_null() {
         return DoodleStatus::ErrNullPointer;
@@ -281,7 +330,10 @@ fn resolve_and_fill(
     if di.pending_args.is_none() {
         return DoodleStatus::ErrContract;
     }
-    let outcome = resolve(&mut di.inner, resolution);
+    let outcome = {
+        let _drive = DriveScope::enter();
+        resolve(&mut di.inner, resolution)
+    };
     let filled = fill_outcome(di, outcome);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`.
     unsafe { *out_outcome = filled };
@@ -354,10 +406,10 @@ fn describe_field(
     select: impl Fn(&(String, String)) -> &String,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => match &di.last_raised {
+        Ok(di) => match &di.last_raised {
             Some(pair) => copy_out(select(pair).as_bytes(), buf, cap, out_len),
             None => DoodleStatus::ErrContract,
         },
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }

@@ -27,8 +27,9 @@ pub unsafe extern "C" fn doodle_import_path_segment(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         match &di.pending_import {
             Some(path) => match path.get(index as usize) {
@@ -131,8 +132,9 @@ fn resolve_import_and_fill(
     out_outcome: *mut DoodleOutcome,
     resolution: ImportResolution,
 ) -> DoodleStatus {
-    let Some(di) = di_mut(instance) else {
-        return DoodleStatus::ErrNullPointer;
+    let di = match di_mut(instance) {
+        Ok(di) => di,
+        Err(status) => return status,
     };
     if out_outcome.is_null() {
         return DoodleStatus::ErrNullPointer;

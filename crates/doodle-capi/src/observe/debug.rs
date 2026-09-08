@@ -75,8 +75,9 @@ pub unsafe extern "C" fn doodle_set_breakpoint(
     out_id: *mut u32,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_mut(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let Some(canonical) = str_arg(canonical_id, canonical_len) else {
             return DoodleStatus::ErrInvalidUtf8;
@@ -100,11 +101,11 @@ pub unsafe extern "C" fn doodle_clear_breakpoint(
     id: u32,
 ) -> DoodleStatus {
     catch(|| match di_mut(instance) {
-        Some(di) => {
+        Ok(di) => {
             di.inner.clear_breakpoint(BreakpointId(id));
             DoodleStatus::Ok
         }
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -118,8 +119,8 @@ pub unsafe extern "C" fn doodle_breakpoint_count(
     out_count: *mut u32,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => write_count(di.inner.breakpoints().len(), out_count),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => write_count(di.inner.breakpoints().len(), out_count),
+        Err(status) => status,
     })
 }
 
@@ -136,8 +137,9 @@ pub unsafe extern "C" fn doodle_breakpoint_at(
     out_breakpoint: *mut DoodleBreakpoint,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let breakpoints = di.inner.breakpoints();
         match breakpoints.get(index as usize) {
@@ -173,8 +175,9 @@ pub unsafe extern "C" fn doodle_breakpoint_canonical_id(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let breakpoints = di.inner.breakpoints();
         match breakpoints.get(index as usize) {
@@ -197,11 +200,11 @@ pub unsafe extern "C" fn doodle_set_raise_trapping(
     enabled: bool,
 ) -> DoodleStatus {
     catch(|| match di_mut(instance) {
-        Some(di) => {
+        Ok(di) => {
             di.inner.set_raise_trapping(enabled);
             DoodleStatus::Ok
         }
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -215,9 +218,9 @@ pub unsafe extern "C" fn doodle_raise_trapping(
     out_enabled: *mut bool,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) if write_out(out_enabled, di.inner.raise_trapping()) => DoodleStatus::Ok,
-        Some(_) => DoodleStatus::ErrNullPointer,
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) if write_out(out_enabled, di.inner.raise_trapping()) => DoodleStatus::Ok,
+        Ok(_) => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -237,8 +240,8 @@ pub unsafe extern "C" fn doodle_trapped_raise(
             return DoodleStatus::ErrNullPointer;
         }
         match di_mut(instance) {
-            Some(di) => write_value(di.inner.trapped_raise(), out_handle),
-            None => DoodleStatus::ErrNullPointer,
+            Ok(di) => write_value(di.inner.trapped_raise(), out_handle),
+            Err(status) => status,
         }
     })
 }
@@ -255,10 +258,8 @@ pub unsafe extern "C" fn doodle_trapped_raise_position(
     out_has: *mut bool,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => {
-            write_optional_position(di.inner.trapped_raise_position(), out_position, out_has)
-        }
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => write_optional_position(di.inner.trapped_raise_position(), out_position, out_has),
+        Err(status) => status,
     })
 }
 
@@ -275,7 +276,7 @@ pub unsafe extern "C" fn doodle_trapped_raise_position(
 /// another thread (use `doodle_control` for that).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_pause(instance: *const DoodleInstance) {
-    if let Some(di) = di_ref(instance) {
+    if let Ok(di) = di_ref(instance) {
         di.inner.pause_token().pause();
     }
 }
@@ -291,11 +292,11 @@ pub unsafe extern "C" fn doodle_set_observation_mode(
     mode: DoodleObservationMode,
 ) -> DoodleStatus {
     catch(|| match di_mut(instance) {
-        Some(di) => {
+        Ok(di) => {
             di.inner.set_observation_mode(abi::observation_mode(mode));
             DoodleStatus::Ok
         }
-        None => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -309,7 +310,7 @@ pub unsafe extern "C" fn doodle_observation_mode(
     out_mode: *mut DoodleObservationMode,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di)
+        Ok(di)
             if write_out(
                 out_mode,
                 abi::observation_mode_of(di.inner.observation_mode()),
@@ -317,8 +318,8 @@ pub unsafe extern "C" fn doodle_observation_mode(
         {
             DoodleStatus::Ok
         }
-        Some(_) => DoodleStatus::ErrNullPointer,
-        None => DoodleStatus::ErrNullPointer,
+        Ok(_) => DoodleStatus::ErrNullPointer,
+        Err(status) => status,
     })
 }
 
@@ -393,8 +394,8 @@ pub unsafe extern "C" fn doodle_diagnostic_count(
     out_count: *mut u32,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => write_count(di.inner.load_diagnostics(since).len(), out_count),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => write_count(di.inner.load_diagnostics(since).len(), out_count),
+        Err(status) => status,
     })
 }
 
@@ -412,8 +413,9 @@ pub unsafe extern "C" fn doodle_diagnostic_at(
     out_diagnostic: *mut DoodleDiagnostic,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let diagnostics = di.inner.load_diagnostics(since);
         match diagnostics.get(index as usize) {
@@ -455,8 +457,9 @@ pub unsafe extern "C" fn doodle_diagnostic_message(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let diagnostics = di.inner.load_diagnostics(since);
         match diagnostics.get(index as usize) {

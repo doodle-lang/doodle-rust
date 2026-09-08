@@ -692,6 +692,24 @@ extern "C" fn boom_cb(ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStat
     unsafe { doodle_call_set_raise(ctx, handle) } // consumes `handle`
 }
 
+// R2 regression: a foreign callback that reaches back through the *instance pointer* (rather than
+// the ctx) must be refused with `ErrContract`, never form a second `&mut Instance` (UB). Only this
+// test writes these statics, so there is no cross-test race.
+static REENTER_INST: AtomicPtr<DoodleInstance> = AtomicPtr::new(ptr::null_mut());
+static REENTER_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// A host `to reenter()`: while the drive holds `&mut Instance`, it tries an instance-pointer call
+/// (`doodle_output`) — which would alias that borrow. The drive-scoped guard must turn it into a
+/// defined `ErrContract` instead. Records the status and returns Ok so the drive completes.
+extern "C" fn reenter_cb(_ctx: *mut DoodleCallCtx, _user: *mut c_void) -> DoodleStatus {
+    let inst = REENTER_INST.load(Relaxed);
+    let mut buf = [0u8; 8];
+    let mut len = 0usize;
+    let status = unsafe { doodle_output(inst, buf.as_mut_ptr(), buf.len(), &mut len) };
+    REENTER_STATUS.store(status as u32, Relaxed);
+    DoodleStatus::Ok
+}
+
 /// Registers `print` + a foreign function (named `name` of `kind`, its parameters built by
 /// `build`, its body `callback`), loads and drives `source`, asserts it completed, and returns
 /// the captured output.
@@ -772,6 +790,55 @@ fn a_host_foreign_to_with_default_and_block_binds_and_invokes_through_c() {
         greet_cb,
     );
     assert_eq!(out, b"world\nmoon\n");
+}
+
+#[test]
+fn a_reentrant_instance_pointer_call_from_a_callback_is_a_contract_error_not_ub() {
+    // During a foreign callback the engine holds `&mut Instance`; an instance-pointer entry called
+    // from inside the callback would form a second, aliasing reference (UB). The drive-scoped guard
+    // must turn it into a defined `ErrContract`. (Under Miri this is also the no-aliasing proof.)
+    REENTER_STATUS.store(u32::MAX, Relaxed);
+    let registry = doodle_registry_new();
+    let name = b"reenter";
+    let desc = unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), DoodleBodyKind::Proc) };
+    assert!(!desc.is_null());
+    assert_eq!(
+        unsafe { doodle_foreign_desc_set_callback(desc, reenter_cb, ptr::null_mut()) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        unsafe { doodle_registry_add_foreign(registry, desc) },
+        DoodleStatus::Ok
+    );
+
+    let source = "reenter()\n";
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            doodle_load_with_registry(
+                source.as_ptr(),
+                source.len(),
+                ptr::null(),
+                registry,
+                &mut inst,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        DoodleStatus::Ok
+    );
+    // Publish the instance so the callback can *try* to use it mid-drive.
+    REENTER_INST.store(inst, Relaxed);
+    let outcome = drive(inst);
+    assert_eq!(outcome.kind, DoodleOutcomeKind::Completed, "{outcome:?}");
+    assert_eq!(
+        REENTER_STATUS.load(Relaxed),
+        DoodleStatus::ErrContract as u32,
+        "a reentrant instance-pointer call must be a defined ErrContract, not UB"
+    );
+    REENTER_INST.store(ptr::null_mut(), Relaxed);
+    unsafe { doodle_free(inst) };
 }
 
 #[test]

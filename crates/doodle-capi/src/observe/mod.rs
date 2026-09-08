@@ -30,9 +30,7 @@ pub(super) fn checked_ref<'a>(
     instance: *const DoodleInstance,
     generation: u32,
 ) -> Result<&'a DoodleInstance, DoodleStatus> {
-    let Some(di) = di_ref(instance) else {
-        return Err(DoodleStatus::ErrNullPointer);
-    };
+    let di = di_ref(instance)?;
     if generation != di.generation {
         return Err(DoodleStatus::ErrStale);
     }
@@ -45,9 +43,7 @@ pub(super) fn checked_mut<'a>(
     instance: *mut DoodleInstance,
     generation: u32,
 ) -> Result<&'a mut DoodleInstance, DoodleStatus> {
-    let Some(di) = di_mut(instance) else {
-        return Err(DoodleStatus::ErrNullPointer);
-    };
+    let di = di_mut(instance)?;
     if generation != di.generation {
         return Err(DoodleStatus::ErrStale);
     }
@@ -112,8 +108,8 @@ pub unsafe extern "C" fn doodle_current_position(
     out_has: *mut bool,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => write_position(di.inner.current_position(), out_position, out_has),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => write_position(di.inner.current_position(), out_position, out_has),
+        Err(status) => status,
     })
 }
 
@@ -130,8 +126,8 @@ pub unsafe extern "C" fn doodle_completed_position(
     out_has: *mut bool,
 ) -> DoodleStatus {
     catch(|| match di_ref(instance) {
-        Some(di) => write_position(di.inner.completed_position(), out_position, out_has),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(di) => write_position(di.inner.completed_position(), out_position, out_has),
+        Err(status) => status,
     })
 }
 
@@ -151,8 +147,9 @@ pub unsafe extern "C" fn doodle_current_result(
         if out_handle.is_null() {
             return DoodleStatus::ErrNullPointer;
         }
-        let Some(di) = di_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_mut(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let bits = di
             .inner
@@ -179,8 +176,9 @@ pub unsafe extern "C" fn doodle_stack_frame_count(
     out_generation: *mut u32,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         let count = u32::try_from(di.inner.frame_count()).unwrap_or(u32::MAX);
         if write_out(out_count, count) && write_out(out_generation, di.generation) {
@@ -206,8 +204,9 @@ pub unsafe extern "C" fn doodle_frame_at(
     out_frame: *mut DoodleFrame,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         if generation != di.generation {
             return DoodleStatus::ErrStale;
@@ -261,8 +260,9 @@ pub unsafe extern "C" fn doodle_frame_callable(
         if out_handle.is_null() {
             return DoodleStatus::ErrNullPointer;
         }
-        let Some(di) = di_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_mut(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         if generation != di.generation {
             return DoodleStatus::ErrStale;
@@ -298,8 +298,9 @@ pub unsafe extern "C" fn doodle_module_canonical_id(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(di) = di_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let di = match di_ref(instance) {
+            Ok(di) => di,
+            Err(status) => return status,
         };
         match di.inner.module_canonical_id(ModuleId(token)) {
             Some(canonical) => copy_out(canonical.as_bytes(), buf, cap, out_len),

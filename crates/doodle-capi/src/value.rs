@@ -7,7 +7,7 @@
 
 use crate::abi::{self, DoodleFinalizer, DoodleHandle, DoodleKind, DoodleStatus};
 use crate::guard::catch;
-use crate::instance::DoodleInstance;
+use crate::instance::{DoodleInstance, di_mut, di_ref};
 use doodle_core::machine::{Finalizer, Handle, Instance, ValueError};
 
 /// Copies `bytes` into the caller buffer `buf` of capacity `cap`, writing the full byte
@@ -40,15 +40,14 @@ pub(crate) fn copy_out(
 }
 
 /// Borrows the engine instance behind a raw `DoodleInstance` pointer, or `None` if NULL.
-fn instance_mut<'a>(p: *mut DoodleInstance) -> Option<&'a mut Instance> {
-    // SAFETY: `as_mut` returns None for NULL; a non-null `p` is a live `DoodleInstance` from
-    // `doodle_load` (not freed) by the caller's `# Safety` contract, so a `&mut` for `'a` is
-    // sound (the host does not drive one instance from two threads at once — `!Sync`).
-    unsafe { p.as_mut() }.map(|di| &mut di.inner)
+fn instance_mut<'a>(p: *mut DoodleInstance) -> Result<&'a mut Instance, DoodleStatus> {
+    // Route through `di_mut` so the reentrancy guard (no instance-pointer re-entry from inside a
+    // drive — [`crate::instance`]) and the NULL check both apply: `ErrContract` if a drive is in
+    // progress on this thread, `ErrNullPointer` for a NULL pointer.
+    di_mut(p).map(|di| &mut di.inner)
 }
-fn instance_ref<'a>(p: *const DoodleInstance) -> Option<&'a Instance> {
-    // SAFETY: as `instance_mut`, for a shared borrow.
-    unsafe { p.as_ref() }.map(|di| &di.inner)
+fn instance_ref<'a>(p: *const DoodleInstance) -> Result<&'a Instance, DoodleStatus> {
+    di_ref(p).map(|di| &di.inner)
 }
 
 /// Writes `value` through the out-pointer `out`, returning false if `out` is NULL. The one
@@ -85,8 +84,8 @@ pub unsafe extern "C" fn doodle_make_int(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Some(inst) => emit(inst.make_int(value), out),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(inst) => emit(inst.make_int(value), out),
+        Err(status) => status,
     })
 }
 
@@ -103,8 +102,9 @@ pub unsafe extern "C" fn doodle_make_int_decimal(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_mut(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         if decimal.is_null() {
             return DoodleStatus::ErrNullPointer;
@@ -133,8 +133,8 @@ pub unsafe extern "C" fn doodle_make_float(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Some(inst) => emit(inst.make_float(value), out),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(inst) => emit(inst.make_float(value), out),
+        Err(status) => status,
     })
 }
 
@@ -149,8 +149,8 @@ pub unsafe extern "C" fn doodle_make_bool(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Some(inst) => emit(inst.make_bool(value), out),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(inst) => emit(inst.make_bool(value), out),
+        Err(status) => status,
     })
 }
 
@@ -164,8 +164,8 @@ pub unsafe extern "C" fn doodle_make_nil(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Some(inst) => emit(inst.make_nil(), out),
-        None => DoodleStatus::ErrNullPointer,
+        Ok(inst) => emit(inst.make_nil(), out),
+        Err(status) => status,
     })
 }
 
@@ -182,8 +182,9 @@ pub unsafe extern "C" fn doodle_make_string(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_mut(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         if bytes.is_null() && bytes_len != 0 {
             return DoodleStatus::ErrNullPointer;
@@ -220,8 +221,9 @@ pub unsafe extern "C" fn doodle_make_foreign(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_mut(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         // Trampoline the C finalizer into the engine's `Finalizer` (captures only the fn
         // pointer + is handed the `ptr`, so it is `Send` and cannot reach the instance).
@@ -339,8 +341,9 @@ pub unsafe extern "C" fn doodle_kind_of(
     out: *mut DoodleKind,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.kind_of(Handle::from_bits(handle)) {
             Ok(k) if write_out(out, abi::kind(k)) => DoodleStatus::Ok,
@@ -364,8 +367,9 @@ pub unsafe extern "C" fn doodle_as_int_decimal(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.as_int_decimal(Handle::from_bits(handle)) {
             Ok(text) => copy_out(text.as_bytes(), buf, cap, out_len),
@@ -388,8 +392,9 @@ pub unsafe extern "C" fn doodle_string_bytes(
     out_len: *mut usize,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.string_bytes(Handle::from_bits(handle)) {
             Ok(bytes) => copy_out(bytes, buf, cap, out_len),
@@ -410,8 +415,9 @@ pub unsafe extern "C" fn doodle_release(
     handle: DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_mut(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_mut(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match inst.release(Handle::from_bits(handle)) {
             Ok(()) => DoodleStatus::Ok,
@@ -428,8 +434,9 @@ fn read<T: Copy>(
     out: *mut T,
 ) -> DoodleStatus {
     catch(|| {
-        let Some(inst) = instance_ref(instance) else {
-            return DoodleStatus::ErrNullPointer;
+        let inst = match instance_ref(instance) {
+            Ok(inst) => inst,
+            Err(status) => return status,
         };
         match reader(inst) {
             Ok(value) if write_out(out, value) => DoodleStatus::Ok,
