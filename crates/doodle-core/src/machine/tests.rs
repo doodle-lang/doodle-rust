@@ -17,6 +17,7 @@ impl Machine {
         Machine {
             frames: Vec::new(),
             reg: None,
+            raised_value: None,
             frame_serial: 0,
             unwind: None,
             ring: ring::RingBuffer::new(),
@@ -2385,6 +2386,31 @@ fn enable_gc_stress_is_latch_once_and_pre_first_drive_only() {
         Err(GcStressRefused),
         "pre-first-drive only: refused after the instance has been driven"
     );
+}
+
+/// A terminal uncaught raise (E§3.3/§9) retains its exception value for post-mortem inspection
+/// (§4.2/§8.4): `raised_value_handle` mints a host handle to it, and the value survives a
+/// collection (it is a GC root while the instance holds the `Raised` state). A heap value (string)
+/// exercises the rooting — an inline int would not be swept regardless.
+#[test]
+fn a_terminal_raise_retains_its_exception_for_post_mortem_inspection() {
+    let mut inst = load_source("raise \"boom\"\n");
+    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion);
+    assert!(
+        matches!(outcome, crate::drive::Outcome::Raised(..)),
+        "expected a terminal raise, got {outcome:?}"
+    );
+    // A collection before we mint the handle: only `machine.raised_value` roots the string here, so
+    // this fails (stale read) if that field is not in the GC root set.
+    inst.force_collect();
+    let handle = inst
+        .raised_value_handle()
+        .expect("a terminal raise retains its exception value");
+    assert_eq!(inst.string_bytes(handle).unwrap(), b"boom");
+    // Not a Raised state → no retained value.
+    let mut clean = load_source("1 + 1\n");
+    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion);
+    assert!(clean.raised_value_handle().is_none());
 }
 
 /// The determinism gate extends to the resource-limit faults: a program stopped by a

@@ -168,6 +168,16 @@ impl Instance {
         Some(self.intern(value))
     }
 
+    /// A fresh **host-owned** handle to the retained exception of a terminal uncaught raise
+    /// (E§3.3/§9), or `None` if the last drive did not end `Raised`. The value is the raised
+    /// exception as a `rescue e` would bind it — an `Error` record (inspect its `kind`/`message`/
+    /// `details` structurally, §8.4) or any other host/program value (E§9). Mints a handle like
+    /// [`result_handle`](Self::result_handle); the host [`release`](Instance::release)s it.
+    pub fn raised_value_handle(&mut self) -> Option<Handle> {
+        let value = self.machine.raised_value?;
+        Some(self.intern(value))
+    }
+
     /// The current call stack (E§8.2), innermost frame first: each frame's callable (a
     /// fresh host-owned handle), its call-site position, and its tail-iteration count.
     /// Mints one handle per callable frame — like [`list_get`](Instance::list_get), the

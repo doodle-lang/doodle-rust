@@ -154,6 +154,11 @@ pub(crate) struct Machine {
     frames: Vec<Frame>,
     /// The result register (L§6.11): `None` = Void.
     reg: Option<Value>,
+    /// The exception value of a terminal uncaught raise (E§3.3/§9), retained after the
+    /// drive returns `Raised` so the host can inspect it post-mortem (§4.2/§8.4). `None`
+    /// until a raise reaches the outermost boundary. A GC root (like
+    /// [`reg`](Machine::reg)); the terminal state pins it for the instance's life.
+    raised_value: Option<Value>,
     /// Monotonic frame-identity counter (machine-design §8): stamped into each
     /// pushed frame's `serial`, so a frame activation is distinguishable from a
     /// later reuse of the same stack slot (integrity for static links / consumers).

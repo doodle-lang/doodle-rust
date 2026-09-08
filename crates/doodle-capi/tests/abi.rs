@@ -192,6 +192,37 @@ fn an_uncaught_raise_surfaces_with_its_described_kind() {
 }
 
 #[test]
+fn a_terminal_raise_exposes_the_exception_value_for_structural_inspection() {
+    // R6: after an uncaught raise, DoodleOutcome.value is a host-owned handle to the exception
+    // value (E§3.3/§8.4): the same value `rescue e` binds, for structural inspection alongside
+    // the described kind/message. Here the raised value is a string; in general it's an Error
+    // record whose `details` dict the host reads by handle.
+    let inst = load("raise \"boom\"\n");
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Raised);
+    assert_ne!(
+        out.value, DOODLE_NULL_HANDLE,
+        "the exception handle is populated"
+    );
+    let mut kind = DoodleKind::Nil;
+    assert_eq!(
+        unsafe { doodle_kind_of(inst, out.value, &mut kind) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(kind, DoodleKind::String);
+    let mut buf = [0u8; 8];
+    let mut len = 0usize;
+    assert_eq!(
+        unsafe { doodle_string_bytes(inst, out.value, buf.as_mut_ptr(), buf.len(), &mut len) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(&buf[..len], b"boom");
+    // The handle is host-owned — release it.
+    assert_eq!(unsafe { doodle_release(inst, out.value) }, DoodleStatus::Ok);
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
 fn a_tiny_step_budget_faults_step_budget() {
     let config = doodle_config_new();
     // A tiny step budget trips at a safe point inside the loop.

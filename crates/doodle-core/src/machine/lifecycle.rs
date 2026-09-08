@@ -39,6 +39,12 @@ impl Instance {
         Ok(())
     }
 
+    /// Retains the exception of a terminal uncaught raise for post-mortem inspection (E§3.3); set
+    /// by the drive loop when a raise reaches the outermost boundary. A GC root (`gc::collect`).
+    pub(crate) fn set_raised_value(&mut self, value: Value) {
+        self.machine.raised_value = Some(value);
+    }
+
     /// Whether the instance has parked a suspension — a capability request or an import
     /// (E§7.5/§6). The drive loop checks this after each step to return `Suspended`/
     /// `SuspendedImport`.

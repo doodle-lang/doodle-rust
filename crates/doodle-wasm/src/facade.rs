@@ -260,6 +260,14 @@ impl Session {
         self.instance.output()
     }
 
+    /// A fresh **host-owned** handle to the retained exception of a terminal uncaught raise
+    /// (E§3.3/§9), or `None` if the last drive did not end `Raised`. Complements the described
+    /// `kind`/`message` on [`DriveOutcome::Raised`] with the value itself, for structural
+    /// inspection (§8.4). The host releases it.
+    pub fn raised_value(&mut self) -> Option<Handle> {
+        self.instance.raised_value_handle()
+    }
+
     /// The currently-executing byte span in the module source (E§8.1), or `None` at a
     /// boundary. The span indexes the full module (prelude + program); subtract
     /// [`prelude_bytes`](Self::prelude_bytes) for a program-relative offset.

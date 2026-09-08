@@ -228,6 +228,14 @@ impl DoodleInstance {
             .release(Handle::from_bits(handle))
             .map_err(|e| JsError::new(&format!("{e:?}")))
     }
+
+    /// A host-owned handle to the retained exception of a terminal uncaught raise (E§3.3/§9), or
+    /// `undefined` if the last drive did not end `raised`. The same value `rescue e` binds —
+    /// inspect its `Error` `kind`/`message`/`details` structurally (§8.4). Release it when done.
+    #[wasm_bindgen(js_name = raisedValue)]
+    pub fn raised_value(&mut self) -> Option<u64> {
+        self.session.raised_value().map(|h| h.bits())
+    }
 }
 
 /// The outcome of a [`drive`](DoodleInstance::drive)/[`resolve`](DoodleInstance::resolve)

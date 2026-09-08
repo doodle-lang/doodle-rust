@@ -252,10 +252,12 @@ pub struct DoodleOutcome {
     pub span_start: u32,
     /// `Raised`: the raising site's end byte offset (when `has_span`).
     pub span_end: u32,
-    /// `Completed`: the result value (`0` for Void; a reentrant `fn` return populates it once
-    /// the boundary can intern one, M7.3). A **host-owned** handle when non-zero —
-    /// `doodle_release` it. `0` for every other kind (a raised value is read in described form
-    /// via `doodle_raised_kind`/`_message`).
+    /// `Completed`: the result value (`0` for Void; a reentrant `fn` return populates it once the
+    /// boundary can intern one, M7.3). `Raised`: the raised **exception value** (E§3.3/§9), the
+    /// same value `rescue e` binds, for structural inspection (an `Error`'s `kind`/`message`/
+    /// `details`, §8.4), complementing the described-form `doodle_raised_kind`/`_message`. A
+    /// **host-owned** handle when non-zero — `doodle_release` it. `0` on `Suspended*`/`Paused`/
+    /// `Faulted`.
     pub value: DoodleHandle,
     /// Reserved for additive growth (freeze convention 2); always written as `0`.
     pub reserved: [u64; 4],

@@ -46,6 +46,11 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine) {
         if let Some(v) = machine.reg {
             tracer.value(v);
         }
+        // The retained exception of a terminal uncaught raise (E§3.3/§9), kept live for
+        // post-mortem host inspection until the instance is dropped.
+        if let Some(v) = machine.raised_value {
+            tracer.value(v);
+        }
         if let Some(v) = machine.unwind.as_ref().and_then(|u| u.gc_value()) {
             tracer.value(v);
         }

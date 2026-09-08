@@ -43,6 +43,27 @@ fn division_by_zero_surfaces_a_tagged_raise() {
 }
 
 #[test]
+fn a_terminal_raise_exposes_its_exception_value_for_inspection() {
+    // R6: alongside the described kind/message, the retained exception value is inspectable by
+    // handle (E§3.3/§8.4). Here the raised value is a string; in general an `Error` record.
+    let mut session = Session::demo("raise \"boom\"\n").unwrap();
+    let outcome = session.drive(Directive::RunToCompletion, None);
+    assert!(
+        matches!(outcome, DriveOutcome::Raised { .. }),
+        "{outcome:?}"
+    );
+    let handle = session
+        .raised_value()
+        .expect("a terminal raise retains its exception value");
+    assert_eq!(session.string_bytes(handle).unwrap(), b"boom");
+    session.release(handle).unwrap();
+    // A clean completion has no retained exception.
+    let mut clean = Session::demo("1 + 1\n").unwrap();
+    let _ = clean.drive(Directive::RunToCompletion, None);
+    assert!(clean.raised_value().is_none());
+}
+
+#[test]
 fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
     // draw_line is capability id 3 in the turtle registry (print 0, sin 1, cos 2,
     // draw_line 3, set_turtle 4, clear_canvas 5). `forward(10)` at heading 0 draws

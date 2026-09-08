@@ -390,6 +390,13 @@ fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome) -> DoodleOutcome {
         Outcome::Raised(value, trace) => {
             out.kind = DoodleOutcomeKind::Raised;
             di.last_raised = Some(di.inner.describe_raised(value));
+            // A **host-owned** handle to the raised exception (E§3.3/§8.4): the host inspects it
+            // structurally (its `Error` `kind`/`message`/`details`, or any value) and releases it.
+            // `0` (`DOODLE_NULL_HANDLE`) never occurs here (a raise always carries a value).
+            out.value = di
+                .inner
+                .raised_value_handle()
+                .map_or(DOODLE_NULL_HANDLE, |h| h.bits());
             if let Some(span) = trace.raised_at {
                 out.has_span = true;
                 out.span_start = span.start;

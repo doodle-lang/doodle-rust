@@ -199,6 +199,7 @@ impl Instance {
             machine: Machine {
                 frames: vec![frame],
                 reg: None,
+                raised_value: None,
                 frame_serial: 1,
                 unwind: None,
                 ring: ring::RingBuffer::new(),
