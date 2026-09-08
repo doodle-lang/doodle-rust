@@ -648,8 +648,6 @@ typedef struct DoodleInstance DoodleInstance;
  */
 typedef struct DoodleRegistry DoodleRegistry;
 
-typedef struct Option_DoodleFinalizer Option_DoodleFinalizer;
-
 /**
  * An opaque, per-instance value handle (E§4.2), crossing the ABI as a plain `uint64_t`.
  * Round-trips the engine's internal `Handle` bits; the host treats it as opaque and must
@@ -657,6 +655,20 @@ typedef struct Option_DoodleFinalizer Option_DoodleFinalizer;
  * reserved null handle (no value), never a live handle.
  */
 typedef uint64_t DoodleHandle;
+
+/**
+ * A foreign value's finalizer (E§4.5): run **exactly once** when the value dies (a GC that
+ * reclaims it, or `doodle_free`), given only the value's opaque `ptr` — never the instance,
+ * so it structurally cannot re-enter the engine (hence its timing never affects any result or
+ * determinism, §11). It **must not** unwind across the FFI boundary. `ptr` is the same
+ * `uint64_t` passed to `doodle_make_foreign` (a host casts its own pointer to/from it).
+ *
+ * The nullability is part of the type: a NULL finalizer is the "no finalizer" case (E§4.5). The
+ * `Option` is baked into the alias (not wrapped at the parameter) so cbindgen null-pointer-
+ * optimizes it to a plain nullable `DoodleFinalizer` function-pointer typedef in `doodle.h`,
+ * rather than an uncallable opaque `Option_DoodleFinalizer` struct.
+ */
+typedef void (*DoodleFinalizer)(uint64_t ptr);
 
 /**
  * A C host foreign-function callback (E§5.2): given a [`DoodleCallCtx`] (valid only for the
@@ -1183,7 +1195,7 @@ DoodleStatus doodle_call_list_append(struct DoodleCallCtx *ctx,
 DoodleStatus doodle_call_make_foreign(struct DoodleCallCtx *ctx,
                                       uint64_t tag,
                                       uint64_t ptr,
-                                      struct Option_DoodleFinalizer finalizer,
+                                      DoodleFinalizer finalizer,
                                       DoodleHandle *out);
 
 /**
@@ -2369,7 +2381,7 @@ DoodleStatus doodle_make_string(struct DoodleInstance *instance,
 DoodleStatus doodle_make_foreign(struct DoodleInstance *instance,
                                  uint64_t tag,
                                  uint64_t ptr,
-                                 struct Option_DoodleFinalizer finalizer,
+                                 DoodleFinalizer finalizer,
                                  DoodleHandle *out);
 
 /**

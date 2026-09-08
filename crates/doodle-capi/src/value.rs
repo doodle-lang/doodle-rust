@@ -216,7 +216,7 @@ pub unsafe extern "C" fn doodle_make_foreign(
     instance: *mut DoodleInstance,
     tag: u64,
     ptr: u64,
-    finalizer: Option<DoodleFinalizer>,
+    finalizer: DoodleFinalizer,
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {

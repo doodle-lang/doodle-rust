@@ -32,6 +32,16 @@ static DoodleStatus greet_cb(DoodleCallCtx *ctx, void *user_data) {
     return status;
 }
 
+/* A foreign value's finalizer (E§4.5). Exercising it from real C is the regression guard for the
+ * `DoodleFinalizer` typedef: it can only be written here if the header emits a genuine callable
+ * function-pointer type (not an uncallable opaque struct). */
+static uint64_t g_finalized_ptr = 0;
+static int g_finalized_count = 0;
+static void record_final(uint64_t ptr) {
+    g_finalized_ptr = ptr;
+    g_finalized_count++;
+}
+
 int main(void) {
     const char *version = doodle_version();
     if (version == NULL || strlen(version) == 0) {
@@ -186,6 +196,36 @@ int main(void) {
     }
     doodle_free(sinst);
 
-    printf("c-host smoke: load/drive/handle + registry/print + foreign-fn + observation OK\n");
+    /* Foreign value + finalizer round-trip from real C (E§4.5). This is the regression guard for
+     * the `DoodleFinalizer` typedef — a non-callable finalizer type would fail to compile here. */
+    const char *tiny = "let a = 1\n";
+    DoodleInstance *finst = NULL;
+    status = doodle_load((const uint8_t *)tiny, strlen(tiny), NULL, &finst, NULL, 0, NULL);
+    if (status != DoodleStatus_Ok || finst == NULL) {
+        return fail("doodle_load() for the foreign-value test failed");
+    }
+    DoodleHandle fh = DOODLE_NULL_HANDLE;
+    if (doodle_make_foreign(finst, 7, 0xABCD, record_final, &fh) != DoodleStatus_Ok
+        || fh == DOODLE_NULL_HANDLE) {
+        doodle_free(finst);
+        return fail("doodle_make_foreign with a finalizer failed");
+    }
+    /* A NULL finalizer is the documented no-op case — it must also be accepted. */
+    DoodleHandle fh2 = DOODLE_NULL_HANDLE;
+    if (doodle_make_foreign(finst, 8, 0, NULL, &fh2) != DoodleStatus_Ok) {
+        doodle_free(finst);
+        return fail("doodle_make_foreign with a NULL finalizer failed");
+    }
+    if (g_finalized_count != 0) {
+        doodle_free(finst);
+        return fail("the finalizer ran while the foreign value was still live");
+    }
+    doodle_free(finst); /* destroys the instance, finalizing every live foreign value once */
+    if (g_finalized_count != 1 || g_finalized_ptr != 0xABCD) {
+        return fail("the finalizer did not run exactly once with its ptr at destroy");
+    }
+
+    printf("c-host smoke: load/drive/handle + registry/print + foreign-fn + finalizer + "
+           "observation OK\n");
     return 0;
 }

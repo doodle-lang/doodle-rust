@@ -23,7 +23,12 @@ pub const DOODLE_NULL_HANDLE: DoodleHandle = 0;
 /// so it structurally cannot re-enter the engine (hence its timing never affects any result or
 /// determinism, §11). It **must not** unwind across the FFI boundary. `ptr` is the same
 /// `uint64_t` passed to `doodle_make_foreign` (a host casts its own pointer to/from it).
-pub type DoodleFinalizer = extern "C" fn(ptr: u64);
+///
+/// The nullability is part of the type: a NULL finalizer is the "no finalizer" case (E§4.5). The
+/// `Option` is baked into the alias (not wrapped at the parameter) so cbindgen null-pointer-
+/// optimizes it to a plain nullable `DoodleFinalizer` function-pointer typedef in `doodle.h`,
+/// rather than an uncallable opaque `Option_DoodleFinalizer` struct.
+pub type DoodleFinalizer = Option<extern "C" fn(ptr: u64)>;
 
 /// The result of a fallible C-ABI call: `Ok` on success, else the reason. Fallible calls
 /// return this and write their result through an out-parameter (freeze convention 5).

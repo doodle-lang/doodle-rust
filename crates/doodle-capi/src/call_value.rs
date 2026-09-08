@@ -230,7 +230,7 @@ pub unsafe extern "C" fn doodle_call_make_foreign(
     ctx: *mut DoodleCallCtx,
     tag: u64,
     ptr: u64,
-    finalizer: Option<DoodleFinalizer>,
+    finalizer: DoodleFinalizer,
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     // Trampoline the C finalizer into the engine's `Finalizer` (captures only the fn pointer +
