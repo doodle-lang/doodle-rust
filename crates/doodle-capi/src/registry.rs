@@ -83,8 +83,9 @@ pub unsafe extern "C" fn doodle_registry_free(registry: *mut DoodleRegistry) {
     }
 }
 
-/// Registers an engine built-in by identity (E§5.5), appending it to the registry. Returns
-/// `DoodleStatus_ErrContract` if the name is already registered (a host bug — each built-in
+/// Registers an engine built-in by identity (E§5.5), appending it to the registry. `builtin` is a
+/// [`DoodleBuiltin`] value; an out-of-range value (a host bug or version skew) is `ErrContract`.
+/// Returns `DoodleStatus_ErrContract` if the name is already registered (a host bug; each built-in
 /// registers at most once). No-op returning `ErrNullPointer` on a NULL registry.
 ///
 /// # Safety
@@ -92,18 +93,25 @@ pub unsafe extern "C" fn doodle_registry_free(registry: *mut DoodleRegistry) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_registry_add_builtin(
     registry: *mut DoodleRegistry,
-    builtin: DoodleBuiltin,
+    builtin: u32,
 ) -> DoodleStatus {
-    // SAFETY: `as_mut` returns None for NULL; a non-null `registry` is a live `DoodleRegistry`
-    // from `doodle_registry_new` (not consumed) by the caller's contract.
-    let Some(registry) = (unsafe { registry.as_mut() }) else {
-        return DoodleStatus::ErrNullPointer;
-    };
-    match registry.inner.register(intrinsic_for(builtin)) {
-        Ok(()) => DoodleStatus::Ok,
-        // The only registration failure is a duplicate/reserved name — a host setup bug.
-        Err(_) => DoodleStatus::ErrContract,
-    }
+    catch(|| {
+        // SAFETY: `as_mut` returns None for NULL; a non-null `registry` is a live `DoodleRegistry`
+        // from `doodle_registry_new` (not consumed) by the caller's contract.
+        let Some(registry) = (unsafe { registry.as_mut() }) else {
+            return DoodleStatus::ErrNullPointer;
+        };
+        // Validate the host-supplied discriminant before use: an out-of-range value (a host bug or
+        // version skew against a newer header) is `ErrContract`, not UB.
+        let Some(intrinsic) = intrinsic_for(builtin) else {
+            return DoodleStatus::ErrContract;
+        };
+        match registry.inner.register(intrinsic) {
+            Ok(()) => DoodleStatus::Ok,
+            // The only registration failure is a duplicate/reserved name — a host setup bug.
+            Err(_) => DoodleStatus::ErrContract,
+        }
+    })
 }
 
 /// Registers a **host foreign function** from a descriptor (E§5.1/§5.2, M7.2b), appending it to
@@ -146,20 +154,23 @@ pub unsafe extern "C" fn doodle_registry_add_foreign(
 }
 
 /// The engine intrinsic for a built-in identity.
-fn intrinsic_for(builtin: DoodleBuiltin) -> Intrinsic {
-    match builtin {
-        DoodleBuiltin::Print => print_intrinsic(),
-        DoodleBuiltin::Length => length_intrinsic(),
-        DoodleBuiltin::Each => each_intrinsic(),
-        DoodleBuiltin::Encode => encode_intrinsic(),
-        DoodleBuiltin::Decode => decode_intrinsic(),
-        DoodleBuiltin::ReadLine => read_line_intrinsic(),
-        DoodleBuiltin::Sin => sin_intrinsic(),
-        DoodleBuiltin::Cos => cos_intrinsic(),
-        DoodleBuiltin::DrawLine => draw_line_intrinsic(),
-        DoodleBuiltin::SetTurtle => set_turtle_intrinsic(),
-        DoodleBuiltin::ClearCanvas => clear_canvas_intrinsic(),
-        DoodleBuiltin::Time => time_intrinsic(),
-        DoodleBuiltin::Random => random_intrinsic(),
-    }
+fn intrinsic_for(builtin: u32) -> Option<Intrinsic> {
+    // Arms mirror `DoodleBuiltin`'s frozen discriminants; an unknown value (a host bug or version
+    // skew) is `None` → `ErrContract` at the caller. A new built-in needs an arm here.
+    Some(match builtin {
+        0 => print_intrinsic(),
+        1 => length_intrinsic(),
+        2 => each_intrinsic(),
+        3 => encode_intrinsic(),
+        4 => decode_intrinsic(),
+        5 => read_line_intrinsic(),
+        6 => sin_intrinsic(),
+        7 => cos_intrinsic(),
+        8 => draw_line_intrinsic(),
+        9 => set_turtle_intrinsic(),
+        10 => clear_canvas_intrinsic(),
+        11 => time_intrinsic(),
+        12 => random_intrinsic(),
+        _ => return None,
+    })
 }

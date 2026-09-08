@@ -4,8 +4,8 @@
 //! `abi` (`abi::value_error`, `abi::fault`, …), so call sites spell them `abi::…` unchanged.
 
 use super::{
-    DoodleBlockOutcome, DoodleBodyKind, DoodleDirective, DoodleFault, DoodleKind,
-    DoodleObservationMode, DoodlePauseReason, DoodlePosition, DoodleSeverity, DoodleStatus,
+    DoodleBlockOutcome, DoodleFault, DoodleKind, DoodleObservationMode, DoodlePauseReason,
+    DoodlePosition, DoodleSeverity, DoodleStatus,
 };
 use doodle_core::diag::Severity;
 use doodle_core::drive::{Directive, EngineFault, LimitKind, ObservationMode, PauseReason};
@@ -21,11 +21,14 @@ pub(crate) fn severity(s: Severity) -> DoodleSeverity {
 }
 
 /// Maps a [`DoodleObservationMode`] to the core [`ObservationMode`].
-pub(crate) fn observation_mode(mode: DoodleObservationMode) -> ObservationMode {
-    match mode {
-        DoodleObservationMode::Statement => ObservationMode::Statement,
-        DoodleObservationMode::Subexpression => ObservationMode::Subexpression,
-    }
+pub(crate) fn observation_mode(mode: u32) -> Option<ObservationMode> {
+    // Arms mirror `DoodleObservationMode`'s frozen discriminants; an unknown value (a host bug or
+    // version skew) is `None` → `ErrContract` at the caller. A new variant needs an arm here.
+    Some(match mode {
+        0 => ObservationMode::Statement,
+        1 => ObservationMode::Subexpression,
+        _ => return None,
+    })
 }
 
 /// Maps a core [`ObservationMode`] to its ABI mirror.
@@ -65,15 +68,18 @@ pub(crate) fn kind(k: Kind) -> DoodleKind {
 }
 
 /// Maps a [`DoodleDirective`] to the core [`Directive`].
-pub(crate) fn directive(d: DoodleDirective) -> Directive {
-    match d {
-        DoodleDirective::RunToCompletion => Directive::RunToCompletion,
-        DoodleDirective::Continue => Directive::Continue,
-        DoodleDirective::Step => Directive::Step,
-        DoodleDirective::StepInto => Directive::StepInto,
-        DoodleDirective::StepOver => Directive::StepOver,
-        DoodleDirective::StepOut => Directive::StepOut,
-    }
+pub(crate) fn directive(d: u32) -> Option<Directive> {
+    // Arms mirror `DoodleDirective`'s frozen discriminants; an unknown value (a host bug or version
+    // skew) is `None` → `ErrContract` at the caller. A new variant needs an arm here.
+    Some(match d {
+        0 => Directive::RunToCompletion,
+        1 => Directive::Continue,
+        2 => Directive::Step,
+        3 => Directive::StepInto,
+        4 => Directive::StepOver,
+        5 => Directive::StepOut,
+        _ => return None,
+    })
 }
 
 /// Maps a core [`PauseReason`] to its ABI mirror, returning the breakpoint id alongside
@@ -103,11 +109,14 @@ pub(crate) fn fault(fault: EngineFault) -> DoodleFault {
 }
 
 /// Maps a [`DoodleBodyKind`] to the core [`BodyKind`].
-pub(crate) fn body_kind(k: DoodleBodyKind) -> BodyKind {
-    match k {
-        DoodleBodyKind::Proc => BodyKind::Proc,
-        DoodleBodyKind::Func => BodyKind::Func,
-    }
+pub(crate) fn body_kind(k: u32) -> Option<BodyKind> {
+    // Arms mirror `DoodleBodyKind`'s frozen discriminants; an unknown value (a host bug or version
+    // skew) is `None` → `ErrContract` at the caller. A new variant needs an arm here.
+    Some(match k {
+        0 => BodyKind::Proc,
+        1 => BodyKind::Func,
+        _ => return None,
+    })
 }
 
 /// Maps a core [`BlockOutcome`] to its ABI mirror.

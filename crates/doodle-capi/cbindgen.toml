@@ -26,5 +26,15 @@ prefix_with_name = true
 
 [export]
 # Emit the opaque instance handle even though no field is public (it appears only
-# behind a pointer in the function signatures).
-include = ["DoodleInstance"]
+# behind a pointer in the function signatures). The host-supplied enums are emitted
+# too: their parameters cross as `uint32_t` (validated, R3 / freeze convention 7),
+# so no signature references the enum type — but the host still needs the named
+# constants (`DoodleDirective_Step`, `DoodleBuiltin_Print`, …) to pass, so force them
+# into the header.
+include = [
+    "DoodleInstance",
+    "DoodleDirective",
+    "DoodleObservationMode",
+    "DoodleBodyKind",
+    "DoodleBuiltin",
+]

@@ -7,7 +7,7 @@
 //! injection point, so it upholds the `ConstValue::Str`-is-NFC contract the way `make_string`
 //! does (a float default's NaN is canonicalized when the recipe materializes, S-28).
 
-use crate::abi::{self, DoodleBodyKind, DoodleStatus};
+use crate::abi::{self, DoodleStatus};
 use crate::call::{DoodleForeignFn, SendPtr, trampoline};
 use crate::guard::catch;
 use doodle_core::machine::{ConstValue, ForeignBuilder, Intrinsic};
@@ -114,8 +114,9 @@ fn push_param(
     }
 }
 
-/// Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind`. Returns
-/// NULL on allocation failure, a NULL name (with a non-zero length), or a non-UTF-8 name.
+/// Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind` (a
+/// [`DoodleBodyKind`](crate::abi::DoodleBodyKind) value). Returns NULL on an alloc failure, a NULL
+/// name (with a non-zero length), a non-UTF-8 name, or an out-of-range `kind` (a host bug/skew).
 /// Populate it with the `doodle_foreign_desc_*` builders (in the parameter order wanted), then
 /// pass it to `doodle_registry_add_foreign` (which consumes it) or free it with
 /// `doodle_foreign_desc_free`.
@@ -126,14 +127,19 @@ fn push_param(
 pub unsafe extern "C" fn doodle_foreign_desc_new(
     name: *const u8,
     name_len: usize,
-    kind: DoodleBodyKind,
+    kind: u32,
 ) -> *mut DoodleForeignDesc {
     let Ok(name) = name_arg(name, name_len) else {
         return std::ptr::null_mut();
     };
+    // An out-of-range `kind` (a host bug or version skew) fails to NULL — the descriptor
+    // constructor's failure signal — rather than invoking UB.
+    let Some(kind) = abi::body_kind(kind) else {
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(DoodleForeignDesc {
         name,
-        kind: abi::body_kind(kind),
+        kind,
         params: Vec::new(),
         callback: None,
     }))

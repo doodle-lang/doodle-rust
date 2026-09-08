@@ -30,6 +30,14 @@
 //! 6. **Platform-neutral** (D-M7-9): no compiler-specific attributes, no
 //!    platform-varying sizes in the header — certification is Linux-only for M7, but
 //!    the surface is portable.
+//! 7. **Host-supplied discriminants are validated, never trusted** (R3). A parameter carrying an
+//!    enum *from* the host crosses as a plain `uint32_t` and is range-checked to a known variant,
+//!    returning [`abi::DoodleStatus::ErrContract`] (or the entry's failure signal) on an unknown
+//!    value — never constructed directly as a Rust `#[repr(u32)]` enum, which would be instant UB
+//!    for an out-of-range value the panic firewall cannot catch. This mirrors the reserved
+//!    unknown-tag on the engine→host side: neither side trusts the other's discriminants, so a
+//!    minor-version value reaching an older peer is defined, not UB. Every future host-supplied
+//!    enum parameter follows this — do not take a typed `Doodle*` enum by value.
 //!
 //! The ABI contract version ([`doodle_abi_version`]) is distinct from the engine
 //! version ([`doodle_version`]): major = breaking, minor = additive.

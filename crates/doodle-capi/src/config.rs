@@ -6,8 +6,8 @@
 //! M7.1 covers limits, observation mode, and the target Unicode version (S-41, the replay
 //! guard). The module-resolver and host-data setters are additive M7.2 work.
 
-use crate::abi::DoodleObservationMode;
-use doodle_core::drive::{Config, Limits, ObservationMode};
+use crate::abi;
+use doodle_core::drive::{Config, Limits};
 use doodle_core::unicode::UnicodeVersion;
 
 /// An opaque instance configuration under construction. Built with `doodle_config_new`,
@@ -73,20 +73,20 @@ pub unsafe extern "C" fn doodle_config_set_limits(
     }
 }
 
-/// Sets the observation-mode granularity (E§8.8). No-op on a NULL config.
+/// Sets the observation-mode granularity (E§8.8). `mode` is a
+/// [`DoodleObservationMode`](crate::abi::DoodleObservationMode) value; an out-of-range value (a
+/// host bug/skew) is ignored (a void setter has no error channel). No-op on a NULL config.
 ///
 /// # Safety
 /// `config` must be a live pointer from `doodle_config_new` (or NULL).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn doodle_config_set_observation_mode(
-    config: *mut DoodleConfig,
-    mode: DoodleObservationMode,
-) {
+pub unsafe extern "C" fn doodle_config_set_observation_mode(config: *mut DoodleConfig, mode: u32) {
     if let Some(inner) = config_mut(config) {
-        inner.observation_mode = match mode {
-            DoodleObservationMode::Statement => ObservationMode::Statement,
-            DoodleObservationMode::Subexpression => ObservationMode::Subexpression,
-        };
+        // Ignore an out-of-range value (a host bug or version skew): the config keeps its current
+        // mode rather than invoking UB (a void setter has no error channel).
+        if let Some(mode) = abi::observation_mode(mode) {
+            inner.observation_mode = mode;
+        }
     }
 }
 

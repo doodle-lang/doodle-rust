@@ -282,21 +282,30 @@ pub unsafe extern "C" fn doodle_pause(instance: *const DoodleInstance) {
 }
 
 /// Sets the observation-mode granularity at runtime (E§8.8, S-62), between drives — the
-/// runtime counterpart of `doodle_config_set_observation_mode`.
+/// runtime counterpart of `doodle_config_set_observation_mode`. `mode` is a
+/// [`DoodleObservationMode`](crate::abi::DoodleObservationMode) value; an out-of-range value is
+/// `ErrContract`.
 ///
 /// # Safety
 /// `instance` live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_set_observation_mode(
     instance: *mut DoodleInstance,
-    mode: DoodleObservationMode,
+    mode: u32,
 ) -> DoodleStatus {
-    catch(|| match di_mut(instance) {
-        Ok(di) => {
-            di.inner.set_observation_mode(abi::observation_mode(mode));
-            DoodleStatus::Ok
+    catch(|| {
+        // Validate the host-supplied mode before use: an out-of-range value (a host bug or version
+        // skew) is `ErrContract`, not UB.
+        let Some(mode) = abi::observation_mode(mode) else {
+            return DoodleStatus::ErrContract;
+        };
+        match di_mut(instance) {
+            Ok(di) => {
+                di.inner.set_observation_mode(mode);
+                DoodleStatus::Ok
+            }
+            Err(status) => status,
         }
-        Err(status) => status,
     })
 }
 

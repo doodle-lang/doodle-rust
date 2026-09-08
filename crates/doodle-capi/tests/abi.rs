@@ -42,9 +42,9 @@ use doodle_capi::inspect::{
     doodle_record_type_name,
 };
 use doodle_capi::instance::{
-    DoodleInstance, doodle_capability_arg, doodle_drive, doodle_free, doodle_import_path_segment,
-    doodle_load, doodle_load_with_registry, doodle_output, doodle_raised_kind, doodle_resolve,
-    doodle_resolve_import, doodle_resolve_import_not_found,
+    DoodleInstance, doodle_capability_arg, doodle_drive, doodle_drive_slice, doodle_free,
+    doodle_import_path_segment, doodle_load, doodle_load_with_registry, doodle_output,
+    doodle_raised_kind, doodle_resolve, doodle_resolve_import, doodle_resolve_import_not_found,
 };
 use doodle_capi::observe::{
     doodle_breakpoint_at, doodle_breakpoint_canonical_id, doodle_breakpoint_count,
@@ -58,7 +58,8 @@ use doodle_capi::observe::{
     doodle_trapped_raise, doodle_trapped_raise_position,
 };
 use doodle_capi::registry::{
-    DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_new,
+    DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_free,
+    doodle_registry_new,
 };
 use doodle_capi::value::{
     doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_foreign_ptr, doodle_foreign_tag,
@@ -89,7 +90,7 @@ fn load_with(source: &str, builtins: &[DoodleBuiltin]) -> *mut DoodleInstance {
     let registry = doodle_registry_new();
     for &b in builtins {
         assert_eq!(
-            unsafe { doodle_registry_add_builtin(registry, b) },
+            unsafe { doodle_registry_add_builtin(registry, b as u32) },
             DoodleStatus::Ok
         );
     }
@@ -151,7 +152,7 @@ fn load(source: &str) -> *mut DoodleInstance {
 /// Drives an instance to a terminal/pause under `RunToCompletion`, returning the outcome.
 fn drive(inst: *mut DoodleInstance) -> DoodleOutcome {
     let mut out = DoodleOutcome::blank();
-    let status = unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion, &mut out) };
+    let status = unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion as u32, &mut out) };
     assert_eq!(status, DoodleStatus::Ok);
     out
 }
@@ -396,7 +397,13 @@ fn a_null_instance_is_a_defined_error_not_a_crash() {
     );
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(ptr::null_mut(), DoodleDirective::RunToCompletion, &mut out) },
+        unsafe {
+            doodle_drive(
+                ptr::null_mut(),
+                DoodleDirective::RunToCompletion as u32,
+                &mut out,
+            )
+        },
         DoodleStatus::ErrNullPointer
     );
     // A NULL free is a no-op (no crash).
@@ -728,10 +735,10 @@ fn run_with_foreign(
 ) -> Vec<u8> {
     let registry = doodle_registry_new();
     assert_eq!(
-        unsafe { doodle_registry_add_builtin(registry, DoodleBuiltin::Print) },
+        unsafe { doodle_registry_add_builtin(registry, DoodleBuiltin::Print as u32) },
         DoodleStatus::Ok
     );
-    let desc = unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), kind) };
+    let desc = unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), kind as u32) };
     assert!(!desc.is_null());
     build(desc);
     assert_eq!(
@@ -799,6 +806,45 @@ fn a_host_foreign_to_with_default_and_block_binds_and_invokes_through_c() {
 }
 
 #[test]
+fn an_out_of_range_enum_discriminant_is_a_contract_error_not_ub() {
+    // R3: host-supplied enum params cross as u32 and are validated. An unknown value (version skew
+    // against a newer header, or a host bug) is a defined error, never UB (freeze convention 5).
+    let inst = load("1\n");
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, 999, &mut out) },
+        DoodleStatus::ErrContract,
+        "an unknown directive is ErrContract"
+    );
+    assert_eq!(
+        unsafe { doodle_drive_slice(inst, 999, 10, &mut out) },
+        DoodleStatus::ErrContract,
+        "an unknown directive (slice) is ErrContract"
+    );
+    assert_eq!(
+        unsafe { doodle_set_observation_mode(inst, 999) },
+        DoodleStatus::ErrContract,
+        "an unknown observation mode is ErrContract"
+    );
+    unsafe { doodle_free(inst) };
+
+    // A foreign descriptor with an unknown body kind fails to NULL (its failure signal).
+    let name = b"x";
+    assert!(
+        unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), 999) }.is_null(),
+        "an unknown body kind yields a NULL descriptor"
+    );
+    // An unknown built-in is ErrContract.
+    let registry = doodle_registry_new();
+    assert_eq!(
+        unsafe { doodle_registry_add_builtin(registry, 999) },
+        DoodleStatus::ErrContract,
+        "an unknown built-in is ErrContract"
+    );
+    unsafe { doodle_registry_free(registry) };
+}
+
+#[test]
 fn a_constructor_with_a_null_out_does_not_leak_a_handle() {
     // R4: a `make_*` given a NULL out-pointer must NOT mint — a mint that then failed to write
     // would orphan a host-owned handle, rooting its value for the instance's life. Witnessed via a
@@ -836,7 +882,8 @@ fn a_reentrant_instance_pointer_call_from_a_callback_is_a_contract_error_not_ub(
     REENTER_STATUS.store(u32::MAX, Relaxed);
     let registry = doodle_registry_new();
     let name = b"reenter";
-    let desc = unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), DoodleBodyKind::Proc) };
+    let desc =
+        unsafe { doodle_foreign_desc_new(name.as_ptr(), name.len(), DoodleBodyKind::Proc as u32) };
     assert!(!desc.is_null());
     assert_eq!(
         unsafe { doodle_foreign_desc_set_callback(desc, reenter_cb, ptr::null_mut()) },
@@ -947,7 +994,8 @@ fn touching_an_ancestor_ctx_from_a_reentrant_call_is_rejected_not_ub() {
     STASHED_CTX.store(ptr::null_mut(), Relaxed);
     REENTRANT_STATUS.store(u32::MAX, Relaxed);
     let registry = doodle_registry_new();
-    let outer = unsafe { doodle_foreign_desc_new(b"outer".as_ptr(), 5, DoodleBodyKind::Proc) };
+    let outer =
+        unsafe { doodle_foreign_desc_new(b"outer".as_ptr(), 5, DoodleBodyKind::Proc as u32) };
     assert!(!outer.is_null());
     assert_eq!(
         unsafe { doodle_foreign_desc_block_param(outer, b"body".as_ptr(), 4) },
@@ -961,7 +1009,8 @@ fn touching_an_ancestor_ctx_from_a_reentrant_call_is_rejected_not_ub() {
         unsafe { doodle_registry_add_foreign(registry, outer) },
         DoodleStatus::Ok
     );
-    let inner = unsafe { doodle_foreign_desc_new(b"inner".as_ptr(), 5, DoodleBodyKind::Proc) };
+    let inner =
+        unsafe { doodle_foreign_desc_new(b"inner".as_ptr(), 5, DoodleBodyKind::Proc as u32) };
     assert!(!inner.is_null());
     assert_eq!(
         unsafe { doodle_foreign_desc_set_callback(inner, inner_cb, ptr::null_mut()) },
@@ -1024,7 +1073,7 @@ fn load_and_pause(source: &str) -> *mut DoodleInstance {
     let inst = load(source);
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(inst, DoodleDirective::Step, &mut out) },
+        unsafe { doodle_drive(inst, DoodleDirective::Step as u32, &mut out) },
         DoodleStatus::Ok
     );
     assert_eq!(out.kind, DoodleOutcomeKind::Paused, "expected a Step pause");
@@ -1114,7 +1163,7 @@ fn observation_frame_callable_for_a_function_frame() {
     let mut reached = false;
     for _ in 0..20 {
         assert_eq!(
-            unsafe { doodle_drive(inst, DoodleDirective::StepInto, &mut out) },
+            unsafe { doodle_drive(inst, DoodleDirective::StepInto as u32, &mut out) },
             DoodleStatus::Ok
         );
         if out.kind != DoodleOutcomeKind::Paused {
@@ -1175,7 +1224,7 @@ fn observation_frame_locals_and_module_globals() {
     let mut inside = false;
     for _ in 0..30 {
         assert_eq!(
-            unsafe { doodle_drive(inst, DoodleDirective::StepInto, &mut out) },
+            unsafe { doodle_drive(inst, DoodleDirective::StepInto as u32, &mut out) },
             DoodleStatus::Ok
         );
         if out.kind != DoodleOutcomeKind::Paused {
@@ -1480,7 +1529,7 @@ fn debug_breakpoint_set_hit_list_and_clear() {
     // Driving under `Continue` stops at the breakpoint (RunToCompletion would ignore it).
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(inst, DoodleDirective::Continue, &mut out) },
+        unsafe { doodle_drive(inst, DoodleDirective::Continue as u32, &mut out) },
         DoodleStatus::Ok
     );
     assert_eq!(out.kind, DoodleOutcomeKind::Paused);
@@ -1515,7 +1564,7 @@ fn debug_raise_trap_pauses_and_exposes_the_trapped_value() {
     // Under `Continue`, the armed raise pauses before propagating.
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(inst, DoodleDirective::Continue, &mut out) },
+        unsafe { doodle_drive(inst, DoodleDirective::Continue as u32, &mut out) },
         DoodleStatus::Ok
     );
     assert_eq!(out.kind, DoodleOutcomeKind::Paused);
@@ -1549,7 +1598,7 @@ fn debug_mode_pause_tail_and_diagnostics() {
     let inst = load("let a = 1\nlet b = 2\n");
     // Observation mode round-trips at runtime.
     assert_eq!(
-        unsafe { doodle_set_observation_mode(inst, DoodleObservationMode::Subexpression) },
+        unsafe { doodle_set_observation_mode(inst, DoodleObservationMode::Subexpression as u32) },
         DoodleStatus::Ok
     );
     let mut mode = DoodleObservationMode::Statement;
@@ -1563,7 +1612,7 @@ fn debug_mode_pause_tail_and_diagnostics() {
     unsafe { doodle_pause(inst) };
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion, &mut out) },
+        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion as u32, &mut out) },
         DoodleStatus::Ok
     );
     assert_eq!(out.kind, DoodleOutcomeKind::Paused);

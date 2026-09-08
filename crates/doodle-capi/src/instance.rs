@@ -6,8 +6,7 @@
 //! M7.2 work.
 
 use crate::abi::{
-    self, DOODLE_NULL_HANDLE, DoodleDirective, DoodleHandle, DoodleOutcome, DoodleOutcomeKind,
-    DoodleStatus,
+    self, DOODLE_NULL_HANDLE, DoodleHandle, DoodleOutcome, DoodleOutcomeKind, DoodleStatus,
 };
 use crate::guard::catch;
 use crate::value::copy_out;
@@ -47,40 +46,48 @@ pub use import::{
 pub use load::{doodle_free, doodle_load, doodle_load_with_registry};
 
 /// Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
-/// (E§7.3). Unbounded (runs until a capability / pause / raise / fault / completion); use
-/// [`doodle_drive_slice`] to bound the run with fuel.
+/// (E§7.3). `directive` is a [`DoodleDirective`](crate::abi::DoodleDirective) value (an
+/// out-of-range value is `ErrContract`, never UB). Unbounded (runs until a capability / pause /
+/// raise / fault / completion); use [`doodle_drive_slice`] to bound the run with fuel.
 ///
 /// # Safety
 /// `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_drive(
     instance: *mut DoodleInstance,
-    directive: DoodleDirective,
+    directive: u32,
     out_outcome: *mut DoodleOutcome,
 ) -> DoodleStatus {
     catch(|| {
-        drive_and_fill(instance, out_outcome, |inst| {
-            run(inst, abi::directive(directive))
-        })
+        // Validate the host-supplied directive before use: an out-of-range value (a host bug or
+        // version skew against a newer header) is `ErrContract`, not UB (freeze convention 5).
+        let Some(directive) = abi::directive(directive) else {
+            return DoodleStatus::ErrContract;
+        };
+        drive_and_fill(instance, out_outcome, |inst| run(inst, directive))
     })
 }
 
 /// Like [`doodle_drive`] but runs at most `fuel` statement safe points before yielding a
 /// resumable `Paused(SliceEnd)` (S-40) — the host's cooperative-yield point. Re-drive to
-/// continue.
+/// continue. `directive` is a [`DoodleDirective`](crate::abi::DoodleDirective) value, validated
+/// as in [`doodle_drive`] (out-of-range → `ErrContract`).
 ///
 /// # Safety
 /// As [`doodle_drive`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_drive_slice(
     instance: *mut DoodleInstance,
-    directive: DoodleDirective,
+    directive: u32,
     fuel: u64,
     out_outcome: *mut DoodleOutcome,
 ) -> DoodleStatus {
     catch(|| {
+        let Some(directive) = abi::directive(directive) else {
+            return DoodleStatus::ErrContract;
+        };
         drive_and_fill(instance, out_outcome, |inst| {
-            run_slice(inst, abi::directive(directive), Some(fuel))
+            run_slice(inst, directive, Some(fuel))
         })
     })
 }

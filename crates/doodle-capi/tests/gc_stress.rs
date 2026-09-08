@@ -74,7 +74,7 @@ fn a_foreign_value_finalizes_once_at_gc_under_stress_through_c() {
     // reclaimed *during the drive* — its finalizer runs at GC time, through the C trampoline.
     let mut out = DoodleOutcome::blank();
     assert_eq!(
-        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion, &mut out) },
+        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion as u32, &mut out) },
         DoodleStatus::Ok
     );
     assert_eq!(out.kind, DoodleOutcomeKind::Completed);

@@ -202,58 +202,6 @@ typedef uint32_t DoodleKind;
 #endif // __cplusplus
 
 /**
- * The observation-mode granularity (E§8.8): per-statement (default) or per-subexpression.
- */
-enum DoodleObservationMode
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * Per-statement safe points only (the default).
-   */
-  DoodleObservationMode_Statement = 0,
-  /**
-   * Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
-   */
-  DoodleObservationMode_Subexpression = 1,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleObservationMode DoodleObservationMode;
-#else
-typedef uint32_t DoodleObservationMode;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
- * Whether a host foreign function is a procedure (`to`, yields Void) or a function (`fn`,
- * yields a value) — the C mirror of the core `BodyKind` a foreign descriptor takes
- * (`doodle_foreign_desc_new`).
- */
-enum DoodleBodyKind
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * A procedure (`to`): yields no value; its call is a statement (L§8.4).
-   */
-  DoodleBodyKind_Proc = 0,
-  /**
-   * A function (`fn`): yields a value the call consumes.
-   */
-  DoodleBodyKind_Func = 1,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleBodyKind DoodleBodyKind;
-#else
-typedef uint32_t DoodleBodyKind;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
  * Which arm an auxiliary evaluation (`doodle_eval_to_string`) took (E§8.4) — the tag of
  * [`DoodleAuxOutcome`].
  */
@@ -331,47 +279,6 @@ enum DoodleFault
 typedef enum DoodleFault DoodleFault;
 #else
 typedef uint32_t DoodleFault;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
- * A driving directive (E§7.3): how far to run before returning to the host.
- */
-enum DoodleDirective
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  /**
-   * Run to the next capability / raise / fault / completion (a fast run).
-   */
-  DoodleDirective_RunToCompletion = 0,
-  /**
-   * Like `RunToCompletion` but also stop at breakpoints and the raise-trap.
-   */
-  DoodleDirective_Continue = 1,
-  /**
-   * Stop at the next safe point, in any frame (synonym of `StepInto`).
-   */
-  DoodleDirective_Step = 2,
-  /**
-   * Step, descending into calls.
-   */
-  DoodleDirective_StepInto = 3,
-  /**
-   * Step, treating a call as one step.
-   */
-  DoodleDirective_StepOver = 4,
-  /**
-   * Run until the current frame returns.
-   */
-  DoodleDirective_StepOut = 5,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum DoodleDirective DoodleDirective;
-#else
-typedef uint32_t DoodleDirective;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -507,6 +414,31 @@ typedef uint32_t DoodleGlobalKind;
 #endif // __cplusplus
 
 /**
+ * The observation-mode granularity (E§8.8): per-statement (default) or per-subexpression.
+ */
+enum DoodleObservationMode
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * Per-statement safe points only (the default).
+   */
+  DoodleObservationMode_Statement = 0,
+  /**
+   * Adds per-subexpression fine safe points (the "watch your expression evaluate" mode).
+   */
+  DoodleObservationMode_Subexpression = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleObservationMode DoodleObservationMode;
+#else
+typedef uint32_t DoodleObservationMode;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * A load/exec diagnostic's severity (E§3.2/§8, S-63), the C mirror of `diag::Severity`.
  */
 enum DoodleSeverity
@@ -528,6 +460,74 @@ enum DoodleSeverity
 typedef enum DoodleSeverity DoodleSeverity;
 #else
 typedef uint32_t DoodleSeverity;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A driving directive (E§7.3): how far to run before returning to the host.
+ */
+enum DoodleDirective
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * Run to the next capability / raise / fault / completion (a fast run).
+   */
+  DoodleDirective_RunToCompletion = 0,
+  /**
+   * Like `RunToCompletion` but also stop at breakpoints and the raise-trap.
+   */
+  DoodleDirective_Continue = 1,
+  /**
+   * Stop at the next safe point, in any frame (synonym of `StepInto`).
+   */
+  DoodleDirective_Step = 2,
+  /**
+   * Step, descending into calls.
+   */
+  DoodleDirective_StepInto = 3,
+  /**
+   * Step, treating a call as one step.
+   */
+  DoodleDirective_StepOver = 4,
+  /**
+   * Run until the current frame returns.
+   */
+  DoodleDirective_StepOut = 5,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleDirective DoodleDirective;
+#else
+typedef uint32_t DoodleDirective;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Whether a host foreign function is a procedure (`to`, yields Void) or a function (`fn`,
+ * yields a value) — the C mirror of the core `BodyKind` a foreign descriptor takes
+ * (`doodle_foreign_desc_new`).
+ */
+enum DoodleBodyKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * A procedure (`to`): yields no value; its call is a statement (L§8.4).
+   */
+  DoodleBodyKind_Proc = 0,
+  /**
+   * A function (`fn`): yields a value the call consumes.
+   */
+  DoodleBodyKind_Func = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum DoodleBodyKind DoodleBodyKind;
+#else
+typedef uint32_t DoodleBodyKind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -1248,12 +1248,14 @@ void doodle_config_set_limits(struct DoodleConfig *config,
                               uint64_t max_op_result_bytes);
 
 /**
- * Sets the observation-mode granularity (E§8.8). No-op on a NULL config.
+ * Sets the observation-mode granularity (E§8.8). `mode` is a
+ * [`DoodleObservationMode`](crate::abi::DoodleObservationMode) value; an out-of-range value (a
+ * host bug/skew) is ignored (a void setter has no error channel). No-op on a NULL config.
  *
  * # Safety
  * `config` must be a live pointer from `doodle_config_new` (or NULL).
  */
-void doodle_config_set_observation_mode(struct DoodleConfig *config, DoodleObservationMode mode);
+void doodle_config_set_observation_mode(struct DoodleConfig *config, uint32_t mode);
 
 /**
  * Sets the **target Unicode version** the host expects (S-41, the replay guard): a
@@ -1310,8 +1312,9 @@ void doodle_control_pause(const struct DoodleControl *control);
 void doodle_control_free(struct DoodleControl *control);
 
 /**
- * Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind`. Returns
- * NULL on allocation failure, a NULL name (with a non-zero length), or a non-UTF-8 name.
+ * Creates a foreign-function descriptor for a function named `name` (UTF-8) of `kind` (a
+ * [`DoodleBodyKind`](crate::abi::DoodleBodyKind) value). Returns NULL on an alloc failure, a NULL
+ * name (with a non-zero length), a non-UTF-8 name, or an out-of-range `kind` (a host bug/skew).
  * Populate it with the `doodle_foreign_desc_*` builders (in the parameter order wanted), then
  * pass it to `doodle_registry_add_foreign` (which consumes it) or free it with
  * `doodle_foreign_desc_free`.
@@ -1321,7 +1324,7 @@ void doodle_control_free(struct DoodleControl *control);
  */
 struct DoodleForeignDesc *doodle_foreign_desc_new(const uint8_t *name,
                                                   uintptr_t name_len,
-                                                  DoodleBodyKind kind);
+                                                  uint32_t kind);
 
 /**
  * Appends a **required** ordinary parameter `name` (L§8.3).
@@ -1653,26 +1656,28 @@ DoodleStatus doodle_eval_to_string(struct DoodleInstance *instance,
 
 /**
  * Drives `instance` under `directive` to its next stop, writing the result to `out_outcome`
- * (E§7.3). Unbounded (runs until a capability / pause / raise / fault / completion); use
- * [`doodle_drive_slice`] to bound the run with fuel.
+ * (E§7.3). `directive` is a [`DoodleDirective`](crate::abi::DoodleDirective) value (an
+ * out-of-range value is `ErrContract`, never UB). Unbounded (runs until a capability / pause /
+ * raise / fault / completion); use [`doodle_drive_slice`] to bound the run with fuel.
  *
  * # Safety
  * `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
  */
 DoodleStatus doodle_drive(struct DoodleInstance *instance,
-                          DoodleDirective directive,
+                          uint32_t directive,
                           struct DoodleOutcome *out_outcome);
 
 /**
  * Like [`doodle_drive`] but runs at most `fuel` statement safe points before yielding a
  * resumable `Paused(SliceEnd)` (S-40) — the host's cooperative-yield point. Re-drive to
- * continue.
+ * continue. `directive` is a [`DoodleDirective`](crate::abi::DoodleDirective) value, validated
+ * as in [`doodle_drive`] (out-of-range → `ErrContract`).
  *
  * # Safety
  * As [`doodle_drive`].
  */
 DoodleStatus doodle_drive_slice(struct DoodleInstance *instance,
-                                DoodleDirective directive,
+                                uint32_t directive,
                                 uint64_t fuel,
                                 struct DoodleOutcome *out_outcome);
 
@@ -2202,13 +2207,14 @@ void doodle_pause(const struct DoodleInstance *instance);
 
 /**
  * Sets the observation-mode granularity at runtime (E§8.8, S-62), between drives — the
- * runtime counterpart of `doodle_config_set_observation_mode`.
+ * runtime counterpart of `doodle_config_set_observation_mode`. `mode` is a
+ * [`DoodleObservationMode`](crate::abi::DoodleObservationMode) value; an out-of-range value is
+ * `ErrContract`.
  *
  * # Safety
  * `instance` live.
  */
-DoodleStatus doodle_set_observation_mode(struct DoodleInstance *instance,
-                                         DoodleObservationMode mode);
+DoodleStatus doodle_set_observation_mode(struct DoodleInstance *instance, uint32_t mode);
 
 /**
  * Writes the current observation-mode granularity (E§8.8).
@@ -2300,14 +2306,15 @@ struct DoodleRegistry *doodle_registry_new(void);
 void doodle_registry_free(struct DoodleRegistry *registry);
 
 /**
- * Registers an engine built-in by identity (E§5.5), appending it to the registry. Returns
- * `DoodleStatus_ErrContract` if the name is already registered (a host bug — each built-in
+ * Registers an engine built-in by identity (E§5.5), appending it to the registry. `builtin` is a
+ * [`DoodleBuiltin`] value; an out-of-range value (a host bug or version skew) is `ErrContract`.
+ * Returns `DoodleStatus_ErrContract` if the name is already registered (a host bug; each built-in
  * registers at most once). No-op returning `ErrNullPointer` on a NULL registry.
  *
  * # Safety
  * `registry` must be a live pointer from `doodle_registry_new`.
  */
-DoodleStatus doodle_registry_add_builtin(struct DoodleRegistry *registry, DoodleBuiltin builtin);
+DoodleStatus doodle_registry_add_builtin(struct DoodleRegistry *registry, uint32_t builtin);
 
 /**
  * Registers a **host foreign function** from a descriptor (E§5.1/§5.2, M7.2b), appending it to
