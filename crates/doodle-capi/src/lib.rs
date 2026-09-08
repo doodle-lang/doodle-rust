@@ -15,8 +15,12 @@
 //!    never leak an internal representation.
 //! 2. **Every host-facing struct grows without breaking.** Config and descriptor
 //!    surfaces are **opaque + builder functions** (a new setter is additive); the
-//!    fixed-layout [`abi::DoodleOutcome`] carries a **reserved tail** and an
-//!    unknown-tag value so a new outcome kind or field fits without a resize.
+//!    fixed-layout [`abi::DoodleOutcome`] carries a **reserved tail** for a new field.
+//!    A new outcome *kind* fits because the `kind`/tag enums cross as a **fixed-width
+//!    integer**: a value an older host does not recognize arrives as an unrecognized number
+//!    it handles via its `switch` default — never UB, and never a resize. (There is **no**
+//!    reserved sentinel *enumerator*; the fixed underlying width is the whole guarantee, so a
+//!    host must always have a default arm.)
 //!    **Every** by-value struct carries a `reserved` tail — **no exceptions**, even one
 //!    argued structurally complete (e.g. [`abi::DoodlePosition`], which is deliberately
 //!    just (module, span) and whose tail is expected to stay zero forever): a tailless
@@ -48,10 +52,10 @@
 //!    enum *from* the host crosses as a plain `uint32_t` and is range-checked to a known variant,
 //!    returning [`abi::DoodleStatus::ErrContract`] (or the entry's failure signal) on an unknown
 //!    value — never constructed directly as a Rust `#[repr(u32)]` enum, which would be instant UB
-//!    for an out-of-range value the panic firewall cannot catch. This mirrors the reserved
-//!    unknown-tag on the engine→host side: neither side trusts the other's discriminants, so a
-//!    minor-version value reaching an older peer is defined, not UB. Every future host-supplied
-//!    enum parameter follows this — do not take a typed `Doodle*` enum by value.
+//!    for an out-of-range value the panic firewall cannot catch. This mirrors the fixed-width
+//!    tag on the engine→host side (convention 2): neither side trusts the other's discriminants,
+//!    so a minor-version value reaching an older peer is defined, not UB. Every future
+//!    host-supplied enum parameter follows this — do not take a typed `Doodle*` enum by value.
 //!
 //! The ABI contract version ([`doodle_abi_version`]) is distinct from the engine
 //! version ([`doodle_version`]): major = breaking, minor = additive.

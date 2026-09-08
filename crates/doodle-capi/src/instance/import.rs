@@ -145,7 +145,8 @@ fn resolve_import_and_fill(
         return DoodleStatus::ErrContract;
     }
     let outcome = resolve_import(&mut di.inner, resolution);
-    let filled = fill_outcome(di, outcome);
+    // Resolving an import advances the drive (it continues past the parked import).
+    let filled = fill_outcome(di, outcome, true);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`.
     unsafe { *out_outcome = filled };
     DoodleStatus::Ok

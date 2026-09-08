@@ -1725,7 +1725,9 @@ DoodleStatus doodle_capability_arg(const struct DoodleInstance *instance,
  * Resolves a parked capability suspension (E§7.5) with `value` as its result, then drives on
  * and writes the next stop to `out_outcome`. `value` becomes the capability call's result (a
  * `to` capability ignores it, yielding Void). `ErrContract` if the instance is not suspended
- * on a capability.
+ * on a capability. `value` is **borrowed, not consumed**: its value is copied into the resume and
+ * the host still owns the handle, so `doodle_release` it when done (unlike the consuming
+ * call-context setters, which take ownership of the handles passed to them, S-17).
  *
  * # Safety
  * `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
@@ -1736,7 +1738,8 @@ DoodleStatus doodle_resolve(struct DoodleInstance *instance,
 
 /**
  * Resolves a parked capability suspension (E§7.5) by **raising** `value` at the capability
- * call site (E§9), then drives on. `ErrContract` if not suspended on a capability.
+ * call site (E§9), then drives on. `ErrContract` if not suspended on a capability. `value` is
+ * **borrowed, not consumed** — `doodle_release` it when done, as [`doodle_resolve`].
  *
  * # Safety
  * As [`doodle_resolve`].
@@ -2005,8 +2008,10 @@ DoodleStatus doodle_frame_local_name(const struct DoodleInstance *instance,
 
 /**
  * A fresh **host-owned** handle to frame `index`'s `slot`-th local's value (E§8.2), or
- * `DOODLE_NULL_HANDLE` if it is not yet initialized (the temporal dead zone) or the slot is
- * absent. `ErrStale` on a stale `generation`. Non-null values are host-owned — release them.
+ * `DOODLE_NULL_HANDLE` if it is not yet initialized (the temporal dead zone). `ErrStale` on a
+ * stale `generation`; `ErrIndexOutOfBounds` if `slot` is past the frame's locals (matching
+ * [`doodle_frame_local_name`], so a `NULL` handle unambiguously means "not yet initialized", not
+ * "no such slot"). Non-null values are host-owned — release them.
  *
  * # Safety
  * `instance` live; `out_handle` writable.
@@ -2046,7 +2051,10 @@ DoodleStatus doodle_frame_dynamic_name(const struct DoodleInstance *instance,
 
 /**
  * A fresh **host-owned** handle to frame `index`'s `slot`-th dynamic-parameter value (E§8.2),
- * or `DOODLE_NULL_HANDLE` if the cell is unbound/absent. `ErrStale` on a stale `generation`.
+ * or `DOODLE_NULL_HANDLE` if the cell is unbound. `ErrStale` on a stale `generation`;
+ * `ErrIndexOutOfBounds` if `slot` is past the frame's dynamic bindings (matching
+ * [`doodle_frame_dynamic_name`], so a `NULL` handle unambiguously means "unbound", not "no such
+ * slot").
  *
  * # Safety
  * `instance` live; `out_handle` writable.
@@ -2101,8 +2109,10 @@ DoodleStatus doodle_module_global_name(const struct DoodleInstance *instance,
 
 /**
  * A fresh **host-owned** handle to the current value of `module_token`'s `index`-th global
- * (E§8.2), or `DOODLE_NULL_HANDLE` if it is not yet defined (its declaration has not executed)
- * or the index is absent. `ErrStale` on a stale `generation`. Non-null values are host-owned.
+ * (E§8.2), or `DOODLE_NULL_HANDLE` if it is not yet defined (its declaration has not executed).
+ * `ErrStale` on a stale `generation`; `ErrIndexOutOfBounds` if `index` is past the module's
+ * globals (matching [`doodle_module_global_name`], so a `NULL` handle unambiguously means "not yet
+ * defined", not "no such global"). Non-null values are host-owned.
  *
  * # Safety
  * `instance` live; `out_handle` writable.

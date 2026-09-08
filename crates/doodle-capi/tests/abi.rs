@@ -30,7 +30,10 @@ use doodle_capi::call::{
 };
 use doodle_capi::call_read::{doodle_call_as_int, doodle_call_release};
 use doodle_capi::call_value::{doodle_call_make_int, doodle_call_make_string};
-use doodle_capi::config::{doodle_config_free, doodle_config_new, doodle_config_set_limits};
+use doodle_capi::config::{
+    doodle_config_free, doodle_config_new, doodle_config_set_limits,
+    doodle_config_set_target_unicode,
+};
 use doodle_capi::control::{doodle_control, doodle_control_cancel, doodle_control_free};
 use doodle_capi::desc::{
     DoodleForeignDesc, doodle_foreign_desc_block_param, doodle_foreign_desc_default_string,
@@ -262,6 +265,36 @@ fn doodle_retain_shares_ownership_and_does_not_resurrect() {
     assert_eq!(unsafe { doodle_retain(inst, h) }, DOODLE_NULL_HANDLE);
 
     unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn a_bad_target_unicode_is_reported_even_with_a_parse_error() {
+    // MINOR fix (S-41): the pure config field is validated BEFORE parse/resolve, so a mismatched
+    // target Unicode version surfaces as `ErrUnsupportedUnicode` rather than being masked by a
+    // co-occurring parse error (which would otherwise return `ErrLoad`).
+    let config = doodle_config_new();
+    // A major of 99 is not the engine's pinned Unicode version.
+    unsafe { doodle_config_set_target_unicode(config, 99, 0, 0) };
+    let src = "print(\n"; // also a parse error
+    let mut inst: *mut DoodleInstance = ptr::null_mut();
+    let status = unsafe {
+        doodle_load(
+            src.as_ptr(),
+            src.len(),
+            config,
+            &mut inst,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(
+        status,
+        DoodleStatus::ErrUnsupportedUnicode,
+        "the config mismatch is reported, not masked by the parse error"
+    );
+    assert!(inst.is_null(), "no instance on a failed load");
+    unsafe { doodle_config_free(config) };
 }
 
 /// Reads a callable handle's declared name via `doodle_callable_name` (copy-out), or `None`.
@@ -1338,6 +1371,60 @@ fn observation_stack_walk_positions_and_generation_staleness() {
 }
 
 #[test]
+fn a_zero_fuel_slice_preserves_the_pause_generation() {
+    // MINOR fix: `doodle_drive_slice(fuel=0)` yields Paused(SliceEnd) without running anything, so
+    // it must NOT bump the pause generation: a frame token a debugger holds stays valid across it
+    // (a nonzero-fuel slice, which does run, bumps as usual).
+    let inst = load_and_pause("let x = 1\nlet y = 2\n");
+    let (mut count, mut gen0) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count, &mut gen0) },
+        DoodleStatus::Ok
+    );
+
+    let mut out = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive_slice(inst, DoodleDirective::RunToCompletion as u32, 0, &mut out) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(out.kind, DoodleOutcomeKind::Paused);
+    assert_eq!(out.pause_reason, DoodlePauseReason::SliceEnd);
+
+    let (mut count2, mut gen1) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count2, &mut gen1) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(
+        gen1, gen0,
+        "a zero-fuel slice did no work, so the generation is unchanged"
+    );
+    // The pre-slice frame token is therefore still live, not stale.
+    let mut frame = zero_frame();
+    assert_eq!(
+        unsafe { doodle_frame_at(inst, gen0, count - 1, &mut frame) },
+        DoodleStatus::Ok,
+        "a frame token from before a zero-fuel slice is still valid"
+    );
+
+    // A nonzero-fuel slice DOES run, so it bumps the generation as usual.
+    assert_eq!(
+        unsafe { doodle_drive_slice(inst, DoodleDirective::RunToCompletion as u32, 1, &mut out) },
+        DoodleStatus::Ok
+    );
+    let (mut count3, mut gen2) = (0u32, 0u32);
+    assert_eq!(
+        unsafe { doodle_stack_frame_count(inst, &mut count3, &mut gen2) },
+        DoodleStatus::Ok
+    );
+    assert_ne!(
+        gen2, gen1,
+        "a nonzero-fuel slice ran, so the generation bumped"
+    );
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
 fn observation_frame_callable_for_a_function_frame() {
     // StepInto descends into f(); its frame is a callable frame with a mintable callable handle.
     let inst = load("to f()\nlet z = 1\nend\nf()\n");
@@ -1502,6 +1589,21 @@ fn observation_frame_locals_and_module_globals() {
         }
     }
     assert!(found_g, "found the module global g");
+
+    // An out-of-range slot/index on the VALUE accessors is `ErrIndexOutOfBounds` (matching the
+    // `_name`/`_count` siblings), so a `NULL` handle unambiguously means "not yet initialized",
+    // never "no such slot".
+    let mut h = DOODLE_NULL_HANDLE;
+    assert_eq!(
+        unsafe { doodle_frame_local_value(inst, walk_gen, 0, local_count, &mut h) },
+        DoodleStatus::ErrIndexOutOfBounds,
+        "an out-of-range local slot is a bounds error, not a NULL value"
+    );
+    assert_eq!(
+        unsafe { doodle_module_global_value(inst, walk_gen, module, 10_000, &mut h) },
+        DoodleStatus::ErrIndexOutOfBounds,
+        "an out-of-range global index is a bounds error, not a NULL value"
+    );
 
     // A stale generation is rejected on the binding/global accessors too.
     assert_eq!(

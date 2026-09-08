@@ -7,7 +7,7 @@
 use super::DoodleInstance;
 use crate::abi::DoodleStatus;
 use crate::config::DoodleConfig;
-use crate::guard::catch;
+use crate::guard::{catch, catch_or};
 use crate::registry::DoodleRegistry;
 use crate::value::copy_out;
 use doodle_core::diag::Severity;
@@ -152,12 +152,18 @@ fn load_impl(
 /// `instance` must be a pointer from `doodle_load` that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn doodle_free(instance: *mut DoodleInstance) {
-    if !instance.is_null() {
-        // SAFETY: `instance` is non-null (checked) and, by the caller's `# Safety` contract, a
-        // pointer from `doodle_load` (a `Box::into_raw`) not already freed. `Instance`'s `Drop`
-        // finalizes every live foreign value (E§4.5).
-        drop(unsafe { Box::from_raw(instance) });
-    }
+    // The drop runs foreign finalizers (host `extern "C"` callbacks) via `Instance`'s `Drop`;
+    // convention 5 forbids a panic crossing the boundary, and this entry point has no
+    // `DoodleStatus` channel, so `catch_or` swallows a finalizer panic (the instance is being
+    // discarded anyway) rather than let it unwind into the C caller (UB).
+    catch_or((), || {
+        if !instance.is_null() {
+            // SAFETY: `instance` is non-null (checked) and, by the caller's `# Safety` contract, a
+            // pointer from `doodle_load` (a `Box::into_raw`) not already freed. `Instance`'s `Drop`
+            // finalizes every live foreign value (E§4.5).
+            drop(unsafe { Box::from_raw(instance) });
+        }
+    });
 }
 
 /// A load failure: front-end diagnostics (with a rendered message) or a rejected config.
@@ -173,6 +179,15 @@ enum LoadFailure {
 /// takes no registry): validate the target Unicode version (S-41), load with the registry +
 /// limits, then apply the observation mode — the same steps `create` runs.
 fn load_program(source: &str, config: Config, registry: Registry) -> Result<Instance, LoadFailure> {
+    // S-41: validate the pure config field FIRST (before parse/resolve), so a mismatched target
+    // Unicode version is reported as `ErrUnsupportedUnicode` even when the source ALSO has a parse
+    // error (the config mismatch is independent of the source; a parse error must not mask it). A
+    // recording asserts its version at create rather than diverging silently (E§11).
+    if let Some(requested) = config.unicode_version
+        && requested != Instance::unicode_version()
+    {
+        return Err(LoadFailure::UnsupportedUnicode);
+    }
     let normalized = doodle_core::source::normalize(source);
     let parsed = doodle_core::parse::parse_program(normalized.as_ref(), ModuleId(0));
     if let Some(message) = errors_of(&parsed.diagnostics) {
@@ -181,13 +196,6 @@ fn load_program(source: &str, config: Config, registry: Registry) -> Result<Inst
     let resolved = doodle_core::resolve::resolve(parsed.ast, parsed.root, ModuleId(0));
     if let Some(message) = errors_of(&resolved.diagnostics) {
         return Err(LoadFailure::Diagnostics(message));
-    }
-    // S-41: a requested Unicode version that is not the engine's pinned one is rejected, so a
-    // recording asserts its version at create rather than diverging silently (E§11).
-    if let Some(requested) = config.unicode_version
-        && requested != Instance::unicode_version()
-    {
-        return Err(LoadFailure::UnsupportedUnicode);
     }
     let mut instance = Instance::load(
         resolved.module,

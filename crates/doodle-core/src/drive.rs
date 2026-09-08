@@ -274,9 +274,14 @@ pub fn resolve_slice(
         // first — a cancel racing completion loses, §10.1).
         Resolution::Value(handle) => match instance.resume_with_value(handle) {
             Ok(()) => drive(instance, instance.resume_directive(), fuel),
-            // A stale resolution handle is a host-contract violation (a non-resumable
-            // engine fault): the suspension was cleared, so leave the instance terminally
-            // `Faulted` — a `Faulted` outcome always implies `state() == Faulted` (E§3.3).
+            // A bad resolution handle — stale OR cross-instance (E§4.2) — is a host-contract
+            // violation and a non-resumable fault: the suspension is already cleared, so the
+            // instance is left terminally `Faulted(Internal)` (a `Faulted` outcome always implies
+            // `state() == Faulted`, E§3.3). Unlike the reader surface, which keeps the
+            // `Stale`↔`ForeignInstance` distinction so a host can retry, this consuming path
+            // collapses both: the suspension cannot be re-offered and the host's remedy is the
+            // same (pass a live, own-instance handle). A dedicated `EngineFault` kind could restore
+            // the distinction, but that is a spec (E) addition — deferred, not silently dropped.
             Err(_) => fault(instance),
         },
         // The host rejected the capability: arm a raise carrying the host's value at the
@@ -292,6 +297,8 @@ pub fn resolve_slice(
             }
             match instance.resume_with_raise(handle) {
                 Ok(()) => drive(instance, instance.resume_directive(), fuel),
+                // A bad raise handle collapses to `Faulted(Internal)`, as the value path above (the
+                // `Stale`↔`ForeignInstance` distinction is intentionally not surfaced here).
                 Err(_) => fault(instance),
             }
         }

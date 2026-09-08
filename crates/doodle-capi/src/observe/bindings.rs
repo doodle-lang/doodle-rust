@@ -81,8 +81,10 @@ pub unsafe extern "C" fn doodle_frame_local_name(
 }
 
 /// A fresh **host-owned** handle to frame `index`'s `slot`-th local's value (E§8.2), or
-/// `DOODLE_NULL_HANDLE` if it is not yet initialized (the temporal dead zone) or the slot is
-/// absent. `ErrStale` on a stale `generation`. Non-null values are host-owned — release them.
+/// `DOODLE_NULL_HANDLE` if it is not yet initialized (the temporal dead zone). `ErrStale` on a
+/// stale `generation`; `ErrIndexOutOfBounds` if `slot` is past the frame's locals (matching
+/// [`doodle_frame_local_name`], so a `NULL` handle unambiguously means "not yet initialized", not
+/// "no such slot"). Non-null values are host-owned — release them.
 ///
 /// # Safety
 /// `instance` live; `out_handle` writable.
@@ -102,6 +104,9 @@ pub unsafe extern "C" fn doodle_frame_local_value(
             Ok(di) => di,
             Err(status) => return status,
         };
+        if slot as usize >= di.inner.frame_local_names(index as usize).len() {
+            return DoodleStatus::ErrIndexOutOfBounds;
+        }
         write_value(
             di.inner.frame_local_value(index as usize, slot as usize),
             out_handle,
@@ -165,7 +170,10 @@ pub unsafe extern "C" fn doodle_frame_dynamic_name(
 }
 
 /// A fresh **host-owned** handle to frame `index`'s `slot`-th dynamic-parameter value (E§8.2),
-/// or `DOODLE_NULL_HANDLE` if the cell is unbound/absent. `ErrStale` on a stale `generation`.
+/// or `DOODLE_NULL_HANDLE` if the cell is unbound. `ErrStale` on a stale `generation`;
+/// `ErrIndexOutOfBounds` if `slot` is past the frame's dynamic bindings (matching
+/// [`doodle_frame_dynamic_name`], so a `NULL` handle unambiguously means "unbound", not "no such
+/// slot").
 ///
 /// # Safety
 /// `instance` live; `out_handle` writable.
@@ -185,6 +193,9 @@ pub unsafe extern "C" fn doodle_frame_dynamic_value(
             Ok(di) => di,
             Err(status) => return status,
         };
+        if slot as usize >= di.inner.frame_dynamic_names(index as usize).len() {
+            return DoodleStatus::ErrIndexOutOfBounds;
+        }
         write_value(
             di.inner.frame_dynamic_value(index as usize, slot as usize),
             out_handle,
@@ -284,8 +295,10 @@ pub unsafe extern "C" fn doodle_module_global_name(
 }
 
 /// A fresh **host-owned** handle to the current value of `module_token`'s `index`-th global
-/// (E§8.2), or `DOODLE_NULL_HANDLE` if it is not yet defined (its declaration has not executed)
-/// or the index is absent. `ErrStale` on a stale `generation`. Non-null values are host-owned.
+/// (E§8.2), or `DOODLE_NULL_HANDLE` if it is not yet defined (its declaration has not executed).
+/// `ErrStale` on a stale `generation`; `ErrIndexOutOfBounds` if `index` is past the module's
+/// globals (matching [`doodle_module_global_name`], so a `NULL` handle unambiguously means "not yet
+/// defined", not "no such global"). Non-null values are host-owned.
 ///
 /// # Safety
 /// `instance` live; `out_handle` writable.
@@ -305,6 +318,9 @@ pub unsafe extern "C" fn doodle_module_global_value(
             Ok(di) => di,
             Err(status) => return status,
         };
+        if index as usize >= di.inner.module_global_names(module_token as usize).len() {
+            return DoodleStatus::ErrIndexOutOfBounds;
+        }
         write_value(
             di.inner
                 .module_global_value(module_token as usize, index as usize),

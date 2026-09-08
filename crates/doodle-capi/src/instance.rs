@@ -64,7 +64,7 @@ pub unsafe extern "C" fn doodle_drive(
         let Some(directive) = abi::directive(directive) else {
             return DoodleStatus::ErrContract;
         };
-        drive_and_fill(instance, out_outcome, |inst| run(inst, directive))
+        drive_and_fill(instance, out_outcome, true, |inst| run(inst, directive))
     })
 }
 
@@ -86,7 +86,9 @@ pub unsafe extern "C" fn doodle_drive_slice(
         let Some(directive) = abi::directive(directive) else {
             return DoodleStatus::ErrContract;
         };
-        drive_and_fill(instance, out_outcome, |inst| {
+        // A zero-fuel slice yields `Paused(SliceEnd)` without running anything (it changes no
+        // frames), so it must not bump the pause generation and invalidate the host's frame tokens.
+        drive_and_fill(instance, out_outcome, fuel != 0, |inst| {
             run_slice(inst, directive, Some(fuel))
         })
     })
@@ -142,7 +144,9 @@ pub unsafe extern "C" fn doodle_capability_arg(
 /// Resolves a parked capability suspension (E§7.5) with `value` as its result, then drives on
 /// and writes the next stop to `out_outcome`. `value` becomes the capability call's result (a
 /// `to` capability ignores it, yielding Void). `ErrContract` if the instance is not suspended
-/// on a capability.
+/// on a capability. `value` is **borrowed, not consumed**: its value is copied into the resume and
+/// the host still owns the handle, so `doodle_release` it when done (unlike the consuming
+/// call-context setters, which take ownership of the handles passed to them, S-17).
 ///
 /// # Safety
 /// `instance` must be a live pointer from [`doodle_load`]; `out_outcome` must be writable.
@@ -162,7 +166,8 @@ pub unsafe extern "C" fn doodle_resolve(
 }
 
 /// Resolves a parked capability suspension (E§7.5) by **raising** `value` at the capability
-/// call site (E§9), then drives on. `ErrContract` if not suspended on a capability.
+/// call site (E§9), then drives on. `ErrContract` if not suspended on a capability. `value` is
+/// **borrowed, not consumed** — `doodle_release` it when done, as [`doodle_resolve`].
 ///
 /// # Safety
 /// As [`doodle_resolve`].
@@ -294,6 +299,7 @@ pub(crate) fn di_ref<'a>(
 fn drive_and_fill(
     instance: *mut DoodleInstance,
     out_outcome: *mut DoodleOutcome,
+    advanced: bool,
     run: impl FnOnce(&mut Instance) -> Outcome,
 ) -> DoodleStatus {
     let di = match di_mut(instance) {
@@ -309,7 +315,7 @@ fn drive_and_fill(
         let _drive = DriveScope::enter();
         run(&mut di.inner)
     };
-    let filled = fill_outcome(di, outcome);
+    let filled = fill_outcome(di, outcome, advanced);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`
     // by the caller's `# Safety` contract.
     unsafe { *out_outcome = filled };
@@ -341,19 +347,25 @@ fn resolve_and_fill(
         let _drive = DriveScope::enter();
         resolve(&mut di.inner, resolution)
     };
-    let filled = fill_outcome(di, outcome);
+    // A resolve always advances (it injects the host value and continues the drive).
+    let filled = fill_outcome(di, outcome, true);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`.
     unsafe { *out_outcome = filled };
     DoodleStatus::Ok
 }
 
 /// Fills a [`DoodleOutcome`] from a core [`Outcome`], stashing a raise's described form.
-fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome) -> DoodleOutcome {
+/// `advanced` is `false` only for a zero-fuel slice (`doodle_drive_slice(fuel=0)`), which yields
+/// `Paused(SliceEnd)` before running anything, so it must not invalidate the host's frame tokens.
+fn fill_outcome(di: &mut DoodleInstance, outcome: Outcome, advanced: bool) -> DoodleOutcome {
     let mut out = DoodleOutcome::blank();
-    // A state-advancing drive replaced the stack: bump the pause generation (D-M7-12), so a
-    // frame index a debugger obtained before this drive is now stale (`ErrStale`). Auxiliary
-    // evaluation restores the paused stack (S-22) and does not route here, so it never bumps.
-    di.generation = di.generation.wrapping_add(1);
+    // A state-advancing drive may have replaced the stack: bump the pause generation (D-M7-12), so
+    // a frame index a debugger obtained before this drive is now stale (`ErrStale`). A zero-fuel
+    // slice ran nothing (`advanced == false`), so its tokens stay valid. Auxiliary evaluation
+    // restores the paused stack (S-22) and does not route here, so it never bumps.
+    if advanced {
+        di.generation = di.generation.wrapping_add(1);
+    }
     di.last_raised = None;
     di.pending_args = None;
     di.pending_import = None;
