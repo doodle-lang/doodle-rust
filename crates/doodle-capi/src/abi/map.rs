@@ -45,6 +45,7 @@ pub(crate) fn position(pos: Position) -> DoodlePosition {
         span_start: pos.span.start,
         span_end: pos.span.end,
         module: pos.module.0,
+        reserved: [0; 1],
     }
 }
 

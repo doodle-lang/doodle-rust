@@ -299,6 +299,13 @@ pub struct DoodlePosition {
     pub span_end: u32,
     /// The opaque module token (see the type doc).
     pub module: u32,
+    /// Reserved for additive growth (freeze convention 2); always written as `0`. A position is
+    /// deliberately just (module, byte-span) (E§8.1: line/column is host-derived, the canonical id
+    /// resolves via the module token, and any secondary position belongs to the carrying struct,
+    /// which has its own tail), so this slot is **expected to stay zero forever**. It exists for
+    /// uniformity (no tailless by-value struct) and because a `DoodlePosition` is embedded by value
+    /// in `DoodleFrame`, where a wrong freeze would cascade — not as a planned growth point.
+    pub reserved: [u32; 1],
 }
 
 /// One live stack frame (E§8.2), filled by `doodle_frame_at` — pure data; the callable is minted

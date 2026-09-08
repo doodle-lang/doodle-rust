@@ -86,6 +86,7 @@ fn write_position(
                 span_start: 0,
                 span_end: 0,
                 module: 0,
+                reserved: [0; 1],
             },
         ),
     };
@@ -222,11 +223,13 @@ pub unsafe extern "C" fn doodle_frame_at(
                     span_start: 0,
                     span_end: 0,
                     module: 0,
+                    reserved: [0; 1],
                 },
                 |span| DoodlePosition {
                     span_start: span.start,
                     span_end: span.end,
                     module: info.module.0,
+                    reserved: [0; 1],
                 },
             ),
             tail_count: info.tail_count,

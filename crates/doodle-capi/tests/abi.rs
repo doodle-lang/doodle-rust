@@ -66,7 +66,7 @@ use doodle_capi::registry::{
 use doodle_capi::value::{
     doodle_as_bool, doodle_as_int, doodle_as_int_decimal, doodle_foreign_ptr, doodle_foreign_tag,
     doodle_kind_of, doodle_make_foreign, doodle_make_int, doodle_make_nil, doodle_make_string,
-    doodle_release, doodle_string_bytes,
+    doodle_release, doodle_retain, doodle_string_bytes,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -221,6 +221,46 @@ fn a_terminal_raise_exposes_the_exception_value_for_structural_inspection() {
     assert_eq!(&buf[..len], b"boom");
     // The handle is host-owned — release it.
     assert_eq!(unsafe { doodle_release(inst, out.value) }, DoodleStatus::Ok);
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
+fn doodle_retain_shares_ownership_and_does_not_resurrect() {
+    // Freeze decision (E§4.2 refcounted model): `doodle_retain` adds a reference and returns the
+    // same handle; a handle stays live until released as many times as obtained (mint + retain),
+    // and retain-after-final-release does NOT resurrect it (a contract failure → null handle).
+    let inst = load("raise \"boom\"\n");
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Raised);
+    let h = out.value; // one reference: the mint
+    assert_ne!(h, DOODLE_NULL_HANDLE);
+
+    // Retain returns the same handle (chainable), now 2 references.
+    assert_eq!(unsafe { doodle_retain(inst, h) }, h);
+
+    // One release drops to 1 reference; the handle is still live (readable).
+    assert_eq!(unsafe { doodle_release(inst, h) }, DoodleStatus::Ok);
+    let mut kind = DoodleKind::Nil;
+    assert_eq!(
+        unsafe { doodle_kind_of(inst, h, &mut kind) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(kind, DoodleKind::String);
+
+    // The second release drops to 0 — freed. A third release is a stale-handle error (S-35),
+    // and using the handle after the final release is a stale error, never a read of freed memory.
+    assert_eq!(unsafe { doodle_release(inst, h) }, DoodleStatus::Ok);
+    assert_eq!(
+        unsafe { doodle_release(inst, h) },
+        DoodleStatus::ErrStaleHandle
+    );
+    assert_eq!(
+        unsafe { doodle_kind_of(inst, h, &mut kind) },
+        DoodleStatus::ErrStaleHandle
+    );
+    // Retain-after-release does not resurrect: it returns the null handle.
+    assert_eq!(unsafe { doodle_retain(inst, h) }, DOODLE_NULL_HANDLE);
+
     unsafe { doodle_free(inst) };
 }
 
@@ -1195,6 +1235,7 @@ fn zero_pos() -> DoodlePosition {
         span_start: 0,
         span_end: 0,
         module: 0,
+        reserved: [0; 1],
     }
 }
 
@@ -1723,6 +1764,7 @@ fn debug_raise_trap_pauses_and_exposes_the_trapped_value() {
             span_start: 0,
             span_end: 0,
             module: 0,
+            reserved: [0; 1],
         },
         false,
     );

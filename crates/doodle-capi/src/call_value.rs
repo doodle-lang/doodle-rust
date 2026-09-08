@@ -254,7 +254,9 @@ pub unsafe extern "C" fn doodle_call_make_foreign(
 }
 
 /// A fresh **host-owned** handle to the element at `index` of a list (E§4.6). `ErrWrongKind` if
-/// not a list; `ErrIndexOutOfBounds` past the end.
+/// not a list; `ErrIndexOutOfBounds` past the end. `index` is a `u32`: element indices cross the
+/// ABI as fixed-width `u32` (the engine's heap is `u32`-indexed, machine-design ground rule 2),
+/// matching `doodle_list_get`.
 ///
 /// # Safety
 /// `ctx` live; `out` writable.
@@ -262,12 +264,12 @@ pub unsafe extern "C" fn doodle_call_make_foreign(
 pub unsafe extern "C" fn doodle_call_list_get(
     ctx: *mut DoodleCallCtx,
     list: DoodleHandle,
-    index: usize,
+    index: u32,
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     make_fallible(
         ctx,
-        |engine| engine.list_get(Handle::from_bits(list), index),
+        |engine| engine.list_get(Handle::from_bits(list), index as usize),
         out,
     )
 }

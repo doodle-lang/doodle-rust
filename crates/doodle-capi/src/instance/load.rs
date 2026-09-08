@@ -200,9 +200,14 @@ fn load_program(source: &str, config: Config, registry: Registry) -> Result<Inst
     // every safe point collect, so a determinism gate can drive the corpus through this C ABI under
     // GC pressure and confirm the trace matches the un-stressed oracle — exercising what in-crate
     // GC tests cannot (host-held handles as roots, finalizers firing at GC time across the C
-    // trampoline). Read here in the host layer (the engine takes no ambient input); latched
-    // pre-first-drive, so a freshly loaded instance always accepts it. NOT part of the frozen ABI:
-    // it adds no `doodle.h` symbol.
+    // trampoline). Latched pre-first-drive, so a freshly loaded instance always accepts it. NOT
+    // part of the frozen ABI: it adds no `doodle.h` symbol.
+    //
+    // **The ambient read is behind the `gc-stress` feature** (off by default): the shipped library
+    // must not silently vary with an environment variable, so only the gate build reads it. Only
+    // this env read is gated: the explicit `Instance::enable_gc_stress` path stays available in
+    // every build (that is the sanctioned input; the engine itself never reads the environment).
+    #[cfg(feature = "gc-stress")]
     if std::env::var_os("DOODLE_GC_STRESS").is_some_and(|v| !v.is_empty()) {
         instance
             .enable_gc_stress()

@@ -46,8 +46,19 @@ struct Fixture {
 /// every instance the runner drives collect at every safe point, so the whole corpus is checked
 /// for GC-timing determinism against the **same** committed oracle (E§11). A pure host-side test
 /// hook — the engine never reads it (see `doodle_core::machine::Instance::enable_gc_stress`).
+///
+/// The env read is behind the `gc-stress` feature (off by default, mirroring doodle-capi): an
+/// ordinary conformance run never reads the environment; the gate build enables it. Always `false`
+/// without the feature.
 pub(crate) fn gc_stress_requested() -> bool {
-    std::env::var_os("DOODLE_GC_STRESS").is_some_and(|v| !v.is_empty())
+    #[cfg(feature = "gc-stress")]
+    {
+        std::env::var_os("DOODLE_GC_STRESS").is_some_and(|v| !v.is_empty())
+    }
+    #[cfg(not(feature = "gc-stress"))]
+    {
+        false
+    }
 }
 
 /// Latches GC-stress on a freshly-loaded instance when the env hook asks for it — called right

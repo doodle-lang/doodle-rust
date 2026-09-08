@@ -8,6 +8,13 @@
 //! racing other tests: this binary runs exactly one test, on one thread, and reads the variable
 //! (via `doodle_load`) on that same thread before anything else could observe it.
 
+// This binary drives the GC-stress hook through `doodle_load`'s `DOODLE_GC_STRESS` env read, which
+// is behind the off-by-default `gc-stress` feature (so the shipped library never reads the env).
+// The whole binary is therefore gated on that feature: a default `cargo test` compiles it to
+// nothing; the gate build (`cargo test -p doodle-capi --features gc-stress`, and the Miri job) runs
+// it. `Instance::enable_gc_stress()` is ungated, but this test deliberately exercises the C env
+// path a real host uses.
+#![cfg(feature = "gc-stress")]
 // Each `unsafe` block below is a single FFI call made exactly as a C host would, with its
 // preconditions (a live instance, valid out-params) established by the surrounding setup — a
 // per-call SAFETY comment would only restate that (as in `tests/abi.rs`). The one `set_var` is

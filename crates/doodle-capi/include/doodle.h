@@ -707,6 +707,15 @@ typedef struct DoodlePosition {
    * The opaque module token (see the type doc).
    */
   uint32_t module;
+  /**
+   * Reserved for additive growth (freeze convention 2); always written as `0`. A position is
+   * deliberately just (module, byte-span) (E§8.1: line/column is host-derived, the canonical id
+   * resolves via the module token, and any secondary position belongs to the carrying struct,
+   * which has its own tail), so this slot is **expected to stay zero forever**. It exists for
+   * uniformity (no tailless by-value struct) and because a `DoodlePosition` is embedded by value
+   * in `DoodleFrame`, where a wrong freeze would cascade — not as a planned growth point.
+   */
+  uint32_t reserved[1];
 } DoodlePosition;
 
 /**
@@ -1038,14 +1047,15 @@ DoodleStatus doodle_call_as_bool(struct DoodleCallCtx *ctx, DoodleHandle handle,
 DoodleStatus doodle_call_is_nil(struct DoodleCallCtx *ctx, DoodleHandle handle, bool *out);
 
 /**
- * Writes the number of elements in a list (E§4.6). `ErrWrongKind` if not a list.
+ * Writes the number of elements in a list (E§4.6) as a `u32`. `ErrWrongKind` if not a list.
+ * Element counts cross the ABI as fixed-width `u32`: the engine's heap is `u32`-indexed
+ * (machine-design ground rule 2), so a list cannot hold more than `u32::MAX` elements — the
+ * width is engine-guaranteed, not an approximation. Matches `doodle_list_length`.
  *
  * # Safety
  * `ctx` live; `out` writable.
  */
-DoodleStatus doodle_call_list_length(struct DoodleCallCtx *ctx,
-                                     DoodleHandle handle,
-                                     uintptr_t *out);
+DoodleStatus doodle_call_list_length(struct DoodleCallCtx *ctx, DoodleHandle handle, uint32_t *out);
 
 /**
  * Writes a foreign value's host `tag` (E§4.5). `ErrWrongKind` if not a foreign value.
@@ -1209,14 +1219,16 @@ DoodleStatus doodle_call_make_foreign(struct DoodleCallCtx *ctx,
 
 /**
  * A fresh **host-owned** handle to the element at `index` of a list (E§4.6). `ErrWrongKind` if
- * not a list; `ErrIndexOutOfBounds` past the end.
+ * not a list; `ErrIndexOutOfBounds` past the end. `index` is a `u32`: element indices cross the
+ * ABI as fixed-width `u32` (the engine's heap is `u32`-indexed, machine-design ground rule 2),
+ * matching `doodle_list_get`.
  *
  * # Safety
  * `ctx` live; `out` writable.
  */
 DoodleStatus doodle_call_list_get(struct DoodleCallCtx *ctx,
                                   DoodleHandle list,
-                                  uintptr_t index,
+                                  uint32_t index,
                                   DoodleHandle *out);
 
 /**
@@ -2564,13 +2576,27 @@ DoodleStatus doodle_string_bytes(const struct DoodleInstance *instance,
 
 /**
  * Releases a host-owned handle (E§4.2): decrements its reference count, freeing the slot at
- * zero. `ErrStaleHandle` if already freed. A handle must be released exactly as many times
- * as it was obtained.
+ * zero. `ErrStaleHandle` if already freed. A reference is obtained by minting a handle or by
+ * [`doodle_retain`]; release exactly as many times as obtained.
  *
  * # Safety
  * `instance` must be a live pointer from `doodle_load`.
  */
 DoodleStatus doodle_release(struct DoodleInstance *instance, DoodleHandle handle);
+
+/**
+ * Adds a reference to a host-owned handle (E§4.2) and returns the **same** handle, so a call
+ * chains (`h = doodle_retain(inst, h)`) — the `CFRetain`/`AddRef` idiom for shared ownership.
+ * A reference is obtained by minting a handle or by `doodle_retain`; the host must
+ * [`doodle_release`] it exactly as many times as obtained. Returns `DOODLE_NULL_HANDLE` if
+ * `handle` is stale/forged (already fully released) — or, as the panic firewall's last resort,
+ * if the call panics; a null return means the retain did not take, so the host must not treat it
+ * as a live reference.
+ *
+ * # Safety
+ * `instance` must be a live pointer from `doodle_load`.
+ */
+DoodleHandle doodle_retain(struct DoodleInstance *instance, DoodleHandle handle);
 
 #ifdef __cplusplus
 }  // extern "C"

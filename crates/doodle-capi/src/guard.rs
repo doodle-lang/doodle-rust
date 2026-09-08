@@ -16,3 +16,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub(crate) fn catch(body: impl FnOnce() -> DoodleStatus) -> DoodleStatus {
     catch_unwind(AssertUnwindSafe(body)).unwrap_or(DoodleStatus::ErrPanic)
 }
+
+/// Like [`catch`] but for an entry point that returns a value other than [`DoodleStatus`] — e.g.
+/// [`doodle_retain`](crate::value::doodle_retain) returns the handle directly (chainable, E§4.2),
+/// so its firewall value on a caught panic is `on_panic` (a null handle) rather than `ErrPanic`.
+pub(crate) fn catch_or<T>(on_panic: T, body: impl FnOnce() -> T) -> T {
+    catch_unwind(AssertUnwindSafe(body)).unwrap_or(on_panic)
+}

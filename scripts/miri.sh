@@ -43,7 +43,13 @@ cd "$REPO_DIR"
 # Tests run under Miri's default (Stacked Borrows + isolation). The doodle-capi
 # suite is self-contained — no real clock/filesystem/RNG on any path it drives —
 # so isolation stays on (a stricter, more deterministic check).
+#
+# `--features gc-stress` so the `tests/gc_stress.rs` binary (gated on that feature — the
+# `DOODLE_GC_STRESS` env read it exercises is off by default) runs here: a foreign finalizer firing
+# at GC time across the C trampoline under every-safe-point collection is exactly the use-after-free
+# shape Miri is strongest at. The feature only enables that env read; no other test's behavior
+# changes.
 echo "Running Miri over doodle-capi (${MIRI_TOOLCHAIN})..."
-cargo "+${MIRI_TOOLCHAIN}" miri test --package doodle-capi
+cargo "+${MIRI_TOOLCHAIN}" miri test --package doodle-capi --features gc-stress
 
 echo "=== miri OK ==="

@@ -22,5 +22,13 @@ crate-type = ["staticlib", "rlib"]
 [lints]
 workspace = true
 
+[features]
+# The GC-stress determinism-gate hook (D-M7-11): when enabled, `doodle_load` reads the
+# `DOODLE_GC_STRESS` environment variable to latch every-safe-point collection. Off by default so
+# the shipped library never reads the environment (a production embedder's behavior must not vary
+# with an ambient variable); the gate job (`scripts/gc-stress-conformance.sh`) builds with it. The
+# explicit `Instance::enable_gc_stress()` path is always available regardless of this feature.
+gc-stress = []
+
 [dependencies]
 doodle-core = { path = "../doodle-core" }

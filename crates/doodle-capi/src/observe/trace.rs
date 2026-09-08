@@ -24,6 +24,7 @@ const NO_POSITION: DoodlePosition = DoodlePosition {
     span_start: 0,
     span_end: 0,
     module: 0,
+    reserved: [0; 1],
 };
 
 /// Writes the number of **live frames** in the retained trace of the last terminal raise (E§9)
@@ -79,6 +80,7 @@ pub unsafe extern "C" fn doodle_raised_trace_frame_at(
                 span_start: span.start,
                 span_end: span.end,
                 module: 0,
+                reserved: [0; 1],
             }),
             tail_count: info.tail_count,
             module: 0,

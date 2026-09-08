@@ -109,7 +109,10 @@ pub unsafe extern "C" fn doodle_call_is_nil(
     read(ctx, |engine| engine.is_nil(Handle::from_bits(handle)), out)
 }
 
-/// Writes the number of elements in a list (E§4.6). `ErrWrongKind` if not a list.
+/// Writes the number of elements in a list (E§4.6) as a `u32`. `ErrWrongKind` if not a list.
+/// Element counts cross the ABI as fixed-width `u32`: the engine's heap is `u32`-indexed
+/// (machine-design ground rule 2), so a list cannot hold more than `u32::MAX` elements — the
+/// width is engine-guaranteed, not an approximation. Matches `doodle_list_length`.
 ///
 /// # Safety
 /// `ctx` live; `out` writable.
@@ -117,11 +120,15 @@ pub unsafe extern "C" fn doodle_call_is_nil(
 pub unsafe extern "C" fn doodle_call_list_length(
     ctx: *mut DoodleCallCtx,
     handle: DoodleHandle,
-    out: *mut usize,
+    out: *mut u32,
 ) -> DoodleStatus {
     read(
         ctx,
-        |engine| engine.list_length(Handle::from_bits(handle)),
+        |engine| {
+            engine
+                .list_length(Handle::from_bits(handle))
+                .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        },
         out,
     )
 }

@@ -24,6 +24,7 @@ fn pos_in(span: Span, module_token: u32) -> DoodlePosition {
         span_start: span.start,
         span_end: span.end,
         module: module_token,
+        reserved: [0; 1],
     }
 }
 

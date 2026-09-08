@@ -6,7 +6,7 @@
 //! (freeze convention 4) — no interior pointer escapes the engine.
 
 use crate::abi::{self, DoodleFinalizer, DoodleHandle, DoodleKind, DoodleStatus};
-use crate::guard::catch;
+use crate::guard::{catch, catch_or};
 use crate::instance::{DoodleInstance, di_mut, di_ref};
 use doodle_core::machine::{Finalizer, Handle, Instance, ValueError};
 
@@ -423,8 +423,8 @@ pub unsafe extern "C" fn doodle_string_bytes(
 }
 
 /// Releases a host-owned handle (E§4.2): decrements its reference count, freeing the slot at
-/// zero. `ErrStaleHandle` if already freed. A handle must be released exactly as many times
-/// as it was obtained.
+/// zero. `ErrStaleHandle` if already freed. A reference is obtained by minting a handle or by
+/// [`doodle_retain`]; release exactly as many times as obtained.
 ///
 /// # Safety
 /// `instance` must be a live pointer from `doodle_load`.
@@ -441,6 +441,33 @@ pub unsafe extern "C" fn doodle_release(
         match inst.release(Handle::from_bits(handle)) {
             Ok(()) => DoodleStatus::Ok,
             Err(err) => abi::handle_error(err),
+        }
+    })
+}
+
+/// Adds a reference to a host-owned handle (E§4.2) and returns the **same** handle, so a call
+/// chains (`h = doodle_retain(inst, h)`) — the `CFRetain`/`AddRef` idiom for shared ownership.
+/// A reference is obtained by minting a handle or by `doodle_retain`; the host must
+/// [`doodle_release`] it exactly as many times as obtained. Returns `DOODLE_NULL_HANDLE` if
+/// `handle` is stale/forged (already fully released) — or, as the panic firewall's last resort,
+/// if the call panics; a null return means the retain did not take, so the host must not treat it
+/// as a live reference.
+///
+/// # Safety
+/// `instance` must be a live pointer from `doodle_load`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn doodle_retain(
+    instance: *mut DoodleInstance,
+    handle: DoodleHandle,
+) -> DoodleHandle {
+    catch_or(abi::DOODLE_NULL_HANDLE, || {
+        let inst = match instance_mut(instance) {
+            Ok(inst) => inst,
+            Err(_) => return abi::DOODLE_NULL_HANDLE,
+        };
+        match inst.retain(Handle::from_bits(handle)) {
+            Ok(h) => h.bits(),
+            Err(_) => abi::DOODLE_NULL_HANDLE,
         }
     })
 }

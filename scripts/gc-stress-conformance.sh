@@ -26,22 +26,30 @@ ensure_cargo
 cd "$REPO_DIR"
 
 # The host hook: latched (pre-first-drive) by the native runner and the C host's `doodle_load`.
+# The env read is behind the `gc-stress` cargo feature (off by default, so the shipped library
+# never reads the environment), and it is a `--release` gate on purpose: a debug-only gate would
+# certify a build nobody ships, and GC-timing bugs can be optimization-dependent. So EVERY build
+# below is `--release --features gc-stress` — do not drop either flag.
 export DOODLE_GC_STRESS=1
+RELEASE_GC_STRESS="--release --features gc-stress"
 
 echo "Native conformance under GC-stress..."
-cargo run --quiet --package conformance-runner -- conformance
+# shellcheck disable=SC2086
+cargo run --quiet $RELEASE_GC_STRESS --package conformance-runner -- conformance
 
 CC="${CC:-cc}"
 INCLUDE="crates/doodle-capi/include"
 STATIC="target/release/libdoodle_capi.a"
 
-echo "Building doodle-capi (release static library)..."
-cargo build --release --package doodle-capi
+echo "Building doodle-capi (release static library, gc-stress feature)..."
+# shellcheck disable=SC2086
+cargo build $RELEASE_GC_STRESS --package doodle-capi
 [ -f "$STATIC" ] || { echo "ERROR: expected static archive not found: $STATIC"; exit 1; }
 
 # A Rust staticlib does not bundle the system libraries it needs; rustc reports them on a
 # `note: native-static-libs:` line.
-native_libs=$(cargo rustc --release --package doodle-capi --quiet \
+# shellcheck disable=SC2086
+native_libs=$(cargo rustc $RELEASE_GC_STRESS --package doodle-capi --quiet \
     -- --print native-static-libs 2>&1 \
     | sed -n 's/^note: native-static-libs: //p' | tail -1)
 [ -n "$native_libs" ] || { echo "ERROR: could not parse native-static-libs"; exit 1; }
@@ -56,6 +64,7 @@ echo "Compiling + static-linking the C conformance host with $CC..."
     -I "$INCLUDE" "$STATIC" $native_libs -o "$HOST"
 
 echo "Conformance through the C host under GC-stress..."
-cargo run --quiet --package conformance-runner -- --c-host "$HOST" conformance
+# shellcheck disable=SC2086
+cargo run --quiet $RELEASE_GC_STRESS --package conformance-runner -- --c-host "$HOST" conformance
 
 echo "=== gc-stress conformance OK ==="

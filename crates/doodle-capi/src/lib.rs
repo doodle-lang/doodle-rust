@@ -17,6 +17,14 @@
 //!    surfaces are **opaque + builder functions** (a new setter is additive); the
 //!    fixed-layout [`abi::DoodleOutcome`] carries a **reserved tail** and an
 //!    unknown-tag value so a new outcome kind or field fits without a resize.
+//!    **Every** by-value struct carries a `reserved` tail — **no exceptions**, even one
+//!    argued structurally complete (e.g. [`abi::DoodlePosition`], which is deliberately
+//!    just (module, span) and whose tail is expected to stay zero forever): a tailless
+//!    exception is perpetual re-litigation, and a by-value struct embedded in another
+//!    (Position in [`abi::DoodleFrame`]) would cascade a wrong freeze. The reserved
+//!    convention is uniform: the **producer writes zero, the consumer ignores** the tail,
+//!    and a slot is repurposable **only at a minor ABI-version bump** ([`doodle_abi_version`]
+//!    gates it) — so the growth mechanism is actually usable, not just present.
 //! 3. **Names are prefixed.** Types are `Doodle*`, functions `doodle_*`, and enum
 //!    constants are name-prefixed (`DoodleStatus_Ok`), so nothing pollutes the
 //!    global C namespace.
@@ -27,9 +35,15 @@
 //!    out-params; nothing panics across the boundary — every entry point is wrapped
 //!    in [`guard::catch`] so a Rust panic becomes `DoodleStatus_ErrPanic`, never UB
 //!    (the drive path is dense with `debug_assert!`/`unreachable!`).
-//! 6. **Platform-neutral** (D-M7-9): no compiler-specific attributes, no
-//!    platform-varying sizes in the header — certification is Linux-only for M7, but
-//!    the surface is portable.
+//! 6. **Platform-neutral** (D-M7-9): no compiler-specific attributes, and no
+//!    platform-varying sizes for the values the ABI *defines* — certification is
+//!    Linux-only for M7, but the surface is portable. Concretely: **element counts and
+//!    indices cross as fixed-width `u32`** (the engine's heap is `u32`-indexed, so this
+//!    is the real width, not a cap — `doodle_list_length`/`_get` and their `call_*`
+//!    peers all use `u32`); **raw byte-buffer sizes cross as `size_t`** (the copy-out
+//!    `cap`/`out_len` of convention 4 — a memory quantity, correctly platform-width).
+//!    A `uintptr_t` for an *opaque host pointer* a foreign value round-trips is not an
+//!    ABI-defined size and is exempt.
 //! 7. **Host-supplied discriminants are validated, never trusted** (R3). A parameter carrying an
 //!    enum *from* the host crosses as a plain `uint32_t` and is range-checked to a known variant,
 //!    returning [`abi::DoodleStatus::ErrContract`] (or the entry's failure signal) on an unknown
@@ -60,14 +74,20 @@
 //!
 //! # Certification hooks (NOT part of the ABI)
 //!
-//! For determinism certification (D-M7-11), `doodle_load` honors one environment variable:
+//! For determinism certification (D-M7-11), `doodle_load` can honor one environment variable:
 //! **`DOODLE_GC_STRESS`**: when set to any non-empty value, every instance it creates collects at
 //! **every** safe point, so a test harness can drive a corpus under maximal GC pressure and confirm
 //! the trace is byte-identical to an un-stressed run (GC timing is unobservable, E§11). This is a
 //! **test/CI hook, deliberately not a `doodle.h` symbol**: it is read once, in this host layer, and
 //! latched before the first drive (the engine never reads the environment, so the E§11 determinism
-//! boundary stays exact). Production embedders can ignore it; leaving it unset is the default and
-//! has zero effect.
+//! boundary stays exact).
+//!
+//! **The env read is behind the off-by-default `gc-stress` cargo feature.** A shipped library must
+//! not silently vary with an ambient variable, so a default build ignores `DOODLE_GC_STRESS`
+//! entirely; only a build with `--features gc-stress` reads it (the gate,
+//! `scripts/gc-stress-conformance.sh`, builds `--release --features gc-stress`). An embedder who
+//! wants to run the determinism gate against their own build opts in the same way. The explicit
+//! `Instance::enable_gc_stress` path (doodle-core) is unaffected by the feature.
 
 use std::ffi::{CString, c_char};
 use std::sync::OnceLock;
