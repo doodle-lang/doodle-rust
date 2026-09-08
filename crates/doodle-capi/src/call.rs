@@ -76,6 +76,13 @@ impl SendPtr {
 /// block, and reports a result/raise via `doodle_call_set_result`/`doodle_call_set_raise`.
 /// Returns `DoodleStatus_Ok` on success; a non-`Ok` return (or a panic) faults the drive
 /// `Internal` — a Doodle-level error is a *raise* (`doodle_call_set_raise`), not a status.
+///
+/// **Determinism contract (S-19, E§5.2/§11).** A synchronous foreign function MUST be
+/// deterministic: for the same arguments it must return the same result and cause no run-to-run-
+/// varying observable effect. Anything that reads a clock, entropy, user input, or other external
+/// state must instead be a **suspending capability** — its resolution crosses the recordable
+/// boundary and enters the replay stream — never a sync foreign function. The engine cannot
+/// enforce this; violating it silently breaks replay and cross-surface trace identity (E§11).
 pub type DoodleForeignFn =
     extern "C" fn(ctx: *mut DoodleCallCtx, user_data: *mut c_void) -> DoodleStatus;
 

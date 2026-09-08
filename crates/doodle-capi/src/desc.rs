@@ -299,6 +299,10 @@ pub unsafe extern "C" fn doodle_foreign_desc_default_bytes(
 /// function is called, and an opaque `user_data` passed to it verbatim. A foreign function must
 /// have a callback (else `doodle_registry_add_foreign` returns `ErrContract`).
 ///
+/// The callback MUST be deterministic (S-19): a clock/entropy/input/external-state read must be a
+/// suspending capability, not a sync foreign function, or replay breaks silently — see
+/// [`DoodleForeignFn`](crate::call::DoodleForeignFn).
+///
 /// # Safety
 /// `desc` a live descriptor; `callback` a valid, non-NULL function pointer; `user_data` is
 /// opaque (never dereferenced by the engine).

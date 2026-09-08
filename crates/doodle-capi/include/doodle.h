@@ -676,6 +676,13 @@ typedef void (*DoodleFinalizer)(uint64_t ptr);
  * block, and reports a result/raise via `doodle_call_set_result`/`doodle_call_set_raise`.
  * Returns `DoodleStatus_Ok` on success; a non-`Ok` return (or a panic) faults the drive
  * `Internal` — a Doodle-level error is a *raise* (`doodle_call_set_raise`), not a status.
+ *
+ * **Determinism contract (S-19, E§5.2/§11).** A synchronous foreign function MUST be
+ * deterministic: for the same arguments it must return the same result and cause no run-to-run-
+ * varying observable effect. Anything that reads a clock, entropy, user input, or other external
+ * state must instead be a **suspending capability** — its resolution crosses the recordable
+ * boundary and enters the replay stream — never a sync foreign function. The engine cannot
+ * enforce this; violating it silently breaks replay and cross-surface trace identity (E§11).
  */
 typedef DoodleStatus (*DoodleForeignFn)(struct DoodleCallCtx *ctx, void *user_data);
 
@@ -1414,6 +1421,10 @@ DoodleStatus doodle_foreign_desc_default_bytes(struct DoodleForeignDesc *desc,
  * Sets the descriptor's callback (E§5.2): the C function the engine runs when the foreign
  * function is called, and an opaque `user_data` passed to it verbatim. A foreign function must
  * have a callback (else `doodle_registry_add_foreign` returns `ErrContract`).
+ *
+ * The callback MUST be deterministic (S-19): a clock/entropy/input/external-state read must be a
+ * suspending capability, not a sync foreign function, or replay breaks silently — see
+ * [`DoodleForeignFn`](crate::call::DoodleForeignFn).
  *
  * # Safety
  * `desc` a live descriptor; `callback` a valid, non-NULL function pointer; `user_data` is
