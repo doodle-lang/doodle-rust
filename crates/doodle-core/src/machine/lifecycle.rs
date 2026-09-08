@@ -6,11 +6,39 @@
 
 use super::handle::HandleError;
 use super::modload::Suspension;
-use super::{Handle, Instance, Value};
+use super::{Handle, Instance, InstanceState, Value};
 use crate::drive::{CapabilityId, CapabilityRequest, Directive};
 use crate::resolve::BodyKind;
 
+/// Why [`Instance::enable_gc_stress`] was refused: the GC-stress latch must be set exactly once,
+/// **before the first drive**. Re-latching, or latching after the instance has been driven, would
+/// make GC timing an observable mid-run change (E§11) — so it is a host-contract error, not a
+/// silent no-op.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GcStressRefused;
+
 impl Instance {
+    /// Turns on the **GC-stress** determinism hook (machine-design §15): every safe point then
+    /// collects, so a determinism gate can force a collection at every transiently-rooted window
+    /// and confirm the resulting trace is byte-identical to an un-stressed run (E§11 — GC timing
+    /// is unobservable). Exercising this **through a real C host** additionally covers what the
+    /// in-crate GC tests cannot: host-held handles as roots under a real churn pattern, and
+    /// foreign-value finalizers firing at GC time across the C trampoline.
+    ///
+    /// This is a **certification hook, not part of the frozen embedding contract**: the CLI/runner
+    /// and the C host reach it from a `DOODLE_GC_STRESS` environment toggle, so the engine itself
+    /// never reads ambient input (the determinism boundary, E§11, stays exact). It must be called
+    /// **once, before the first drive**: the latch is part of the run's identity, so re-latching,
+    /// or latching an already-driven instance, is a [`GcStressRefused`] contract error (setting it
+    /// mid-run would let GC timing leak into the trace).
+    pub fn enable_gc_stress(&mut self) -> Result<(), GcStressRefused> {
+        if self.machine.gc_every_safe_point || self.state != InstanceState::Ready {
+            return Err(GcStressRefused);
+        }
+        self.machine.gc_every_safe_point = true;
+        Ok(())
+    }
+
     /// Whether the instance has parked a suspension — a capability request or an import
     /// (E§7.5/§6). The drive loop checks this after each step to return `Suspended`/
     /// `SuspendedImport`.
