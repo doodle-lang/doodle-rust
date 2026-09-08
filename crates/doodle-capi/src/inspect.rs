@@ -16,9 +16,10 @@ use crate::value::{copy_out, write_out};
 use doodle_core::machine::{Handle, Instance, ValueError};
 
 /// Auxiliary evaluation (`doodle_eval_to_string`), split out for length; re-exported so it stays
-/// `crate::inspect::doodle_eval_to_string`.
-mod aux;
-pub use aux::doodle_eval_to_string;
+/// `crate::inspect::doodle_eval_to_string`. Named `aux_eval` (not `aux`) because `aux` is a
+/// reserved device name on Windows — a file `aux.rs` cannot be checked out there.
+mod aux_eval;
+pub use aux_eval::doodle_eval_to_string;
 
 /// The engine [`Instance`] behind a `DoodleInstance` (shared); `ErrNullPointer` for NULL,
 /// `ErrContract` on a reentrant call from inside a drive (see [`di_ref`]).
