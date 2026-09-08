@@ -64,6 +64,45 @@ fn a_terminal_raise_exposes_its_exception_value_for_inspection() {
 }
 
 #[test]
+fn a_terminal_raise_exposes_its_trace_for_inspection() {
+    // R6 Part B: the retained trace (E§9) is readable post-mortem — the live frames plus the
+    // tail-elided history, each carrying its callable. `countdown` tail-calls itself, then
+    // raises; the trace shows a live `countdown` frame and an elided one.
+    let mut session = Session::demo(
+        "to countdown(n)\n\
+         if n == 0 then\n\
+         1 + true\n\
+         else\n\
+         countdown(n - 1)\n\
+         end\n\
+         end\n\
+         countdown(5)\n",
+    )
+    .unwrap();
+    let outcome = session.drive(Directive::RunToCompletion, None);
+    assert!(
+        matches!(outcome, DriveOutcome::Raised { .. }),
+        "{outcome:?}"
+    );
+    let trace = session
+        .raised_trace()
+        .expect("a terminal raise retains its trace");
+    assert!(
+        trace.iter().any(|f| !f.elided
+            && f.callable.as_ref().and_then(|c| c.name.as_deref()) == Some("countdown")),
+        "a live `countdown` frame is in the trace"
+    );
+    assert!(
+        trace.iter().any(|f| f.elided),
+        "the tail-elided history is present"
+    );
+    // A clean completion has no retained trace.
+    let mut clean = Session::demo("1 + 1\n").unwrap();
+    let _ = clean.drive(Directive::RunToCompletion, None);
+    assert!(clean.raised_trace().is_none());
+}
+
+#[test]
 fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
     // draw_line is capability id 3 in the turtle registry (print 0, sin 1, cos 2,
     // draw_line 3, set_turtle 4, clear_canvas 5). `forward(10)` at heading 0 draws

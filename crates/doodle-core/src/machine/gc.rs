@@ -51,6 +51,18 @@ pub(crate) fn collect(heap: &mut Heap, machine: &Machine) {
         if let Some(v) = machine.raised_value {
             tracer.value(v);
         }
+        // The retained trace's callables (E§9): the live-frame and tail-elided callables the
+        // post-mortem trace reader mints handles for, kept alive though the frames unwound.
+        if let Some(trace) = &machine.raised_trace {
+            for frame in &trace.frames {
+                if let Some(cal) = frame.callable {
+                    tracer.callable(cal);
+                }
+            }
+            for &cal in &trace.tail_elided {
+                tracer.callable(cal);
+            }
+        }
         if let Some(v) = machine.unwind.as_ref().and_then(|u| u.gc_value()) {
             tracer.value(v);
         }

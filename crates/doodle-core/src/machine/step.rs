@@ -268,7 +268,7 @@ pub(crate) fn arm_raise(
     // Capture the trace from the raise-site frames before materializing anything (L§12.1:
     // captured at the point of raise). The Rust `?` that surfaced the raise did not touch
     // the CESK frames, so they still reflect the raise site.
-    let trace = super::observe::capture_trace(resolved, heap, machine, raise.trace.raised_at);
+    let trace = super::observe::capture_trace(resolved, machine, raise.trace.raised_at);
     let value = super::exception::make_error(
         heap,
         machine.error_type,

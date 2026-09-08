@@ -104,7 +104,6 @@ pub(crate) fn catch(
 /// handled — the top of the handling stack — with its **original** trace.
 pub(crate) fn raise_apply(
     resolved: &ResolvedModule,
-    heap: &Heap,
     machine: &mut Machine,
     node: NodeId,
 ) -> Result<(), Raise> {
@@ -113,7 +112,7 @@ pub(crate) fn raise_apply(
         Node::Raise(Some(_)) => {
             // `raise value`: throw the evaluated value with a trace captured here.
             let value = take_value(machine, span)?;
-            let trace = super::observe::capture_trace(resolved, heap, machine, Some(span));
+            let trace = super::observe::capture_trace(resolved, machine, Some(span));
             (value, trace)
         }
         // A bare `raise` re-raises the exception being handled, with its **original**

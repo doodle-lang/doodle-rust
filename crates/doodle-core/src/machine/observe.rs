@@ -8,17 +8,19 @@
 //! and the host renders line/column from the source it holds (as diagnostics do). Value
 //! inspection of the handles these mint is `machine/inspect.rs` (E§8.4).
 
-use super::error::{Trace, TraceFrame};
 use super::frame::FrameKind;
-use super::{CalIdx, CellIdx, Handle, Instance, Machine, ObservationMode, Value};
+use super::{CalIdx, CellIdx, Handle, Instance, ObservationMode, Value};
 use crate::ast::Node;
 use crate::diag::Diagnostic;
-use crate::heap::Heap;
 use crate::machine::cont::Cont;
-use crate::resolve::{BodyKind, ResolvedModule};
+use crate::resolve::BodyKind;
 use crate::span::{ModuleId, Span};
 
 mod bindings;
+mod trace;
+
+pub use trace::TraceFrameInfo;
+pub(crate) use trace::capture_trace;
 
 /// A name→value binding the debugger shows for a frame (E§8.2): a **local** (a parameter or
 /// a `let`/`const` in scope) or a **dynamic parameter** bound by `with`. `value` is `None`
@@ -450,40 +452,5 @@ impl Instance {
             _ => return None,
         };
         stmts.get(next as usize).copied()
-    }
-}
-
-/// Captures a raise's trace (E§8.2/§9, L§12.1) from the machine state at the raise site,
-/// **before any unwinding**: the raising position, the live call stack (innermost first),
-/// and the bounded tail-elided history (most-recent first, its callables' decl spans).
-/// Deterministic (E§11) and mints no handles (unlike [`Instance::stack_walk`]) — the trace
-/// holds only engine-internal spans, so it never leaks host-owned references.
-pub(crate) fn capture_trace(
-    resolved: &ResolvedModule,
-    heap: &Heap,
-    machine: &Machine,
-    raised_at: Option<Span>,
-) -> Trace {
-    let frames = machine
-        .frames
-        .iter()
-        .rev()
-        .map(|frame| TraceFrame {
-            call_site: frame.call_site.map(|node| resolved.ast.span(node)),
-            tail_count: frame.tail_count,
-        })
-        .collect();
-    let tail_elided = machine
-        .ring
-        .most_recent_first()
-        .map(|cal| {
-            let id = heap.callable(cal).source_id() as usize;
-            resolved.ast.span(resolved.callables[id].decl)
-        })
-        .collect();
-    Trace {
-        raised_at,
-        frames,
-        tail_elided,
     }
 }

@@ -100,6 +100,21 @@ impl DoodleInstance {
         obj
     }
 
+    /// The retained trace of the last terminal raise (E§9) as an array of frame objects — the
+    /// **post-mortem** analogue of [`stackWalk`](DoodleInstance::stack_walk): the live frames
+    /// (innermost first) then the tail-elided history (each `elided`), same per-frame shape.
+    /// `undefined` if the last drive did not end `raised`. Every frame is plain GC-owned data;
+    /// nothing to `release`. A trace frame carries no `locals`/`dynamics` (the frames unwound).
+    #[wasm_bindgen(js_name = raisedTrace)]
+    pub fn raised_trace(&mut self) -> Option<js_sys::Array> {
+        let frames = self.session.raised_trace()?;
+        let arr = js_sys::Array::new();
+        for frame in &frames {
+            arr.push(&frame_value(frame));
+        }
+        Some(arr)
+    }
+
     /// A fresh **host-owned** handle (release it) to frame `frame`'s `slot`-th local value
     /// (§8.2), or `undefined` for an out-of-range/uninitialized slot. Throws if `generation`
     /// is stale (the stack advanced since the walk).

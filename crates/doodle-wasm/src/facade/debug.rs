@@ -173,6 +173,52 @@ impl Session {
         out
     }
 
+    /// The retained trace of the last terminal raise (E§9), or `None` if the last drive did not
+    /// end `Raised`: the live frames (innermost first) then the tail-elided history (most recent
+    /// first, each `elided`) — the **post-mortem** analogue of [`stack_walk`](Self::stack_walk),
+    /// read from the retained trace after the live frames have unwound. Same plain-data
+    /// discipline: each callable is reflected and its handle freed. A trace frame carries no
+    /// live `locals`/`dynamics` (those unwound); its callable + call site are its label.
+    pub fn raised_trace(&mut self) -> Option<Vec<FrameData>> {
+        let frames = self.instance.raised_trace_frame_count()?;
+        let mut out = Vec::with_capacity(frames);
+        for index in 0..frames {
+            let info = self.instance.raised_trace_frame(index).unwrap();
+            let callable = if info.has_callable {
+                let handle = self.instance.raised_trace_frame_callable(index).unwrap();
+                let reflected = self.reflect_callable(handle);
+                let _ = self.instance.release(handle);
+                Some(reflected)
+            } else {
+                None
+            };
+            out.push(FrameData {
+                callable,
+                call_site: info.call_site.map(span_pair),
+                tail_count: info.tail_count,
+                locals: Vec::new(),
+                dynamics: Vec::new(),
+                module: None,
+                elided: false,
+            });
+        }
+        for index in 0..self.instance.raised_trace_tail_count().unwrap_or(0) {
+            let (handle, _pos) = self.instance.raised_trace_tail_entry(index).unwrap();
+            let info = self.reflect_callable(handle);
+            let _ = self.instance.release(handle);
+            out.push(FrameData {
+                callable: Some(info),
+                call_site: None,
+                tail_count: 0,
+                locals: Vec::new(),
+                dynamics: Vec::new(),
+                module: None,
+                elided: true,
+            });
+        }
+        Some(out)
+    }
+
     /// The module-level bindings of module `module` (E§8.2, the home module of a
     /// [`stack_walk`](Self::stack_walk) frame), each `{name, kind, slot}` — the handle-free eager
     /// half; read a value lazily with [`module_global_value`](Self::module_global_value). Module

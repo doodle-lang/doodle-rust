@@ -317,3 +317,8 @@ pub use bindings::*;
 /// history, and load diagnostics (M7.3d) — split out for length.
 mod debug;
 pub use debug::*;
+
+/// The retained-trace accessors — a terminal raise's post-mortem frames + tail-elided history
+/// (E§9, M7.7 R6) — split out for length.
+mod trace;
+pub use trace::*;

@@ -201,7 +201,7 @@ pub(super) fn dispatch(
         Some(Cont::TryHandler { .. }) => Ok(()),
         // A `raise` throws its operand (or re-raises the handled exception), arming the
         // Raise unwind (protect.rs).
-        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, heap, machine, raise),
+        Some(Cont::RaiseApply { raise }) => protect::raise_apply(resolved, machine, raise),
         // A rescue body finished normally: pop the exception it was handling (L§12.2).
         Some(Cont::PopHandler) => {
             machine.pop_handling();

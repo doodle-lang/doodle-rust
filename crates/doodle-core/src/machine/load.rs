@@ -200,6 +200,7 @@ impl Instance {
                 frames: vec![frame],
                 reg: None,
                 raised_value: None,
+                raised_trace: None,
                 frame_serial: 1,
                 unwind: None,
                 ring: ring::RingBuffer::new(),

@@ -18,6 +18,7 @@ impl Machine {
             frames: Vec::new(),
             reg: None,
             raised_value: None,
+            raised_trace: None,
             frame_serial: 0,
             unwind: None,
             ring: ring::RingBuffer::new(),
@@ -3043,4 +3044,61 @@ fn a_raise_in_tail_recursion_captures_frames_and_tail_elided_history() {
         }
     }
     panic!("the raise never reached the boundary");
+}
+
+/// A terminal uncaught raise retains its **trace** (E§9) for post-mortem reading, and the
+/// retained trace roots its callables: a live frame's and a tail-elided entry's callable
+/// handle still reflects (`callable_name`) after a collection held across the terminal
+/// `Raised` state — the live frames have unwound, so a swept callable would read freed
+/// memory (caught under Miri/sanitizers) if the trace were not a GC root (rider 2).
+#[test]
+fn a_terminal_raise_retains_its_trace_across_collections() {
+    let mut inst = load_source(
+        "to countdown(n)\n\
+         if n == 0 then\n\
+         1 + true\n\
+         else\n\
+         countdown(n - 1)\n\
+         end\n\
+         end\n\
+         countdown(5)\n",
+    );
+    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion);
+    assert!(
+        matches!(outcome, crate::drive::Outcome::Raised(..)),
+        "expected a terminal raise, got {outcome:?}"
+    );
+    inst.force_collect();
+
+    let frames = inst
+        .raised_trace_frame_count()
+        .expect("a terminal raise retains its trace");
+    assert!(frames > 0, "the retained trace has live frames");
+    let mut named_countdown = false;
+    for i in 0..frames {
+        if inst.raised_trace_frame(i).unwrap().has_callable {
+            let handle = inst.raised_trace_frame_callable(i).unwrap();
+            if inst.callable_name(handle).unwrap().as_deref() == Some("countdown") {
+                named_countdown = true;
+            }
+        }
+    }
+    assert!(named_countdown, "a live `countdown` frame survives the GC");
+
+    // The tail-elided history (countdown tail-called itself) is retained and rooted too.
+    assert!(
+        inst.raised_trace_tail_count().unwrap() > 0,
+        "tail-elided history captured"
+    );
+    let (handle, _pos) = inst.raised_trace_tail_entry(0).unwrap();
+    assert_eq!(
+        inst.callable_name(handle).unwrap().as_deref(),
+        Some("countdown"),
+        "the elided callable is live after the GC"
+    );
+
+    // A non-raised drive retains no trace.
+    let mut clean = load_source("1 + 1\n");
+    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion);
+    assert!(clean.raised_trace_frame_count().is_none());
 }

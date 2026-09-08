@@ -6,7 +6,7 @@
 
 use super::handle::HandleError;
 use super::modload::Suspension;
-use super::{Handle, Instance, InstanceState, Value};
+use super::{Handle, Instance, InstanceState, Trace, Value};
 use crate::drive::{CapabilityId, CapabilityRequest, Directive};
 use crate::resolve::BodyKind;
 
@@ -43,6 +43,12 @@ impl Instance {
     /// by the drive loop when a raise reaches the outermost boundary. A GC root (`gc::collect`).
     pub(crate) fn set_raised_value(&mut self, value: Value) {
         self.machine.raised_value = Some(value);
+    }
+
+    /// Retains the raise's trace beside its value (E§9) for the post-mortem trace reader; set
+    /// by the drive loop at the outermost boundary. A GC root (its callables, `gc::collect`).
+    pub(crate) fn set_raised_trace(&mut self, trace: Trace) {
+        self.machine.raised_trace = Some(trace);
     }
 
     /// Whether the instance has parked a suspension — a capability request or an import
@@ -163,7 +169,6 @@ impl Instance {
         let value = self.machine.handles.resolve(handle)?;
         let trace = super::observe::capture_trace(
             self.current_resolved(),
-            &self.heap,
             &self.machine,
             Some(pending.span),
         );

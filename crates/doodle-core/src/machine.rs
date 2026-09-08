@@ -13,6 +13,7 @@
 //! host handles + the config surface (`machine/handle.rs`). The dynamic-parameter and
 //! drive stacks join with the features that need them (`plan/plan-m2a.md`).
 
+mod access;
 mod arith;
 mod assign;
 mod aux_eval;
@@ -81,7 +82,9 @@ pub use intrinsic::{
 };
 pub use lifecycle::GcStressRefused;
 pub use native::{ConstValue, NativeMember, NativeModule};
-pub use observe::{Binding, ElidedFrameObservation, FrameInfo, FrameObservation, Position};
+pub use observe::{
+    Binding, ElidedFrameObservation, FrameInfo, FrameObservation, Position, TraceFrameInfo,
+};
 pub use pause::PauseToken;
 pub(crate) use types::{BuiltinType, ProtocolType, RecordType, TypeKind};
 pub use value::{
@@ -159,6 +162,11 @@ pub(crate) struct Machine {
     /// until a raise reaches the outermost boundary. A GC root (like
     /// [`reg`](Machine::reg)); the terminal state pins it for the instance's life.
     raised_value: Option<Value>,
+    /// The trace of a terminal uncaught raise (E§9), retained beside `raised_value` so the
+    /// host can read the frames + tail-elided history post-mortem. `None` until a raise
+    /// reaches the outermost boundary. A GC root: its frame/tail-elided callables are heap
+    /// refs (`gc::collect` traces them) kept alive for the terminal state's life.
+    raised_trace: Option<Trace>,
     /// Monotonic frame-identity counter (machine-design §8): stamped into each
     /// pushed frame's `serial`, so a frame activation is distinguishable from a
     /// later reuse of the same stack slot (integrity for static links / consumers).
@@ -412,46 +420,6 @@ impl Instance {
     pub fn destroy(self) {
         // `self` drops at the end of this scope, running `Drop` (the finalizers). Named
         // explicitly so the E§3.1 `destroy` surface exists on the public API.
-    }
-
-    /// The current lifecycle state (E§3.3).
-    pub fn state(&self) -> InstanceState {
-        self.state
-    }
-
-    /// The result register: the last value produced, or `None` for Void
-    /// (L§6.11). After a top-level drive completes this is `None` — a module runs
-    /// for effect and yields Void.
-    pub fn result(&self) -> Option<Value> {
-        self.machine.reg
-    }
-
-    /// The instance's captured output — the bytes written by output intrinsics
-    /// (`print`, E§5.2) in execution order. The host's view of "standard output";
-    /// deterministic given deterministic execution (E§11).
-    pub fn output(&self) -> &[u8] {
-        &self.machine.output
-    }
-
-    /// Interns the current result value as a fresh host handle (engine spec E§4.2),
-    /// keeping it reachable across collections and later drives; `None` when the
-    /// result is Void. The host must [`release`](Self::release) it when done.
-    pub fn retain_result(&mut self) -> Option<Handle> {
-        self.machine
-            .reg
-            .map(|value| self.machine.handles.intern(value))
-    }
-
-    /// Adds a reference to `handle` (engine spec E§4.2). Errors on a stale handle
-    /// (used after release) — the boundary generation check.
-    pub fn retain(&mut self, handle: Handle) -> Result<Handle, HandleError> {
-        self.machine.handles.retain(handle)
-    }
-
-    /// Releases a reference to `handle` (engine spec E§4.2); at zero references its
-    /// value stops being a GC root. Errors on a stale handle.
-    pub fn release(&mut self, handle: Handle) -> Result<(), HandleError> {
-        values::release(&mut self.machine.handles, handle)
     }
 
     /// Sets the lifecycle state (the drive loop drives the transitions).

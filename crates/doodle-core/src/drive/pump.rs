@@ -109,9 +109,11 @@ pub(super) fn drive(instance: &mut Instance, directive: Directive, fuel: Option<
             // (E§3.3/§9), distinct from `Faulted`; the outcome carries exception + trace.
             Err(Halt::Raise(value, trace)) => {
                 instance.set_state(InstanceState::Raised);
-                // Retain the exception so the host can inspect it post-mortem (E§3.3/§8.4); the
-                // returned `Outcome` also carries it (`value` is `Copy`). Rooted by `gc::collect`.
+                // Retain the exception + trace so the host can inspect them post-mortem
+                // (E§3.3/§9, §8.4); the returned `Outcome` carries copies. Rooted by
+                // `gc::collect` — the trace holds the frame/tail-elided callables.
                 instance.set_raised_value(value);
+                instance.set_raised_trace(trace.clone());
                 return Outcome::Raised(value, trace);
             }
             // A resource limit (E§10.2), host cancellation (E§10.1), or the S-15

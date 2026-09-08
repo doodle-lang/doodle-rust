@@ -310,7 +310,7 @@ fn resolve_loaded(
         }
         LoadState::Loading => Err(circular_import(machine, id, span)),
         LoadState::Failed(value) => {
-            let trace = super::observe::capture_trace(resolved, heap, machine, Some(span));
+            let trace = super::observe::capture_trace(resolved, machine, Some(span));
             machine.arm_raise_value(value, trace);
             Ok(())
         }

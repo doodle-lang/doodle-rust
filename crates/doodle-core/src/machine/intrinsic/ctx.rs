@@ -444,7 +444,7 @@ pub(crate) fn apply(
                             return Ok(());
                         }
                     };
-                    let trace = observe::capture_trace(resolved, heap, machine, Some(span));
+                    let trace = observe::capture_trace(resolved, machine, Some(span));
                     machine.arm_raise_value(value, trace);
                     Ok(())
                 }

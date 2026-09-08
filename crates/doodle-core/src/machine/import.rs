@@ -177,7 +177,6 @@ impl Instance {
         // the trace against it, at the `import` site.
         let trace = super::observe::capture_trace(
             self.current_resolved(),
-            &self.heap,
             &self.machine,
             Some(pending.span),
         );
@@ -215,7 +214,6 @@ impl Instance {
         let value = self.machine.handles.resolve(handle)?;
         let trace = super::observe::capture_trace(
             self.current_resolved(),
-            &self.heap,
             &self.machine,
             Some(pending.span),
         );
@@ -233,12 +231,8 @@ impl Instance {
         span: Span,
         details: Vec<(&'static str, super::exception::DetailVal)>,
     ) {
-        let trace = super::observe::capture_trace(
-            self.current_resolved(),
-            &self.heap,
-            &self.machine,
-            Some(span),
-        );
+        let trace =
+            super::observe::capture_trace(self.current_resolved(), &self.machine, Some(span));
         let value = super::exception::make_error(
             &mut self.heap,
             self.machine.error_type,

@@ -2290,6 +2290,69 @@ DoodleStatus doodle_diagnostic_message(const struct DoodleInstance *instance,
                                        uintptr_t *out_len);
 
 /**
+ * Writes the number of **live frames** in the retained trace of the last terminal raise (E§9)
+ * to `out_count`: innermost-0, the index space of `doodle_raised_trace_frame_at` /
+ * `_frame_callable`. `0` when the last drive did not end `Raised`.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_raised_trace_frame_count(const struct DoodleInstance *instance,
+                                             uint32_t *out_count);
+
+/**
+ * Fills `out_frame` with innermost-first frame `index` of the retained trace (E§9), pure data
+ * (its callable is minted separately by `doodle_raised_trace_frame_callable`). Past the frame
+ * count, or no retained trace, is `ErrIndexOutOfBounds`. The frame `module` token is `0`;
+ * per-frame module resolution for a trace lands with cross-module call-site spans (M5.1).
+ *
+ * # Safety
+ * `instance` live; `out_frame` writable.
+ */
+DoodleStatus doodle_raised_trace_frame_at(const struct DoodleInstance *instance,
+                                          uint32_t index,
+                                          struct DoodleFrame *out_frame);
+
+/**
+ * A fresh **host-owned** handle to frame `index`'s callable in the retained trace (E§9), or
+ * `DOODLE_NULL_HANDLE` for a module-top / block frame (no callable — `has_callable` said so).
+ * `index` past the frame count, or no retained trace, is `ErrIndexOutOfBounds`. The handle is
+ * ordinary and host-owned — `doodle_release` it. The retained trace roots the callable, so it is
+ * valid for the terminal state's life though the live frame has unwound.
+ *
+ * # Safety
+ * `instance` live; `out_handle` writable.
+ */
+DoodleStatus doodle_raised_trace_frame_callable(struct DoodleInstance *instance,
+                                                uint32_t index,
+                                                DoodleHandle *out_handle);
+
+/**
+ * Writes the number of **tail-elided** entries in the retained trace (E§8.3) to `out_count`,
+ * most-recent-first, the index space of `doodle_raised_trace_tail_at`. `0` when the last drive did
+ * not end `Raised`.
+ *
+ * # Safety
+ * `instance` live; `out_count` writable.
+ */
+DoodleStatus doodle_raised_trace_tail_count(const struct DoodleInstance *instance,
+                                            uint32_t *out_count);
+
+/**
+ * The `index`-th tail-elided entry of the retained trace (most recent first, E§8.3): a fresh
+ * **host-owned** handle to the elided callable in `out_handle`, and its declaration position in
+ * `out_position` (a real module token: the callable's home module). Past the count, or no
+ * retained trace, is `ErrIndexOutOfBounds`. `doodle_release` the handle.
+ *
+ * # Safety
+ * `instance` live; `out_handle`/`out_position` writable.
+ */
+DoodleStatus doodle_raised_trace_tail_at(struct DoodleInstance *instance,
+                                         uint32_t index,
+                                         DoodleHandle *out_handle,
+                                         struct DoodlePosition *out_position);
+
+/**
  * Creates an empty registry. Returns NULL only on allocation failure. Populate it in the
  * order the host wants capability ids assigned (registration order is replay identity, §11),
  * then pass it to `doodle_load_with_registry` (which consumes it) — or free an unused one

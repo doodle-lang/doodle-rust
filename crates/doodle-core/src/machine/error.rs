@@ -13,6 +13,7 @@
 //!
 //! [`Raised`]: crate::drive::Outcome::Raised
 
+use super::CalIdx;
 use crate::drive::EngineFault;
 use crate::span::Span;
 
@@ -199,6 +200,11 @@ pub struct Exception {
 /// entered and how many tail-call iterations it absorbed (E§8.3).
 #[derive(Clone, Copy, Debug)]
 pub struct TraceFrame {
+    /// The frame's running callable (E§9 — a trace is "positions **and callables**"), or
+    /// `None` for the module top level and a `do … end` block frame (neither is a callable
+    /// value). A heap ref: the retained trace roots it (`gc::collect`) so a post-mortem
+    /// reader can still mint its handle after the live frames have unwound.
+    pub callable: Option<CalIdx>,
     /// The call-site span the frame was entered at, if any (`None` for the module top
     /// level and for a block invoked by a native consumer — host code, no call site).
     pub call_site: Option<Span>,
@@ -216,9 +222,11 @@ pub struct Trace {
     pub raised_at: Option<Span>,
     /// The live call stack at the raise (E§8.2), innermost first.
     pub frames: Vec<TraceFrame>,
-    /// The bounded tail-elided history at the raise (E§8.3), most-recent first: the decl
-    /// span of each callable whose activation a tail call overwrote.
-    pub tail_elided: Vec<Span>,
+    /// The bounded tail-elided history at the raise (E§8.3), most-recent first: the
+    /// callable whose activation each proper tail call overwrote. Heap refs the retained
+    /// trace roots; a reader recomputes each one's declaration position from its home
+    /// module (a callable knows its module, so this stays correct across modules).
+    pub tail_elided: Vec<CalIdx>,
 }
 
 impl Trace {

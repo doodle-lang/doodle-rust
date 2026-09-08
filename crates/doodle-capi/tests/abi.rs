@@ -37,9 +37,9 @@ use doodle_capi::desc::{
     doodle_foreign_desc_new, doodle_foreign_desc_param, doodle_foreign_desc_set_callback,
 };
 use doodle_capi::inspect::{
-    doodle_dict_key, doodle_dict_length, doodle_dict_value, doodle_eval_to_string, doodle_list_get,
-    doodle_list_length, doodle_record_field, doodle_record_field_name, doodle_record_length,
-    doodle_record_type_name,
+    doodle_callable_name, doodle_dict_key, doodle_dict_length, doodle_dict_value,
+    doodle_eval_to_string, doodle_list_get, doodle_list_length, doodle_record_field,
+    doodle_record_field_name, doodle_record_length, doodle_record_type_name,
 };
 use doodle_capi::instance::{
     DoodleInstance, doodle_capability_arg, doodle_drive, doodle_drive_slice, doodle_free,
@@ -53,9 +53,11 @@ use doodle_capi::observe::{
     doodle_frame_local_count, doodle_frame_local_name, doodle_frame_local_value,
     doodle_module_canonical_id, doodle_module_global, doodle_module_global_count,
     doodle_module_global_name, doodle_module_global_value, doodle_observation_mode, doodle_pause,
-    doodle_raise_trapping, doodle_set_breakpoint, doodle_set_observation_mode,
-    doodle_set_raise_trapping, doodle_stack_frame_count, doodle_tail_history_count,
-    doodle_trapped_raise, doodle_trapped_raise_position,
+    doodle_raise_trapping, doodle_raised_trace_frame_at, doodle_raised_trace_frame_callable,
+    doodle_raised_trace_frame_count, doodle_raised_trace_tail_at, doodle_raised_trace_tail_count,
+    doodle_set_breakpoint, doodle_set_observation_mode, doodle_set_raise_trapping,
+    doodle_stack_frame_count, doodle_tail_history_count, doodle_trapped_raise,
+    doodle_trapped_raise_position,
 };
 use doodle_capi::registry::{
     DoodleBuiltin, doodle_registry_add_builtin, doodle_registry_add_foreign, doodle_registry_free,
@@ -219,6 +221,114 @@ fn a_terminal_raise_exposes_the_exception_value_for_structural_inspection() {
     assert_eq!(&buf[..len], b"boom");
     // The handle is host-owned — release it.
     assert_eq!(unsafe { doodle_release(inst, out.value) }, DoodleStatus::Ok);
+    unsafe { doodle_free(inst) };
+}
+
+/// Reads a callable handle's declared name via `doodle_callable_name` (copy-out), or `None`.
+fn callable_name_of(inst: *mut DoodleInstance, handle: DoodleHandle) -> Option<String> {
+    let mut has = false;
+    let mut buf = [0u8; 64];
+    let mut len = 0usize;
+    assert_eq!(
+        unsafe {
+            doodle_callable_name(
+                inst,
+                handle,
+                &mut has,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len,
+            )
+        },
+        DoodleStatus::Ok
+    );
+    has.then(|| String::from_utf8(buf[..len].to_vec()).unwrap())
+}
+
+#[test]
+fn a_terminal_raise_exposes_its_trace_for_post_mortem_reading() {
+    // R6 Part B: the retained trace (E§9) is readable post-mortem through the C surface — the
+    // live frames and the tail-elided history, each carrying its callable. `countdown` tail-calls
+    // itself then raises; the trace shows a live `countdown` frame and an elided one, and every
+    // callable it mints is live (rooted by the retained trace) after the stack has unwound.
+    let inst = load(
+        "to countdown(n)\n\
+         if n == 0 then\n\
+         1 + true\n\
+         else\n\
+         countdown(n - 1)\n\
+         end\n\
+         end\n\
+         countdown(5)\n",
+    );
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Raised);
+
+    let mut frames = 0u32;
+    assert_eq!(
+        unsafe { doodle_raised_trace_frame_count(inst, &mut frames) },
+        DoodleStatus::Ok
+    );
+    assert!(frames > 0, "the retained trace has live frames");
+
+    let mut saw_countdown = false;
+    for i in 0..frames {
+        let mut frame = zero_frame();
+        assert_eq!(
+            unsafe { doodle_raised_trace_frame_at(inst, i, &mut frame) },
+            DoodleStatus::Ok
+        );
+        if frame.has_callable {
+            let mut handle = DOODLE_NULL_HANDLE;
+            assert_eq!(
+                unsafe { doodle_raised_trace_frame_callable(inst, i, &mut handle) },
+                DoodleStatus::Ok
+            );
+            assert_ne!(handle, DOODLE_NULL_HANDLE);
+            if callable_name_of(inst, handle).as_deref() == Some("countdown") {
+                saw_countdown = true;
+            }
+            assert_eq!(unsafe { doodle_release(inst, handle) }, DoodleStatus::Ok);
+        }
+    }
+    assert!(
+        saw_countdown,
+        "a live `countdown` frame survives in the trace"
+    );
+
+    // Out-of-range frame index → ErrIndexOutOfBounds (no pause generation to gate a trace).
+    let mut frame = zero_frame();
+    assert_eq!(
+        unsafe { doodle_raised_trace_frame_at(inst, frames, &mut frame) },
+        DoodleStatus::ErrIndexOutOfBounds
+    );
+
+    // The tail-elided history (countdown tail-called itself) is captured, its callable live.
+    let mut tail = 0u32;
+    assert_eq!(
+        unsafe { doodle_raised_trace_tail_count(inst, &mut tail) },
+        DoodleStatus::Ok
+    );
+    assert!(tail > 0, "the tail-elided history is captured");
+    let mut handle = DOODLE_NULL_HANDLE;
+    let mut pos = zero_pos();
+    assert_eq!(
+        unsafe { doodle_raised_trace_tail_at(inst, 0, &mut handle, &mut pos) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(callable_name_of(inst, handle).as_deref(), Some("countdown"));
+    assert_eq!(unsafe { doodle_release(inst, handle) }, DoodleStatus::Ok);
+
+    // A clean completion retains no trace: the frame count is 0.
+    let clean = load("1 + 1\n");
+    let _ = drive(clean);
+    let mut n = 99u32;
+    assert_eq!(
+        unsafe { doodle_raised_trace_frame_count(clean, &mut n) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(n, 0, "a non-raised drive retains no trace");
+    unsafe { doodle_free(clean) };
     unsafe { doodle_free(inst) };
 }
 
