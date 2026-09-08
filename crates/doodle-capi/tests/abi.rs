@@ -78,6 +78,12 @@ extern "C" fn record_finalizer(ptr: u64) {
     FINALIZED_COUNT.fetch_add(1, Relaxed);
 }
 
+// R4 (NULL-out leak): a separate finalizer + counter, so only this test writes them.
+static NULLOUT_FINALIZED: AtomicU32 = AtomicU32::new(0);
+extern "C" fn nullout_finalizer(_ptr: u64) {
+    NULLOUT_FINALIZED.fetch_add(1, Relaxed);
+}
+
 /// Loads `source` with a registry of `builtins` (in order), asserting success.
 fn load_with(source: &str, builtins: &[DoodleBuiltin]) -> *mut DoodleInstance {
     let registry = doodle_registry_new();
@@ -790,6 +796,36 @@ fn a_host_foreign_to_with_default_and_block_binds_and_invokes_through_c() {
         greet_cb,
     );
     assert_eq!(out, b"world\nmoon\n");
+}
+
+#[test]
+fn a_constructor_with_a_null_out_does_not_leak_a_handle() {
+    // R4: a `make_*` given a NULL out-pointer must NOT mint — a mint that then failed to write
+    // would orphan a host-owned handle, rooting its value for the instance's life. Witnessed via a
+    // foreign value's finalizer: if `make_foreign` created the value despite the NULL out, that
+    // value would finalize when the instance is freed. It must not run at all.
+    NULLOUT_FINALIZED.store(0, Relaxed);
+    let inst = load("1\n");
+    assert_eq!(
+        unsafe { doodle_make_foreign(inst, 1, 42, Some(nullout_finalizer), ptr::null_mut()) },
+        DoodleStatus::ErrNullPointer,
+        "a NULL out is ErrNullPointer"
+    );
+    // Also exercise a scalar and a heap constructor on the NULL-out path (they must be inert).
+    assert_eq!(
+        unsafe { doodle_make_int(inst, 7, ptr::null_mut()) },
+        DoodleStatus::ErrNullPointer
+    );
+    assert_eq!(
+        unsafe { doodle_make_string(inst, b"leak".as_ptr(), 4, ptr::null_mut()) },
+        DoodleStatus::ErrNullPointer
+    );
+    unsafe { doodle_free(inst) };
+    assert_eq!(
+        NULLOUT_FINALIZED.load(Relaxed),
+        0,
+        "no foreign value was created, so nothing finalizes at destroy (no leaked handle)"
+    );
 }
 
 #[test]

@@ -19,7 +19,7 @@ fn make(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match engine_of(ctx) {
-        Ok(engine) => emit(maker(engine), out),
+        Ok(engine) => emit(out, || maker(engine)),
         Err(status) => status,
     })
 }
@@ -31,24 +31,34 @@ fn make_fallible(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Check `out` before the (minting) maker so a NULL out never orphans the handle.
+        if out.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let engine = match engine_of(ctx) {
             Ok(engine) => engine,
             Err(status) => return status,
         };
         match maker(engine) {
-            Ok(handle) => emit(handle, out),
+            // `out` is non-NULL (checked above), so the write succeeds.
+            Ok(handle) => {
+                let _ = write_out(out, handle.bits());
+                DoodleStatus::Ok
+            }
             Err(err) => abi::value_error(err),
         }
     })
 }
 
-/// Writes a made value's handle bits to `out`, or reports NULL.
-fn emit(handle: Handle, out: *mut DoodleHandle) -> DoodleStatus {
-    if write_out(out, handle.bits()) {
-        DoodleStatus::Ok
-    } else {
-        DoodleStatus::ErrNullPointer
+/// Mints a handle via `mint` and writes its bits to `out`, checking `out` for NULL **first**: a
+/// mint that then failed to write would orphan a host-owned handle (a leak rooting its value for
+/// the instance's life). `ErrNullPointer` if `out` is NULL (nothing is minted).
+fn emit(out: *mut DoodleHandle, mint: impl FnOnce() -> Handle) -> DoodleStatus {
+    if out.is_null() {
+        return DoodleStatus::ErrNullPointer;
     }
+    write_out(out, mint().bits());
+    DoodleStatus::Ok
 }
 
 /// Reads a `(ptr, len)` UTF-8 argument into an owned `String`, or `None` if not UTF-8 (or NULL
@@ -238,7 +248,7 @@ pub unsafe extern "C" fn doodle_call_make_foreign(
     let finalizer: Option<Finalizer> =
         finalizer.map(|f| Box::new(move |ptr: u64| f(ptr)) as Finalizer);
     catch(|| match engine_of(ctx) {
-        Ok(engine) => emit(engine.make_foreign(tag, ptr, finalizer), out),
+        Ok(engine) => emit(out, || engine.make_foreign(tag, ptr, finalizer)),
         Err(status) => status,
     })
 }

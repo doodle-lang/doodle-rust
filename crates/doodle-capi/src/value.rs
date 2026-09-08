@@ -65,12 +65,15 @@ pub(crate) fn write_out<T>(out: *mut T, value: T) -> bool {
 }
 
 /// Writes a made value's handle bits into the out-param, or reports NULL.
-fn emit(handle: Handle, out: *mut DoodleHandle) -> DoodleStatus {
-    if write_out(out, handle.bits()) {
-        DoodleStatus::Ok
-    } else {
-        DoodleStatus::ErrNullPointer
+fn emit(out: *mut DoodleHandle, mint: impl FnOnce() -> Handle) -> DoodleStatus {
+    // Check `out` for NULL **before** minting: a mint that then failed to write would orphan a
+    // host-owned handle — a leak that roots its value for the instance's life (matching
+    // `inspect::minted`). So a NULL `out` never mints.
+    if out.is_null() {
+        return DoodleStatus::ErrNullPointer;
     }
+    write_out(out, mint().bits());
+    DoodleStatus::Ok
 }
 
 /// Makes an `Int` from an `int64_t` (E§4.3). Larger magnitudes use `doodle_make_int_decimal`.
@@ -84,7 +87,7 @@ pub unsafe extern "C" fn doodle_make_int(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Ok(inst) => emit(inst.make_int(value), out),
+        Ok(inst) => emit(out, || inst.make_int(value)),
         Err(status) => status,
     })
 }
@@ -102,6 +105,10 @@ pub unsafe extern "C" fn doodle_make_int_decimal(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Check `out` before the minting parse so a NULL out never orphans the handle.
+        if out.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let inst = match instance_mut(instance) {
             Ok(inst) => inst,
             Err(status) => return status,
@@ -116,7 +123,11 @@ pub unsafe extern "C" fn doodle_make_int_decimal(
             return DoodleStatus::ErrMalformedInt;
         };
         match inst.make_int_decimal(text) {
-            Ok(handle) => emit(handle, out),
+            // `out` is non-NULL (checked above), so the write succeeds.
+            Ok(handle) => {
+                let _ = write_out(out, handle.bits());
+                DoodleStatus::Ok
+            }
             Err(err) => abi::value_error(err),
         }
     })
@@ -133,7 +144,7 @@ pub unsafe extern "C" fn doodle_make_float(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Ok(inst) => emit(inst.make_float(value), out),
+        Ok(inst) => emit(out, || inst.make_float(value)),
         Err(status) => status,
     })
 }
@@ -149,7 +160,7 @@ pub unsafe extern "C" fn doodle_make_bool(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Ok(inst) => emit(inst.make_bool(value), out),
+        Ok(inst) => emit(out, || inst.make_bool(value)),
         Err(status) => status,
     })
 }
@@ -164,7 +175,7 @@ pub unsafe extern "C" fn doodle_make_nil(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| match instance_mut(instance) {
-        Ok(inst) => emit(inst.make_nil(), out),
+        Ok(inst) => emit(out, || inst.make_nil()),
         Err(status) => status,
     })
 }
@@ -182,6 +193,10 @@ pub unsafe extern "C" fn doodle_make_string(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Check `out` before the minting NFC/validate so a NULL out never orphans the handle.
+        if out.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let inst = match instance_mut(instance) {
             Ok(inst) => inst,
             Err(status) => return status,
@@ -198,7 +213,11 @@ pub unsafe extern "C" fn doodle_make_string(
             unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
         };
         match inst.make_string(slice) {
-            Ok(handle) => emit(handle, out),
+            // `out` is non-NULL (checked above), so the write succeeds.
+            Ok(handle) => {
+                let _ = write_out(out, handle.bits());
+                DoodleStatus::Ok
+            }
             Err(err) => abi::value_error(err),
         }
     })
@@ -229,7 +248,7 @@ pub unsafe extern "C" fn doodle_make_foreign(
         // pointer + is handed the `ptr`, so it is `Send` and cannot reach the instance).
         let finalizer: Option<Finalizer> =
             finalizer.map(|f| Box::new(move |ptr: u64| f(ptr)) as Finalizer);
-        emit(inst.make_foreign(tag, ptr, finalizer), out)
+        emit(out, || inst.make_foreign(tag, ptr, finalizer))
     })
 }
 

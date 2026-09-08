@@ -223,13 +223,20 @@ pub unsafe extern "C" fn doodle_call_arg(
     out: *mut DoodleHandle,
 ) -> DoodleStatus {
     catch(|| {
+        // Check `out` before interning the arg so a NULL out never orphans the fresh handle.
+        if out.is_null() {
+            return DoodleStatus::ErrNullPointer;
+        }
         let engine = match engine_of(ctx) {
             Ok(engine) => engine,
             Err(status) => return status,
         };
         match engine.arg_handle(index as usize) {
-            Some(handle) if write_out(out, handle.bits()) => DoodleStatus::Ok,
-            Some(_) => DoodleStatus::ErrNullPointer,
+            // `out` is non-NULL (checked above), so the write succeeds.
+            Some(handle) => {
+                let _ = write_out(out, handle.bits());
+                DoodleStatus::Ok
+            }
             None => DoodleStatus::ErrIndexOutOfBounds,
         }
     })
