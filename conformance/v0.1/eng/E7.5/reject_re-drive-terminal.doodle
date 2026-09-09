@@ -1,0 +1,10 @@
+#! clause: E7.5
+#! mode: drive
+#! do: run
+#! expect: completed
+#! do: run
+#! expect: reject wrong-state
+# An invalid call rejects and changes nothing (E§7.5): re-driving a terminal instance is rejected
+# `wrong-state` — not faulted — and the completed state is left intact. A rejection produces no
+# transcript record, so the oracle below shows only the first (real) drive.
+let a = 1 + 1

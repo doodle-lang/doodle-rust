@@ -1,0 +1,6 @@
+transcript v1
+mode: drive
+step: step
+stop: paused step @ main:12:9
+step: continue
+stop: completed

@@ -1,0 +1,13 @@
+#! clause: E7.5
+#! mode: drive
+#! do: step
+#! expect: paused step @ 12:9
+#! resolve: nil
+#! expect: reject wrong-state
+#! do: continue
+#! expect: completed
+# An invalid call changes nothing (E§7.5): resolving a Paused (non-suspended) instance is rejected
+# `wrong-state`, and the paused drive then resumes unaffected to completion. The rejection leaves no
+# trace — the oracle records only the real `step`/`continue` stops, not the rejected resolve.
+let a = 1
+let b = 2

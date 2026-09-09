@@ -341,26 +341,30 @@ static void drive_setup(DoodleInstance *inst) {
     if (g_subexpr) doodle_set_observation_mode(inst, DoodleObservationMode_Subexpression);
 }
 
-/* Drives one action (its `step:` label): a directive, or a capability resolve. */
-static void drive_action(DoodleInstance *inst, const char *label, DoodleOutcome *oc) {
+/* Drives one action (its `step:` label): a directive, or a capability resolve. Returns the drive's
+ * status — `DoodleStatus_ErrContract` for an invalid call rejected under E§7.5 (a re-drive of a
+ * terminal instance, a resolve at the wrong time, or a bad handle), which the caller records as
+ * nothing. */
+static DoodleStatus drive_action(DoodleInstance *inst, const char *label, DoodleOutcome *oc) {
     if (strcmp(label, "run") == 0) {
-        doodle_drive(inst, DoodleDirective_RunToCompletion, oc);
+        return doodle_drive(inst, DoodleDirective_RunToCompletion, oc);
     } else if (strcmp(label, "continue") == 0) {
-        doodle_drive(inst, DoodleDirective_Continue, oc);
+        return doodle_drive(inst, DoodleDirective_Continue, oc);
     } else if (strcmp(label, "step") == 0) {
-        doodle_drive(inst, DoodleDirective_Step, oc);
+        return doodle_drive(inst, DoodleDirective_Step, oc);
     } else if (strcmp(label, "into") == 0) {
-        doodle_drive(inst, DoodleDirective_StepInto, oc);
+        return doodle_drive(inst, DoodleDirective_StepInto, oc);
     } else if (strcmp(label, "over") == 0) {
-        doodle_drive(inst, DoodleDirective_StepOver, oc);
+        return doodle_drive(inst, DoodleDirective_StepOver, oc);
     } else if (strcmp(label, "out") == 0) {
-        doodle_drive(inst, DoodleDirective_StepOut, oc);
+        return doodle_drive(inst, DoodleDirective_StepOut, oc);
     } else if (strncmp(label, "resolve-raise ", 14) == 0) {
-        doodle_resolve_raise(inst, make_value(inst, label + 14), oc);
+        return doodle_resolve_raise(inst, make_value(inst, label + 14), oc);
     } else if (strncmp(label, "resolve ", 8) == 0) {
-        doodle_resolve(inst, make_value(inst, label + 8), oc);
+        return doodle_resolve(inst, make_value(inst, label + 8), oc);
     } else {
         die("unknown drive action");
+        return DoodleStatus_ErrContract; /* unreachable: die() exits */
     }
 }
 
@@ -474,7 +478,11 @@ static void drive_loop(DoodleInstance *inst) {
     drive_setup(inst);
     for (int i = 0; i < g_action_count; i++) {
         DoodleOutcome oc;
-        drive_action(inst, g_actions[i], &oc);
+        DoodleStatus status = drive_action(inst, g_actions[i], &oc);
+        /* An invalid call (E§7.5) is rejected as ErrContract, changing nothing — it produces no
+         * transcript record (matching the native oracle), so skip its step/stop/stack and leave
+         * the instance to the next step. */
+        if (status == DoodleStatus_ErrContract) continue;
         printf("step: %s\n", g_actions[i]);
         emit_stop(inst, &oc);
         emit_stack(inst);
