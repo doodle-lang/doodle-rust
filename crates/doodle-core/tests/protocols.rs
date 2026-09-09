@@ -42,7 +42,7 @@ fn instance(main: &str) -> Instance {
 /// Runs `main` to completion, asserting it completes cleanly, and returns its output.
 fn run_output(main: &str) -> String {
     let mut inst = instance(main);
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Completed(_)),
         "expected clean completion, got {outcome:?}"
@@ -74,7 +74,7 @@ fn resolve_diags(main: &str) -> Vec<(String, String)> {
 /// Runs `main` expecting a raise, returning the `Error.kind` slug and its message.
 fn run_raise(main: &str) -> (String, String) {
     let mut inst = instance(main);
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected a raise, got {outcome:?}");
     };

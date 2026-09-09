@@ -144,7 +144,16 @@ fn drive_to_terminal(
         // Stream whatever `print` produced in the last step before we act — so a prompt shows
         // before we block on stdin, and program output precedes any error we are about to render.
         flush_output(inst, &mut flushed);
-        match outcome {
+        // The CLI only ever makes valid drive/resolve calls, so a rejection (E§7.5) is an internal
+        // invariant violation — reported, like an unexpected pause, not silently looped.
+        let current = match outcome {
+            Ok(outcome) => outcome,
+            Err(reject) => {
+                eprintln!("doodle: internal error: drive rejected ({reject:?})");
+                break 1;
+            }
+        };
+        match current {
             Outcome::Completed(_) => break 0,
             Outcome::Suspended(request) => {
                 let resolution = resolve_capability(inst, &request, &mut rng, &mut sink);

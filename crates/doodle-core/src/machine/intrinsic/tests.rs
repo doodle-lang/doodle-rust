@@ -98,7 +98,7 @@ fn run_with(src: &str, registry: Registry) -> (Instance, Outcome) {
         resolved.diagnostics
     );
     let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     (inst, outcome)
 }
 
@@ -309,7 +309,7 @@ fn a_drawing_capability_suspends_with_its_args_and_resolves_to_void() {
         .collect();
     assert_eq!(nums, vec![0, 0, 10, 20, 255, 128, 0, 255]);
     let nil = inst.make_nil();
-    let done = resolve(&mut inst, Resolution::Value(nil));
+    let done = resolve(&mut inst, Resolution::Value(nil)).expect("valid drive");
     assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
     assert_eq!(inst.state(), InstanceState::Completed);
 }
@@ -332,7 +332,7 @@ fn set_turtle_carries_a_pose_and_a_visibility_flag() {
     assert!(inst.as_bool(request.args[3]).unwrap());
     let nil = inst.make_nil();
     assert!(matches!(
-        resolve(&mut inst, Resolution::Value(nil)),
+        resolve(&mut inst, Resolution::Value(nil)).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }
@@ -443,7 +443,7 @@ fn a_materialized_foreign_default_survives_a_gc_during_the_call() {
         "main",
     );
     inst.collect_at_every_safe_point();
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"world\n");
 }

@@ -37,7 +37,7 @@ fn run_program(src: &str) {
         resolved.diagnostics
     );
     let mut instance = Instance::load(resolved.module, Limits::default(), Registry::new(), "main");
-    black_box(run(&mut instance, Directive::RunToCompletion));
+    black_box(run(&mut instance, Directive::RunToCompletion).expect("valid drive"));
 }
 
 /// Heap/fragmentation churn: each iteration builds a transient concatenation that is

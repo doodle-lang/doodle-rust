@@ -13,8 +13,8 @@ use crate::drive::fault_kind;
 use crate::model::{Expectation, Mode, ScriptInput, ScriptResponse, ScriptValue, Test};
 use doodle_core::diag::{Diagnostic, Severity};
 use doodle_core::drive::{
-    Directive, ImportResolution, Limits, Outcome, Resolution, resolve as resolve_capability,
-    resolve_import, run,
+    Directive, DriveReject, ImportResolution, Limits, Outcome, Resolution,
+    resolve as resolve_capability, resolve_import, run,
 };
 use doodle_core::machine::{Handle, Instance};
 use doodle_core::parse::parse_program;
@@ -114,8 +114,13 @@ fn drive_to_terminal(
     modules_dir: Option<&Path>,
     inputs: &[ScriptInput],
 ) -> Result<Outcome, String> {
+    // Every drive/resolve here is a valid scripted interaction, so a rejection (E§7.5) is a
+    // mis-authored fixture, surfaced as the failure reason.
+    let reject_bug = |reject: DriveReject| {
+        format!("a drive was rejected as an invalid call ({reject:?}) — a mis-authored fixture")
+    };
     let mut queues = CapabilityQueues::new(inputs);
-    let mut outcome = run(instance, Directive::RunToCompletion);
+    let mut outcome = run(instance, Directive::RunToCompletion).map_err(reject_bug)?;
     loop {
         match &outcome {
             Outcome::SuspendedImport(req) => {
@@ -136,7 +141,7 @@ fn drive_to_terminal(
                     },
                     _ => ImportResolution::NotFound,
                 };
-                outcome = resolve_import(instance, resolution);
+                outcome = resolve_import(instance, resolution).map_err(reject_bug)?;
             }
             Outcome::Suspended(req) => {
                 let name = capability_name(req.capability.0)
@@ -148,7 +153,7 @@ fn drive_to_terminal(
                     let _ = instance.release(handle);
                 }
                 let resolution = build_resolution(instance, &response)?;
-                outcome = resolve_capability(instance, resolution);
+                outcome = resolve_capability(instance, resolution).map_err(reject_bug)?;
             }
             _ => return Ok(outcome),
         }

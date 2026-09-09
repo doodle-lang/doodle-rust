@@ -14,8 +14,8 @@
 
 use doodle_core::diag::Severity;
 use doodle_core::drive::{
-    Directive, EngineFault, LimitKind, Limits, Outcome, PauseReason, Resolution, resolve_slice,
-    run_slice,
+    Directive, DriveReject, EngineFault, LimitKind, Limits, Outcome, PauseReason, Resolution,
+    resolve_slice, run_slice,
 };
 use doodle_core::machine::{
     Handle, HandleError, Instance, Kind, Registry, ValueError, clear_canvas_intrinsic,
@@ -226,10 +226,16 @@ impl Session {
     /// pump passes [`RunToCompletion`](Directive::RunToCompletion) and slices on fuel; the
     /// debugger passes `Continue`/`Step*` and stops at breakpoints/raise-traps/steps. Bumps the
     /// pause generation, invalidating any prior [`stack_walk`](Self::stack_walk)'s frame indices.
-    pub fn drive(&mut self, directive: Directive, fuel: Option<u64>) -> DriveOutcome {
+    pub fn drive(
+        &mut self,
+        directive: Directive,
+        fuel: Option<u64>,
+    ) -> Result<DriveOutcome, DriveReject> {
+        // An invalid call (driving a terminal/suspended instance) is rejected, changing nothing
+        // (E§7.5): the pause generation only bumps once a drive actually runs.
+        let outcome = run_slice(&mut self.instance, directive, fuel)?;
         self.pause_gen = self.pause_gen.wrapping_add(1);
-        let outcome = run_slice(&mut self.instance, directive, fuel);
-        to_drive_outcome(&self.instance, outcome)
+        Ok(to_drive_outcome(&self.instance, outcome))
     }
 
     /// Resolves a pending capability with a host value (or a raise), then resumes the drive for
@@ -238,15 +244,22 @@ impl Session {
     /// resume runs under the **directive in force** when the instance suspended (E§7.3) — so a
     /// step across a suspending capability keeps stepping — not a fresh one. Bumps the pause
     /// generation like [`drive`](Self::drive).
-    pub fn resolve(&mut self, value: Handle, raise: bool, fuel: Option<u64>) -> DriveOutcome {
-        self.pause_gen = self.pause_gen.wrapping_add(1);
+    pub fn resolve(
+        &mut self,
+        value: Handle,
+        raise: bool,
+        fuel: Option<u64>,
+    ) -> Result<DriveOutcome, DriveReject> {
         let resolution = if raise {
             Resolution::Raise(value)
         } else {
             Resolution::Value(value)
         };
-        let outcome = resolve_slice(&mut self.instance, resolution, fuel);
-        to_drive_outcome(&self.instance, outcome)
+        // An invalid resolution (wrong state, or a stale/foreign value handle) is rejected,
+        // changing nothing (E§7.5): the instance stays suspended and the generation does not bump.
+        let outcome = resolve_slice(&mut self.instance, resolution, fuel)?;
+        self.pause_gen = self.pause_gen.wrapping_add(1);
+        Ok(to_drive_outcome(&self.instance, outcome))
     }
 
     /// Requests cancellation (E§10.1); the next safe point faults `Cancelled`. In the

@@ -10,7 +10,7 @@ use crate::abi::{
 };
 use crate::guard::catch;
 use crate::value::copy_out;
-use doodle_core::drive::{Outcome, Resolution, resolve, run, run_slice};
+use doodle_core::drive::{DriveReject, Outcome, Resolution, resolve, run, run_slice};
 use doodle_core::machine::{Handle, Instance};
 
 /// A loaded Doodle program: the engine [`Instance`] plus a little host-facing state — the
@@ -300,7 +300,7 @@ fn drive_and_fill(
     instance: *mut DoodleInstance,
     out_outcome: *mut DoodleOutcome,
     advanced: bool,
-    run: impl FnOnce(&mut Instance) -> Outcome,
+    run: impl FnOnce(&mut Instance) -> Result<Outcome, DriveReject>,
 ) -> DoodleStatus {
     let di = match di_mut(instance) {
         Ok(di) => di,
@@ -314,6 +314,13 @@ fn drive_and_fill(
     let outcome = {
         let _drive = DriveScope::enter();
         run(&mut di.inner)
+    };
+    // An invalid call (driving a terminal or `Suspended` instance) is rejected, changing nothing
+    // (E§7.5): report `ErrContract` and write no outcome. Both `DriveReject` reasons map to one
+    // contract status — the caller knows what it called; native/wasm keep the full reason.
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => return DoodleStatus::ErrContract,
     };
     let filled = fill_outcome(di, outcome, advanced);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`
@@ -336,18 +343,17 @@ fn resolve_and_fill(
     if out_outcome.is_null() {
         return DoodleStatus::ErrNullPointer;
     }
-    // `pending_args` is `Some` exactly while suspended on a capability (set by `fill_outcome`
-    // on `Suspended`, cleared on every other outcome) — the engine's own resolve would fault a
-    // non-suspended instance, but reporting a defined `ErrContract` is friendlier than the
-    // `Faulted(Internal)`/debug-panic that misuse would otherwise produce.
-    if di.pending_args.is_none() {
-        return DoodleStatus::ErrContract;
-    }
     let outcome = {
         let _drive = DriveScope::enter();
         resolve(&mut di.inner, resolution)
     };
-    // A resolve always advances (it injects the host value and continues the drive).
+    // An invalid resolution — the instance is not suspended on a capability, or the value handle
+    // is stale/foreign — is rejected, changing nothing (E§7.5): `ErrContract`, no outcome; the
+    // instance stays `Suspended`, resolvable. A resolve that runs always advances.
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => return DoodleStatus::ErrContract,
+    };
     let filled = fill_outcome(di, outcome, true);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`.
     unsafe { *out_outcome = filled };

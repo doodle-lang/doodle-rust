@@ -210,8 +210,10 @@ impl Instance {
     /// Resolves a parked import with a host `Raise` (E§6): raises the host-supplied value
     /// at the `import` site (e.g. a failed network fetch). Errors on a stale handle.
     pub(crate) fn raise_import_value(&mut self, handle: Handle) -> Result<(), HandleError> {
-        let pending = self.take_import();
+        // Validate the resolution handle before consuming the import suspension (see
+        // `resume_with_value`): a bad handle leaves the instance unchanged and resumable.
         let value = self.machine.handles.resolve(handle)?;
+        let pending = self.take_import();
         let trace = super::observe::capture_trace(
             self.current_resolved(),
             &self.machine,

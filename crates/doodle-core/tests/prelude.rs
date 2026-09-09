@@ -53,7 +53,7 @@ fn instance(main: &str) -> Instance {
 /// Drives `main`, resolving `import shapes` to [`SHAPES`], to a terminal outcome.
 fn run_bundled(main: &str) -> (Instance, Outcome) {
     let mut inst = instance(main);
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(req) = &outcome {
         let res = if req.path == ["shapes"] {
             ImportResolution::Source {
@@ -68,7 +68,7 @@ fn run_bundled(main: &str) -> (Instance, Outcome) {
         } else {
             ImportResolution::NotFound
         };
-        outcome = resolve_import(&mut inst, res);
+        outcome = resolve_import(&mut inst, res).expect("valid drive");
     }
     (inst, outcome)
 }

@@ -8,7 +8,8 @@
 //! only for its top-level effect.
 
 use doodle_core::drive::{
-    Directive, ImportResolution, Limits, Outcome, Resolution, resolve, resolve_import, run,
+    Directive, DriveReject, ImportResolution, Limits, Outcome, Resolution, resolve, resolve_import,
+    run,
 };
 use doodle_core::machine::{
     Instance, InstanceState, Registry, print_intrinsic, read_line_intrinsic,
@@ -49,7 +50,7 @@ fn instance(main: &str) -> Instance {
 /// `NotFound` for an unlisted path. Panics on a capability suspend (use a bespoke loop for
 /// those).
 fn bundle_run(inst: &mut Instance, modules: &[(&str, &str)]) -> Outcome {
-    let mut outcome = run(inst, Directive::RunToCompletion);
+    let mut outcome = run(inst, Directive::RunToCompletion).expect("valid drive");
     loop {
         match &outcome {
             Outcome::SuspendedImport(req) => {
@@ -61,8 +62,9 @@ fn bundle_run(inst: &mut Instance, modules: &[(&str, &str)]) -> Outcome {
                             text: (*src).to_string(),
                             canonical_id: path,
                         },
-                    ),
-                    None => resolve_import(inst, ImportResolution::NotFound),
+                    )
+                    .expect("valid drive"),
+                    None => resolve_import(inst, ImportResolution::NotFound).expect("valid drive"),
                 };
             }
             Outcome::Suspended(_) => panic!("unexpected capability suspend: {outcome:?}"),
@@ -95,7 +97,7 @@ fn the_importer_parks_until_the_host_resolves_the_import() {
     // and only after the host resolves does the module load and the importer resume — in
     // that order (the module's top level completes before the importer continues).
     let mut inst = instance("import a\nprint(\"after import\")\n");
-    let first = run(&mut inst, Directive::RunToCompletion);
+    let first = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let Outcome::SuspendedImport(req) = first else {
         panic!("expected SuspendedImport, got {first:?}");
     };
@@ -114,7 +116,8 @@ fn the_importer_parks_until_the_host_resolves_the_import() {
             text: "print(\"inside a\")\n".to_string(),
             canonical_id: "a".to_string(),
         },
-    );
+    )
+    .expect("valid drive");
     assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
     assert_eq!(inst.output(), b"inside a\nafter import\n");
 }
@@ -138,10 +141,10 @@ fn a_missing_module_raises_module_not_found_in_the_importer() {
 #[test]
 fn a_host_raise_on_import_surfaces_in_the_importer() {
     let mut inst = instance("import net_thing\n");
-    let first = run(&mut inst, Directive::RunToCompletion);
+    let first = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(first, Outcome::SuspendedImport(_)), "{first:?}");
     let reason = inst.make_string(b"network unreachable").unwrap();
-    let outcome = resolve_import(&mut inst, ImportResolution::Raise(reason));
+    let outcome = resolve_import(&mut inst, ImportResolution::Raise(reason)).expect("valid drive");
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected Raised, got {outcome:?}");
     };
@@ -160,7 +163,7 @@ fn a_module_whose_top_level_suspends_resumes_with_the_importer_parked() {
     // (not an import), with the importer parked beneath. Resolving it lets `a` finish, then
     // the importer resumes.
     let mut inst = instance("import a\nprint(\"main done\")\n");
-    let first = run(&mut inst, Directive::RunToCompletion);
+    let first = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(first, Outcome::SuspendedImport(_)), "{first:?}");
 
     let loading = resolve_import(
@@ -169,14 +172,15 @@ fn a_module_whose_top_level_suspends_resumes_with_the_importer_parked() {
             text: "print(read_line())\n".to_string(),
             canonical_id: "a".to_string(),
         },
-    );
+    )
+    .expect("valid drive");
     assert!(
         matches!(loading, Outcome::Suspended(_)),
         "the module's top level reached a capability: {loading:?}"
     );
 
     let line = inst.make_string(b"typed line").unwrap();
-    let done = resolve(&mut inst, Resolution::Value(line));
+    let done = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
     assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
     assert_eq!(inst.output(), b"typed line\nmain done\n");
 }
@@ -223,7 +227,7 @@ fn a_module_raising_at_load_propagates_the_raise_to_the_importer() {
 fn distinct_paths_with_one_canonical_id_load_once() {
     // The host maps two different import paths to the same canonical module: it loads once.
     let mut inst = instance("import p\nimport q\n");
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(_) = &outcome {
         outcome = resolve_import(
             &mut inst,
@@ -231,7 +235,8 @@ fn distinct_paths_with_one_canonical_id_load_once() {
                 text: "print(\"shared body\")\n".to_string(),
                 canonical_id: "shared".to_string(),
             },
-        );
+        )
+        .expect("valid drive");
     }
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"shared body\n");
@@ -469,7 +474,7 @@ fn a_fetched_module_with_static_errors_raises_module_load_error() {
     // A host-supplied source that does not compile is the module author's program error
     // (E§3.2 LoadError): it raises `module-load-error` at the `import` in the importer.
     let mut inst = instance("import broken\n");
-    let first = run(&mut inst, Directive::RunToCompletion);
+    let first = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(first, Outcome::SuspendedImport(_)), "{first:?}");
     let outcome = resolve_import(
         &mut inst,
@@ -477,7 +482,8 @@ fn a_fetched_module_with_static_errors_raises_module_load_error() {
             text: "let = = =\n".to_string(),
             canonical_id: "broken".to_string(),
         },
-    );
+    )
+    .expect("valid drive");
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected Raised, got {outcome:?}");
     };
@@ -490,17 +496,24 @@ fn a_fetched_module_with_static_errors_raises_module_load_error() {
 }
 
 // A host that calls the capability `resolve()` on an instance suspended on an IMPORT (it should
-// call `resolve_import`) is a host-contract violation. In a debug build it is caught by the
-// guard's `debug_assert!` with a clear message (this test); in release the guard returns
-// `Faulted(Internal)` instead of the old `unreachable!` panic (M5.10 — reachable via the WASM
-// facade). Gated to debug builds, where CI runs, so `#[should_panic]` is exercised.
-#[cfg(debug_assertions)]
+// call `resolve_import`) makes an invalid call — the wrong resolver for the suspension. It is
+// rejected in every build (E§7.5), changing nothing: no fault, no state change, the instance stays
+// suspended and resolvable via `resolve_import`.
 #[test]
-#[should_panic(expected = "resolve() requires an instance suspended on a capability")]
-fn resolve_on_an_import_suspension_is_a_contract_violation() {
+fn resolve_on_an_import_suspension_is_rejected() {
     let mut inst = instance("import a\n");
-    let first = run(&mut inst, Directive::RunToCompletion);
+    let first = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(first, Outcome::SuspendedImport(_)), "{first:?}");
     let handle = inst.make_string(b"x").unwrap();
-    let _ = resolve(&mut inst, Resolution::Value(handle));
+    // Using resolve() (a capability resolution) on an import suspension is an invalid call:
+    // rejected, changing nothing — the instance stays suspended, resolvable via resolve_import().
+    assert!(matches!(
+        resolve(&mut inst, Resolution::Value(handle)),
+        Err(DriveReject::WrongState)
+    ));
+    assert_eq!(
+        inst.state(),
+        InstanceState::Suspended,
+        "the import suspension is intact after a rejected capability resolve"
+    );
 }

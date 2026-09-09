@@ -10,10 +10,10 @@ use crate::model::{
 };
 use doodle_core::drive::ObservationMode;
 use doodle_core::drive::{
-    Directive, EngineFault, ImportResolution, LimitKind, Limits, Outcome, PauseReason,
+    Directive, DriveReject, EngineFault, ImportResolution, LimitKind, Limits, Outcome, PauseReason,
     resolve as resolve_capability, resolve_import, run,
 };
-use doodle_core::machine::{Instance, InstanceState};
+use doodle_core::machine::Instance;
 use doodle_core::parse::parse_program;
 use doodle_core::resolve::resolve;
 use doodle_core::source::{LineIndex, Position, normalize};
@@ -85,6 +85,23 @@ pub(crate) fn apply_setup(instance: &mut Instance, script: &DriveScript) {
     }
 }
 
+/// The result of driving one step: the machine ran to a stop [`Outcome`], or the call was
+/// **rejected** as invalid (E§7.5) and did nothing. Kept distinct so an `expect: reject` fixture
+/// can assert a rejection — and the emitter can record it — without conflating "nothing happened"
+/// with a `Faulted` stop (execution ended).
+pub(crate) enum StepOutcome {
+    Ran(Outcome),
+    Rejected(DriveReject),
+}
+
+/// The drive-script reason word for a [`DriveReject`] (the `reject <reason>` vocabulary).
+fn reject_reason(reject: DriveReject) -> &'static str {
+    match reject {
+        DriveReject::WrongState => "wrong-state",
+        DriveReject::BadHandle => "bad-handle",
+    }
+}
+
 /// Drives one action to its stop (E§7.3). A `do:` directive drives the machine; a `resolve:`/
 /// `resolve-raise:` step fulfils the capability the previous step suspended on (E§7.5). Any `import`
 /// is transparently resolved the same way a `run` fixture does (sibling module file, else
@@ -99,19 +116,8 @@ pub(crate) fn drive_action(
     action: &DriveAction,
     expect: &StopAssertion,
     modules_dir: Option<&Path>,
-) -> Result<Outcome, String> {
-    // A terminal instance is not re-drivable (E§3.3): a step after the program has finished is a
-    // mis-authored fixture — report it, rather than tripping the engine's debug assertion.
-    if matches!(
-        instance.state(),
-        InstanceState::Completed | InstanceState::Raised | InstanceState::Faulted
-    ) {
-        return Err(format!(
-            "cannot drive a {:?} (terminal) instance — a step runs past the program's end",
-            instance.state()
-        ));
-    }
-    let mut outcome = match action {
+) -> Result<StepOutcome, String> {
+    let drive_result = match action {
         DriveAction::Run => run(instance, Directive::RunToCompletion),
         DriveAction::Continue => run(instance, Directive::Continue),
         DriveAction::Step => run(instance, Directive::Step),
@@ -126,6 +132,14 @@ pub(crate) fn drive_action(
             let resolution = build_resolution(instance, &ScriptResponse::Raise(message.clone()))?;
             resolve_capability(instance, resolution)
         }
+    };
+    // An invalid call (E§7.5) — a terminal/wrong-state drive, a resolve at the wrong time, or a
+    // stale/foreign resolution handle — is rejected, doing nothing. Surface it as a `Rejected`
+    // step: an `expect: reject` fixture asserts it (and the emitter records it), and the instance
+    // is unchanged so a later step resumes from the same state.
+    let mut outcome = match drive_result {
+        Ok(outcome) => outcome,
+        Err(reject) => return Ok(StepOutcome::Rejected(reject)),
     };
     // Leave an import suspension in place when the step asserts an `import` stop; otherwise resolve
     // imports transparently. (A capability suspension is never auto-resolved here.)
@@ -149,20 +163,38 @@ pub(crate) fn drive_action(
                 },
                 _ => ImportResolution::NotFound,
             };
-            outcome = resolve_import(instance, resolution);
+            outcome = match resolve_import(instance, resolution) {
+                Ok(outcome) => outcome,
+                Err(reject) => return Ok(StepOutcome::Rejected(reject)),
+            };
         }
     }
-    Ok(outcome)
+    Ok(StepOutcome::Ran(outcome))
 }
 
 /// Checks one step's stop — the outcome kind/reason/position, then the optional stack shape.
 fn check_step(
     instance: &mut Instance,
-    outcome: &Outcome,
+    outcome: &StepOutcome,
     step: &DriveStep,
     nfc: &str,
     index: &LineIndex,
 ) -> Result<(), String> {
+    // A rejected call (E§7.5) matches only an `expect: reject <reason>`; it advanced nothing, so
+    // there is no stack to check.
+    let outcome = match outcome {
+        StepOutcome::Ran(outcome) => outcome,
+        StepOutcome::Rejected(reject) => {
+            let actual = reject_reason(*reject);
+            return match &step.expect {
+                StopAssertion::Rejected { reason } if reason == actual => Ok(()),
+                StopAssertion::Rejected { reason } => {
+                    Err(format!("expected reject {reason}, got reject {actual}"))
+                }
+                expected => Err(format!("expected {expected:?}, got reject {actual}")),
+            };
+        }
+    };
     match (&step.expect, outcome) {
         (StopAssertion::Completed, Outcome::Completed(_)) => {}
         (StopAssertion::Paused { reason, pos }, Outcome::Paused(actual)) => {

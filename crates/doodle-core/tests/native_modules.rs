@@ -47,7 +47,7 @@ fn run_with_natives(main: &str, natives: Vec<NativeModule>) -> String {
         registry.register_module(native).unwrap();
     }
     let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Completed(_)),
         "expected clean completion, got {outcome:?}"
@@ -94,7 +94,7 @@ fn a_missing_member_of_a_native_module_raises() {
     registry.register(print_intrinsic()).unwrap();
     registry.register_module(util_module()).unwrap();
     let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let Outcome::Raised(value, _) = outcome else {
         panic!("expected a raise, got {outcome:?}");
     };

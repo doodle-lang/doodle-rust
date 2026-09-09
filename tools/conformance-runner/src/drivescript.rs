@@ -14,11 +14,17 @@
 //!
 //! where a `<stop>` is `completed`, `paused <reason> @ L:C`, `raised <substring> @ L:C`,
 //! `suspended <capability> @ L:C` (a capability request, `Outcome::Suspended`), `import <path> @
-//! L:C` (an import, `Outcome::SuspendedImport`), or `faulted <kind>`; a `<reason>` is one of
-//! `step`/`breakpoint`/`host-pause`/`raise-trap`/`slice-end`; a `<value>` is a string (`"…"`),
-//! integer, float, `true`/`false`, or `nil`; and a stack `<elem>` is `L`, `name@L`, or `name@L×N`
-//! (tail-iteration count `N`; `x` accepted for `×`). `do:`/`resolve:`/`resolve-raise:` each start a
-//! step; setup directives (`break`/`raise-trap`/`obs`) must precede the first one.
+//! L:C` (an import, `Outcome::SuspendedImport`), `faulted <kind>`, or `reject <wrong-state |
+//! bad-handle>`; a `<reason>` is one of `step`/`breakpoint`/`host-pause`/`raise-trap`/`slice-end`;
+//! a `<value>` is a string (`"…"`), integer, float, `true`/`false`, or `nil`; and a stack `<elem>`
+//! is `L`, `name@L`, or `name@L×N` (tail-iteration count `N`; `x` accepted for `×`).
+//! `do:`/`resolve:`/`resolve-raise:` each start a step; setup directives (`break`/`raise-trap`/
+//! `obs`) must precede the first one.
+//!
+//! `reject <reason>` expects the step's drive/resolve to be **rejected** as an invalid call (E§7.5)
+//! — the instance is unchanged and a later step resumes from the same state. A rejection is not a
+//! drive: it **contributes nothing to the transcript** (no output, no position), so the next step's
+//! `expect:` continues from the pre-rejection state; `reject` is the whole record of that step.
 
 use crate::directive::parse_positioned;
 use crate::model::{DriveAction, DriveScript, DriveStep, ScriptValue, StackElem, StopAssertion};
@@ -245,6 +251,15 @@ fn parse_stop(value: &str) -> Result<StopAssertion, String> {
                 kind: rest.to_string(),
             })
         }
+        "reject" => match rest {
+            "wrong-state" | "bad-handle" => Ok(StopAssertion::Rejected {
+                reason: rest.to_string(),
+            }),
+            "" => Err("`reject` expects a reason (`wrong-state` or `bad-handle`)".to_string()),
+            other => Err(format!(
+                "unknown reject reason `{other}` (expected `wrong-state` or `bad-handle`)"
+            )),
+        },
         other => Err(format!("unknown stop `{other}` in `expect: {value}`")),
     }
 }
@@ -296,4 +311,29 @@ fn parse_stack_elem(elem: &str) -> Result<StackElem, String> {
         return Err(format!("stack lines are 1-based; got 0 in `{elem}`"));
     }
     Ok(StackElem { name, line, tail })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stop;
+    use crate::model::StopAssertion;
+
+    #[test]
+    fn expect_reject_parses_both_reason_words() {
+        assert!(matches!(
+            parse_stop("reject wrong-state"),
+            Ok(StopAssertion::Rejected { reason }) if reason == "wrong-state"
+        ));
+        assert!(matches!(
+            parse_stop("reject bad-handle"),
+            Ok(StopAssertion::Rejected { reason }) if reason == "bad-handle"
+        ));
+    }
+
+    #[test]
+    fn expect_reject_refuses_an_unknown_or_missing_reason() {
+        // The loud-fixture rule: an undefined reason is an error, never silently accepted.
+        assert!(parse_stop("reject").is_err());
+        assert!(parse_stop("reject sideways").is_err());
+    }
 }

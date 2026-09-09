@@ -132,7 +132,7 @@ fn load_turtle(program: &str) -> Instance {
 fn run_turtle(program: &str) -> Vec<Cmd> {
     let mut inst = load_turtle(program);
     let mut cmds = Vec::new();
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     loop {
         match outcome {
             Outcome::Suspended(request) => {
@@ -143,7 +143,7 @@ fn run_turtle(program: &str) -> Vec<Cmd> {
                 }
                 cmds.push(Cmd { name, args });
                 let nil = inst.make_nil();
-                outcome = resolve(&mut inst, Resolution::Value(nil));
+                outcome = resolve(&mut inst, Resolution::Value(nil)).expect("valid drive");
             }
             Outcome::Completed(_) => break,
             other => panic!("unexpected outcome: {other:?}"),
@@ -360,7 +360,7 @@ fn a_forward_suspends_as_a_capability() {
     // instance Suspended in `draw_line` (id 3) with its eight bound arguments, before any
     // resolve. This is the suspend the JS pump animates (M3.5/M3.6).
     let mut inst = load_turtle("forward(10)");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let Outcome::Suspended(request) = outcome else {
         panic!("expected Suspended, got {outcome:?}");
     };

@@ -38,7 +38,7 @@ fn instance_with_limits(src: &str, limits: Limits) -> Instance {
 /// Asserts driving `src` under `limits` faults with `LimitExceeded(kind)`.
 fn assert_limit(src: &str, limits: Limits, kind: LimitKind) {
     let mut inst = instance_with_limits(src, limits);
-    match run(&mut inst, Directive::RunToCompletion) {
+    match run(&mut inst, Directive::RunToCompletion).expect("valid drive") {
         Outcome::Faulted(EngineFault::LimitExceeded(got)) => assert_eq!(got, kind),
         other => panic!("expected LimitExceeded({kind:?}), got {other:?}"),
     }
@@ -129,7 +129,7 @@ fn a_tail_loop_is_exempt_from_the_stack_depth_limit() {
         },
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }

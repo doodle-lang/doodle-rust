@@ -68,7 +68,7 @@ fn run_bundled(main: &str) -> (Instance, Outcome) {
     registry.register(read_line_intrinsic()).unwrap();
     registry.register_module(turtle_native()).unwrap();
     let mut inst = Instance::load(resolved.module, Limits::default(), registry, "main");
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(req) = &outcome {
         let res = if req.path == ["turtle"] {
             ImportResolution::Source {
@@ -83,7 +83,7 @@ fn run_bundled(main: &str) -> (Instance, Outcome) {
         } else {
             ImportResolution::NotFound
         };
-        outcome = resolve_import(&mut inst, res);
+        outcome = resolve_import(&mut inst, res).expect("valid drive");
     }
     (inst, outcome)
 }

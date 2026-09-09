@@ -11,7 +11,7 @@ mod config;
 pub use config::{Config, ConfigError, LimitKind, Limits, ObservationMode};
 
 mod pump;
-use pump::{drive, fault};
+use pump::drive;
 
 /// A driving directive: how far to run before returning to the host (E§7.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,8 +117,31 @@ pub enum EngineFault {
     /// native consumers resumable — is the deferred M7 C-ABI foreign-function-yield
     /// extension (E§5.4/§7.6; machine-design §14).
     NestedSuspend,
-    /// An internal invariant was violated.
+    /// An internal invariant was violated — an engine bug, reached only if execution itself
+    /// broke an assumption. **Not** a host mistake: an invalid *call* (driving a terminal or
+    /// suspended instance, resolving at the wrong time, or a bad resolution handle) is rejected
+    /// before it runs ([`DriveReject`]), changing nothing, so it never reaches this state.
     Internal,
+}
+
+/// Why the engine **rejected** a drive/resolve call before running it (engine spec E§7.5): the
+/// call was invalid, so the instance is byte-for-byte unchanged and the host may correct the call
+/// and try again. A rejection is not a drive: no program work ran and nothing enters the recorded
+/// sequence, so it produces no [`Outcome`]. Distinct from [`Outcome::Faulted`], a *terminal state
+/// reached by execution*: invalid calls reject and change nothing; `Faulted` is for conditions
+/// that arise while running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DriveReject {
+    /// The instance was not in the state the call requires: driving a terminal or `Suspended`
+    /// instance (use `resolve`), or resolving a non-suspended one, or the wrong resolver for the
+    /// suspension (`resolve` vs `resolve_import`).
+    WrongState,
+    /// The resolution value handle was stale, already released, or minted by another instance
+    /// (E§4.2). It is validated before the suspension is consumed, so the instance stays
+    /// `Suspended` and resolvable. (Release builds cannot tell a foreign handle from a
+    /// stale-generation one — both are `BadHandle`; the debug-only instance-id guard, MD §16,
+    /// adds precision where it exists.)
+    BadHandle,
 }
 
 /// Identifies the registered capability a [`CapabilityRequest`] is for (engine spec
@@ -200,11 +223,10 @@ pub enum ImportResolution {
 /// → [`Paused`](Outcome::Paused)`(`[`PauseReason::HostPause`]`)`, with state resumable
 /// (E§8.8) — re-drive to continue. An uncaught raise leaves
 /// the instance `Raised`, an engine fault leaves it `Faulted`, and completion leaves
-/// it `Completed` (E§3.3 outcome↔state correspondence). Re-driving a terminal
-/// instance, or `run`-ing a `Suspended` one (use [`resolve`]), is a host-contract
-/// violation — debug-asserted, and a returned `Faulted(Internal)` in release rather
-/// than undefined behavior.
-pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
+/// it `Completed` (E§3.3 outcome↔state correspondence). Re-driving a terminal instance, or
+/// `run`-ing a `Suspended` one (use [`resolve`]), is an **invalid call**: it is rejected
+/// ([`Err`]`(`[`DriveReject::WrongState`]`)`), changing nothing — never a fault or UB.
+pub fn run(instance: &mut Instance, directive: Directive) -> Result<Outcome, DriveReject> {
     run_slice(instance, directive, None)
 }
 
@@ -213,31 +235,30 @@ pub fn run(instance: &mut Instance, directive: Directive) -> Outcome {
 /// pump's yield point. `None` fuel is unbounded (identical to [`run`]). The drive stops
 /// earlier for any other reason (completion, raise, suspend, a `Step*` pause, a fault);
 /// slice size never changes *what* executes, only where it yields (E§7.7).
-pub fn run_slice(instance: &mut Instance, directive: Directive, fuel: Option<u64>) -> Outcome {
-    debug_assert!(
-        matches!(
-            instance.state(),
-            InstanceState::Ready | InstanceState::Paused
-        ),
-        "run() requires a Ready or Paused instance (got {:?}); use resolve() after \
-         Suspended, and terminal states are not re-drivable (E§3.3/§7.3)",
-        instance.state()
-    );
+pub fn run_slice(
+    instance: &mut Instance,
+    directive: Directive,
+    fuel: Option<u64>,
+) -> Result<Outcome, DriveReject> {
+    // A drive requires a Ready or Paused instance (E§7.3). Driving a terminal or `Suspended`
+    // one is an invalid call: rejected, changing nothing (a `Suspended` instance wants
+    // `resolve`; terminal states are not re-drivable).
     if !matches!(
         instance.state(),
         InstanceState::Ready | InstanceState::Paused
     ) {
-        return Outcome::Faulted(EngineFault::Internal);
+        return Err(DriveReject::WrongState);
     }
-    drive(instance, directive, fuel)
+    Ok(drive(instance, directive, fuel))
 }
 
 /// Continues a `Suspended` `instance` with the host's `resolution` (E§7.3/§7.5): the
 /// value the capability produced becomes the call's result and the drive resumes under
 /// the directive in force; a raise surfaces at the capability call site (leaving the
-/// instance `Raised`). `resolve` on an instance with no pending suspension is a
-/// host-contract violation (debug-asserted; `Faulted(Internal)` in release).
-pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Outcome {
+/// instance `Raised`). An **invalid resolution** — resolving a non-capability-suspended
+/// instance, or with a stale/foreign value handle — is rejected ([`DriveReject`]): the
+/// request and instance state are unchanged, and resolving is still available.
+pub fn resolve(instance: &mut Instance, resolution: Resolution) -> Result<Outcome, DriveReject> {
     resolve_slice(instance, resolution, None)
 }
 
@@ -248,59 +269,38 @@ pub fn resolve_slice(
     instance: &mut Instance,
     resolution: Resolution,
     fuel: Option<u64>,
-) -> Outcome {
-    // A capability suspension is `Suspended` **and not** import-suspended: an import-suspended
-    // instance is also `Suspended`, so without the second half `resolve()` (the capability
-    // entry) would proceed into `take_capability` and hit its `unreachable!`. Use
-    // `resolve_import()` for an import — a mismatched call is a host-contract violation
-    // (debug-asserted; `Faulted(Internal)` in release, never a panic).
-    let capability_suspended =
-        matches!(instance.state(), InstanceState::Suspended) && !instance.is_import_suspended();
-    debug_assert!(
-        capability_suspended,
-        "resolve() requires an instance suspended on a capability (got {:?}, import={}); use \
-         resolve_import() for an import (E§7.3/§7.5)",
-        instance.state(),
-        instance.is_import_suspended()
-    );
-    if !capability_suspended {
-        return Outcome::Faulted(EngineFault::Internal);
+) -> Result<Outcome, DriveReject> {
+    // `resolve` requires an instance suspended on a **capability** — `Suspended` and **not**
+    // import-suspended (an import wants `resolve_import`). The wrong state is an invalid call:
+    // rejected, changing nothing.
+    if !(matches!(instance.state(), InstanceState::Suspended) && !instance.is_import_suspended()) {
+        return Err(DriveReject::WrongState);
     }
     match resolution {
-        // The capability's value becomes the call's result; resume the drive so the
-        // caller's waiting continuation consumes it, under the directive in force. A
-        // cancellation requested while suspended is reaped here too: the resumed drive's
-        // next safe point observes it and faults `Cancelled` (or the program completes
-        // first — a cancel racing completion loses, §10.1).
-        Resolution::Value(handle) => match instance.resume_with_value(handle) {
-            Ok(()) => drive(instance, instance.resume_directive(), fuel),
-            // A bad resolution handle — stale OR cross-instance (E§4.2) — is a host-contract
-            // violation and a non-resumable fault: the suspension is already cleared, so the
-            // instance is left terminally `Faulted(Internal)` (a `Faulted` outcome always implies
-            // `state() == Faulted`, E§3.3). Unlike the reader surface, which keeps the
-            // `Stale`↔`ForeignInstance` distinction so a host can retry, this consuming path
-            // collapses both: the suspension cannot be re-offered and the host's remedy is the
-            // same (pass a live, own-instance handle). A dedicated `EngineFault` kind could restore
-            // the distinction, but that is a spec (E) addition — deferred, not silently dropped.
-            Err(_) => fault(instance),
-        },
-        // The host rejected the capability: arm a raise carrying the host's value at the
-        // call site and re-drive, so it unwinds through the frames running cleanup and a
-        // `try` around the capability call can catch it (L§12), or it drains to the
-        // terminal `Raised` state (E§3.3) — **unless a cancellation is pending**: a cancel
-        // with program work still ahead wins over a host raise (E§10.1, S-23), so discard
-        // the rejection and tear the stack down to `Faulted(Cancelled)` instead.
+        // The capability's value becomes the call's result; resume the drive so the caller's
+        // waiting continuation consumes it. A cancellation requested while suspended is reaped by
+        // the resumed drive's next safe point (or the program completes first, §10.1).
+        Resolution::Value(handle) => {
+            // Validated before the suspension is consumed (`resume_with_value`): a bad handle
+            // rejects the call and leaves the instance `Suspended`, resolvable again.
+            instance
+                .resume_with_value(handle)
+                .map_err(|_| DriveReject::BadHandle)?;
+            Ok(drive(instance, instance.resume_directive(), fuel))
+        }
+        // The host rejected the capability: arm a raise at the call site and re-drive, so it
+        // unwinds running cleanup and a `try` around the call can catch it (L§12), or drains to
+        // terminal `Raised` — **unless a cancellation is pending**, which wins over a host raise
+        // (E§10.1, S-23): discard the rejection and tear the stack down to `Faulted(Cancelled)`.
         Resolution::Raise(handle) => {
             if instance.cancel_requested() {
                 instance.discard_pending_and_cancel();
-                return drive(instance, instance.resume_directive(), fuel);
+                return Ok(drive(instance, instance.resume_directive(), fuel));
             }
-            match instance.resume_with_raise(handle) {
-                Ok(()) => drive(instance, instance.resume_directive(), fuel),
-                // A bad raise handle collapses to `Faulted(Internal)`, as the value path above (the
-                // `Stale`↔`ForeignInstance` distinction is intentionally not surfaced here).
-                Err(_) => fault(instance),
-            }
+            instance
+                .resume_with_raise(handle)
+                .map_err(|_| DriveReject::BadHandle)?;
+            Ok(drive(instance, instance.resume_directive(), fuel))
         }
     }
 }
@@ -309,9 +309,13 @@ pub fn resolve_slice(
 /// `Source` the engine parses the module, pushes its top-level frame, and resumes driving
 /// (the importer stays parked beneath until the module finishes loading); `NotFound` raises
 /// `module-not-found` and `Raise` raises the host's value, both at the `import` site.
-/// Calling it on an instance not suspended on an import is a host-contract violation
-/// (debug-asserted; `Faulted(Internal)` in release).
-pub fn resolve_import(instance: &mut Instance, resolution: ImportResolution) -> Outcome {
+/// Calling it on an instance not suspended on an import — or with a stale/foreign raise
+/// handle — is an **invalid call**, rejected ([`DriveReject`]): request and instance state
+/// unchanged, resolving still available.
+pub fn resolve_import(
+    instance: &mut Instance,
+    resolution: ImportResolution,
+) -> Result<Outcome, DriveReject> {
     resolve_import_slice(instance, resolution, None)
 }
 
@@ -321,22 +325,18 @@ pub fn resolve_import_slice(
     instance: &mut Instance,
     resolution: ImportResolution,
     fuel: Option<u64>,
-) -> Outcome {
-    debug_assert!(
-        matches!(instance.state(), InstanceState::Suspended) && instance.is_import_suspended(),
-        "resolve_import() requires an instance suspended on an import (got {:?}); use \
-         resolve() for a capability (E§6/§7.5)",
-        instance.state()
-    );
+) -> Result<Outcome, DriveReject> {
+    // `resolve_import` requires an instance suspended on an **import** (a capability wants
+    // `resolve`). The wrong state is an invalid call: rejected, changing nothing.
     if !(matches!(instance.state(), InstanceState::Suspended) && instance.is_import_suspended()) {
-        return Outcome::Faulted(EngineFault::Internal);
+        return Err(DriveReject::WrongState);
     }
     // A cancellation requested while suspended wins over the resolution (E§10.1, S-23),
     // exactly as for a capability: discard the parked import and tear down to
     // `Faulted(Cancelled)`.
     if instance.cancel_requested() {
         instance.discard_pending_and_cancel();
-        return drive(instance, instance.resume_directive(), fuel);
+        return Ok(drive(instance, instance.resume_directive(), fuel));
     }
     match resolution {
         // The module's source: parse + push its top-level frame (or alias a canonical
@@ -345,21 +345,23 @@ pub fn resolve_import_slice(
         // continues.
         ImportResolution::Source { text, canonical_id } => {
             instance.load_import_source(&text, &canonical_id);
-            drive(instance, instance.resume_directive(), fuel)
+            Ok(drive(instance, instance.resume_directive(), fuel))
         }
         // The host did not find the requested path. A single-segment path raises
         // `module-not-found`; a multi-segment one falls back to a member import (S-7) and
         // resumes. Either way re-drive under the directive in force.
         ImportResolution::NotFound => {
             instance.resolve_import_not_found();
-            drive(instance, instance.resume_directive(), fuel)
+            Ok(drive(instance, instance.resume_directive(), fuel))
         }
         // The host could not supply the source: raise its value at the `import` site.
-        ImportResolution::Raise(handle) => match instance.raise_import_value(handle) {
-            Ok(()) => drive(instance, instance.resume_directive(), fuel),
-            // A stale resolution handle is a host-contract violation: the suspension was
-            // cleared, so leave the instance terminally `Faulted` (E§3.3).
-            Err(_) => fault(instance),
-        },
+        // Validated before the suspension is consumed (`raise_import_value`): a bad handle
+        // rejects the call and leaves the instance suspended on the import.
+        ImportResolution::Raise(handle) => {
+            instance
+                .raise_import_value(handle)
+                .map_err(|_| DriveReject::BadHandle)?;
+            Ok(drive(instance, instance.resume_directive(), fuel))
+        }
     }
 }

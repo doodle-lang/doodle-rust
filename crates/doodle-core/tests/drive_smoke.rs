@@ -43,7 +43,7 @@ fn drives_a_literal_statement_to_void_completion() {
     let mut inst = instance("42\n");
     assert_eq!(inst.state(), InstanceState::Ready);
 
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
 
     assert_eq!(inst.state(), InstanceState::Completed);
     assert!(matches!(outcome, Outcome::Completed(None)));
@@ -55,7 +55,7 @@ fn drives_a_literal_statement_to_void_completion() {
 #[test]
 fn drives_an_empty_module_to_void_completion() {
     let mut inst = instance("");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
 
     assert_eq!(inst.state(), InstanceState::Completed);
     assert!(matches!(outcome, Outcome::Completed(None)));
@@ -67,7 +67,7 @@ fn drives_an_empty_module_to_void_completion() {
 #[test]
 fn drives_a_multi_statement_program_to_void_completion() {
     let mut inst = instance("nil\ntrue\nb\"hi\"\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
 
     assert_eq!(inst.state(), InstanceState::Completed);
     assert!(matches!(outcome, Outcome::Completed(None)));
@@ -77,7 +77,7 @@ fn drives_a_multi_statement_program_to_void_completion() {
 /// Asserts driving `src` to completion raises an uncaught exception of `kind`.
 fn assert_raises(src: &str, kind: ExceptionKind) {
     let mut inst = instance(src);
-    match run(&mut inst, Directive::RunToCompletion) {
+    match run(&mut inst, Directive::RunToCompletion).expect("valid drive") {
         Outcome::Raised(value, _trace) => {
             let (slug, _) = inst.describe_raised(value);
             assert_eq!(slug, kind.slug());
@@ -113,7 +113,7 @@ fn and_or_short_circuit_past_a_failing_right_operand() {
         let mut inst = instance(src);
         assert!(
             matches!(
-                run(&mut inst, Directive::RunToCompletion),
+                run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
                 Outcome::Completed(None)
             ),
             "{src:?} should short-circuit and complete Void"
@@ -161,7 +161,7 @@ fn a_non_bool_condition_raises() {
 fn a_call_tree_drives_to_void_completion() {
     let mut inst = instance("fn add(a, b) a + b end\nto shout() add(1, 2) end\nshout()\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }
@@ -228,7 +228,7 @@ fn a_block_program_with_exits_drives_to_void_completion() {
          to go()\neach3() do break end\nend\ngo()\n",
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }

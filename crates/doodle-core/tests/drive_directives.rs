@@ -7,8 +7,8 @@
 //! program reaches the same terminal under a step-through as under a fast run.
 
 use doodle_core::drive::{
-    CapabilityId, Directive, EngineFault, LimitKind, Limits, Outcome, PauseReason, Resolution,
-    resolve, run, run_slice,
+    CapabilityId, Directive, DriveReject, EngineFault, LimitKind, Limits, Outcome, PauseReason,
+    Resolution, resolve, run, run_slice,
 };
 use doodle_core::machine::{
     Instance, InstanceState, Registry, each_intrinsic, print_intrinsic, random_intrinsic,
@@ -104,11 +104,11 @@ fn resolve_clean(src: &str) -> doodle_core::resolve::ResolvedModule {
 /// `Paused`; returns how many times it paused and the terminal outcome.
 fn drive_counting(inst: &mut Instance, directive: Directive) -> (usize, Outcome) {
     let mut pauses = 0;
-    let mut outcome = run(inst, directive);
+    let mut outcome = run(inst, directive).expect("valid drive");
     while matches!(outcome, Outcome::Paused(_)) {
         pauses += 1;
         assert!(pauses < 100_000, "step loop did not terminate");
-        outcome = run(inst, directive);
+        outcome = run(inst, directive).expect("valid drive");
     }
     (pauses, outcome)
 }
@@ -119,7 +119,7 @@ fn drive_counting(inst: &mut Instance, directive: Directive) -> (usize, Outcome)
 fn a_clean_program_completes_and_leaves_completed() {
     let mut inst = instance("let a = 1\nlet b = 2\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.state(), InstanceState::Completed);
@@ -131,7 +131,7 @@ fn an_uncaught_raise_leaves_the_instance_raised() {
     // tells a Doodle exception from an engine fault.
     let mut inst = instance("1 / 0\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Raised(..)
     ));
     assert_eq!(inst.state(), InstanceState::Raised);
@@ -145,7 +145,7 @@ fn a_limit_fault_leaves_the_instance_faulted() {
         ..Limits::default()
     };
     let mut inst = load("loop do\n1\nend\n", limits);
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(
             outcome,
@@ -156,23 +156,39 @@ fn a_limit_fault_leaves_the_instance_faulted() {
     assert_eq!(inst.state(), InstanceState::Faulted);
 }
 
-// ---- host-contract phase guards ----
+// ---- invalid-call rejections (E§7.5): an invalid call rejects and changes nothing ----
 
 #[test]
-#[should_panic(expected = "not re-drivable")]
-fn re_driving_a_terminal_instance_is_a_contract_violation() {
+fn re_driving_a_terminal_instance_is_rejected() {
     let mut inst = instance("1\n");
-    run(&mut inst, Directive::RunToCompletion); // → Completed
-    let _ = run(&mut inst, Directive::RunToCompletion); // debug-asserts
+    let done = run(&mut inst, Directive::RunToCompletion).expect("valid drive"); // → Completed
+    assert!(matches!(done, Outcome::Completed(_)));
+    // Re-driving a terminal instance is an invalid call: rejected, changing nothing.
+    assert!(matches!(
+        run(&mut inst, Directive::RunToCompletion),
+        Err(DriveReject::WrongState)
+    ));
+    assert_eq!(
+        inst.state(),
+        InstanceState::Completed,
+        "a rejected drive leaves the terminal state intact"
+    );
 }
 
 #[test]
-#[should_panic(expected = "suspended on a capability")]
-fn resolving_a_non_suspended_instance_is_a_contract_violation() {
+fn resolving_a_non_suspended_instance_is_rejected() {
     let mut inst = instance("1\n");
-    // Nothing has suspended (capabilities are M2b.4), so resolve is misuse.
     let handle = inst.make_int(0);
-    let _ = resolve(&mut inst, doodle_core::drive::Resolution::Value(handle));
+    // Nothing has suspended, so resolve is an invalid call: rejected, changing nothing.
+    assert!(matches!(
+        resolve(&mut inst, Resolution::Value(handle)),
+        Err(DriveReject::WrongState)
+    ));
+    assert_eq!(
+        inst.state(),
+        InstanceState::Ready,
+        "a rejected resolve leaves the instance unchanged"
+    );
 }
 
 // ---- Step directives ----
@@ -195,7 +211,7 @@ fn stepping_through_reaches_the_same_terminal_as_a_fast_run() {
     // whether stepped or run straight through.
     let src = "let a = 1\nlet b = 2\nlet c = 3\n";
     let mut fast = instance(src);
-    let fast_outcome = run(&mut fast, Directive::RunToCompletion);
+    let fast_outcome = run(&mut fast, Directive::RunToCompletion).expect("valid drive");
 
     let mut stepped = instance(src);
     let (_, step_outcome) = drive_counting(&mut stepped, Directive::Step);
@@ -213,7 +229,7 @@ fn a_capability_suspends_with_its_identity_and_resolves_with_a_value() {
     // index 1 — print is 0) and carries no args. Resolving with a value makes it the
     // call's result, which `print` then emits.
     let mut inst = instance_with_caps("print(read_line())\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let Outcome::Suspended(request) = outcome else {
         panic!("expected Suspended, got {outcome:?}");
     };
@@ -222,7 +238,7 @@ fn a_capability_suspends_with_its_identity_and_resolves_with_a_value() {
     assert_eq!(inst.state(), InstanceState::Suspended);
 
     let line = inst.make_string(b"hello").unwrap();
-    let resumed = resolve(&mut inst, Resolution::Value(line));
+    let resumed = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
     assert!(matches!(resumed, Outcome::Completed(None)), "{resumed:?}");
     assert_eq!(inst.output(), b"hello\n");
     assert_eq!(inst.state(), InstanceState::Completed);
@@ -240,7 +256,7 @@ fn a_custom_entry_path_names_the_entry_module() {
 
     inst.set_breakpoint("prog.doodle", 3); // binds: the entry is named prog.doodle
     inst.set_breakpoint("main", 3); // a wrong id — no such loaded module, so it stays pending
-    let outcome = run(&mut inst, Directive::Continue);
+    let outcome = run(&mut inst, Directive::Continue).expect("valid drive");
     let Outcome::Paused(PauseReason::Breakpoint(_)) = outcome else {
         panic!("expected a breakpoint pause on prog.doodle:3, got {outcome:?}");
     };
@@ -261,20 +277,23 @@ fn time_and_random_suspend_as_capabilities_and_resolve_to_values() {
     let mut inst = Instance::load(module, Limits::default(), registry, "main");
 
     // `time()` suspends first, naming its capability id and carrying no args.
-    let Outcome::Suspended(req) = run(&mut inst, Directive::RunToCompletion) else {
+    let Outcome::Suspended(req) = run(&mut inst, Directive::RunToCompletion).expect("valid drive")
+    else {
         panic!("time() should suspend");
     };
     assert_eq!(req.capability, CapabilityId(1));
     assert!(req.args.is_empty());
     // The host supplies the clock reading; the program prints it and runs on to `random()`.
     let clock = inst.make_int(7);
-    let Outcome::Suspended(req2) = resolve(&mut inst, Resolution::Value(clock)) else {
+    let Outcome::Suspended(req2) =
+        resolve(&mut inst, Resolution::Value(clock)).expect("valid drive")
+    else {
         panic!("random() should suspend after time() resolves");
     };
     assert_eq!(req2.capability, CapabilityId(2));
     assert!(req2.args.is_empty());
     let draw = inst.make_int(3);
-    let done = resolve(&mut inst, Resolution::Value(draw));
+    let done = resolve(&mut inst, Resolution::Value(draw)).expect("valid drive");
     assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
     assert_eq!(inst.output(), b"7\n3\n");
 }
@@ -283,11 +302,11 @@ fn time_and_random_suspend_as_capabilities_and_resolve_to_values() {
 fn a_capability_resolved_with_a_raise_surfaces_raised() {
     let mut inst = instance_with_caps("print(read_line())\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     let reason = inst.make_string(b"end of input").unwrap();
-    let outcome = resolve(&mut inst, Resolution::Raise(reason));
+    let outcome = resolve(&mut inst, Resolution::Raise(reason)).expect("valid drive");
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
     assert_eq!(inst.state(), InstanceState::Raised);
     // The host rejected the call, so `print` never ran.
@@ -303,13 +322,13 @@ fn a_cancelled_suspended_instance_resolved_with_a_raise_faults_cancelled() {
     // host raise that raced the stop button escape cancellation (M3.6 review).
     let mut inst = instance_with_caps("print(read_line())\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     // Stop button pressed while parked on the capability; then the host rejects the call.
     inst.cancel_token().cancel();
     let reason = inst.make_string(b"end of input").unwrap();
-    let outcome = resolve(&mut inst, Resolution::Raise(reason));
+    let outcome = resolve(&mut inst, Resolution::Raise(reason)).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
         "cancel must win over a host raise, got {outcome:?}"
@@ -328,12 +347,12 @@ fn a_cancelled_suspended_instance_resolved_with_a_value_faults_cancelled_when_wo
     // would stand, a cancel racing completion losing, §10.1).
     let mut inst = instance_with_caps("print(read_line())\nprint(\"after\")\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     inst.cancel_token().cancel();
     let line = inst.make_string(b"hello").unwrap();
-    let outcome = resolve(&mut inst, Resolution::Value(line));
+    let outcome = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
         "{outcome:?}"
@@ -345,20 +364,33 @@ fn a_cancelled_suspended_instance_resolved_with_a_value_faults_cancelled_when_wo
 }
 
 #[test]
-fn resolving_with_a_stale_handle_faults_terminally() {
-    // A stale resolution handle is a host-contract violation: the drive returns
-    // Faulted AND the instance is left terminally Faulted (not a resumable Suspended
-    // half-state) — a Faulted outcome always implies state() == Faulted (E§3.3).
+fn resolving_with_a_stale_handle_is_rejected_and_stays_resumable() {
+    // A bad resolution handle (E§4.2) is an invalid call: rejected, changing nothing. The handle
+    // is validated **before** the suspension is consumed, so the instance stays `Suspended` and a
+    // corrected resolve then succeeds — a host's handle slip does not cost the running program.
     let mut inst = instance_with_caps("print(read_line())\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     let stale = inst.make_int(0);
     inst.release(stale).unwrap(); // now names a freed slot
-    let outcome = resolve(&mut inst, Resolution::Value(stale));
-    assert!(matches!(outcome, Outcome::Faulted(_)), "{outcome:?}");
-    assert_eq!(inst.state(), InstanceState::Faulted);
+    assert!(
+        matches!(
+            resolve(&mut inst, Resolution::Value(stale)),
+            Err(DriveReject::BadHandle)
+        ),
+        "a bad resolution handle rejects the call"
+    );
+    assert_eq!(
+        inst.state(),
+        InstanceState::Suspended,
+        "the suspension is intact after a rejected resolve"
+    );
+    // The corrected resolve succeeds and the program completes.
+    let line = inst.make_string(b"hello").unwrap();
+    let outcome = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
+    assert!(matches!(outcome, Outcome::Completed(_)), "{outcome:?}");
 }
 
 #[test]
@@ -368,12 +400,12 @@ fn a_scripted_capability_replays_to_the_same_terminal() {
     fn drive_with_line(line: &[u8]) -> (Vec<u8>, bool) {
         let mut inst = instance_with_caps("print(read_line())\nprint(read_line())\n");
         // Start with `run`; every subsequent Suspended is continued with `resolve`.
-        let mut outcome = run(&mut inst, Directive::RunToCompletion);
+        let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
         loop {
             match outcome {
                 Outcome::Suspended(_) => {
                     let h = inst.make_string(line).unwrap();
-                    outcome = resolve(&mut inst, Resolution::Value(h));
+                    outcome = resolve(&mut inst, Resolution::Value(h)).expect("valid drive");
                 }
                 Outcome::Completed(_) => break,
                 other => panic!("unexpected {other:?}"),
@@ -393,7 +425,7 @@ fn a_scripted_capability_replays_to_the_same_terminal() {
 #[test]
 fn each_invokes_the_block_once_per_element() {
     let mut inst = instance_with_caps("each([1, 2, 3]) do (x)\nprint(x)\nend\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"1\n2\n3\n");
 }
@@ -402,7 +434,7 @@ fn each_invokes_the_block_once_per_element() {
 fn each_over_an_empty_list_runs_the_block_zero_times() {
     let mut inst = instance_with_caps("each([]) do (x)\nprint(x)\nend\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.output(), b"");
@@ -415,7 +447,7 @@ fn continue_in_an_each_block_ends_that_iteration() {
     let mut inst =
         instance_with_caps("each([1, 2, 3]) do (x)\nif x == 2 then continue end\nprint(x)\nend\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.output(), b"1\n3\n");
@@ -425,7 +457,7 @@ fn continue_in_an_each_block_ends_that_iteration() {
 fn a_raise_inside_an_each_block_propagates() {
     let mut inst = instance_with_caps("each([1, 2]) do (x)\n1 / 0\nend\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -434,7 +466,7 @@ fn a_raise_inside_an_each_block_propagates() {
 fn each_needs_a_list_to_iterate() {
     let mut inst = instance_with_caps("each(5) do (x)\nprint(x)\nend\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -450,7 +482,7 @@ fn a_limit_tripped_inside_an_each_block_faults() {
     };
     let module = resolve_clean("each([1]) do (x)\nloop do\n1\nend\nend\n");
     let mut inst = Instance::load(module, limits, caps_registry(), "main");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(
             outcome,
@@ -467,7 +499,7 @@ fn reentrant_recursion_through_each_faults_instead_of_overflowing_the_stack() {
     // drive on the host's Rust stack. Bounded (MD §14) so it faults with StackDepth
     // rather than aborting the host process by overflowing the native stack.
     let mut inst = instance_with_caps("to r(x)\neach([x]) do (y)\nr(y)\nend\nend\nr(1)\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(
             outcome,
@@ -488,7 +520,7 @@ fn break_ends_the_each_and_completes_the_call() {
     let mut inst = instance_with_caps(
         "each([1, 2, 3]) do (x)\nprint(x)\nif x == 2 then break end\nend\nprint(99)\n",
     );
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     // 1, 2 print; break ends `each`; the following statement (99) still runs.
     assert_eq!(inst.output(), b"1\n2\n99\n");
@@ -500,7 +532,7 @@ fn return_across_an_each_block_returns_from_the_enclosing_fn() {
     // `each` (S-46): `f` yields 1 (the first element) and the trailing `99` never runs.
     let mut inst =
         instance_with_caps("fn f()\neach([1, 2, 3]) do (x)\nreturn x\nend\n99\nend\nprint(f())\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"1\n");
 }
@@ -513,7 +545,7 @@ fn a_break_in_a_nested_each_targets_only_the_inner_each() {
     let mut inst = instance_with_caps(
         "each([1, 2]) do (x)\neach([3, 4]) do (y)\nprint(y)\nbreak\nend\nprint(x)\nend\n",
     );
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     // x=1: inner prints 3 then breaks, then print(1); x=2: inner prints 3 then breaks, print(2).
     assert_eq!(inst.output(), b"3\n1\n3\n2\n");
@@ -527,7 +559,7 @@ fn a_return_from_a_nested_each_unwinds_through_both_consumers() {
         "fn f()\neach([1, 2]) do (x)\neach([3, 4]) do (y)\nreturn y\nend\nend\n0\nend\n\
          print(f())\n",
     );
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"3\n");
 }
@@ -537,7 +569,7 @@ fn a_valued_break_to_the_procedure_each_raises() {
     // Parity with a Doodle `to` block-consumer (S-10 open half): `each` is a procedure,
     // so a valued `break` has no value destination and raises `NoValueDestination`.
     let mut inst = instance_with_caps("each([1]) do (x)\nbreak 5\nend\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
     assert_eq!(inst.state(), InstanceState::Raised);
 }
@@ -548,7 +580,7 @@ fn stepping_a_break_across_each_reaches_the_same_terminal_as_a_fast_run() {
     // native boundary reaches the same terminal + output whether stepped or run straight.
     let src = "each([1, 2, 3]) do (x)\nprint(x)\nif x == 2 then break end\nend\n";
     let mut fast = instance_with_caps(src);
-    let fast_outcome = run(&mut fast, Directive::RunToCompletion);
+    let fast_outcome = run(&mut fast, Directive::RunToCompletion).expect("valid drive");
 
     let mut stepped = instance_with_caps(src);
     let (_, step_outcome) = drive_counting(&mut stepped, Directive::Step);
@@ -595,14 +627,14 @@ fn a_fuel_bounded_drive_pauses_at_sliceend_and_resumes_to_the_same_terminal() {
     let src = "let a = 1\nlet b = 2\nlet c = 3\nlet d = 4\n";
     let mut fast = instance(src);
     assert!(matches!(
-        run(&mut fast, Directive::RunToCompletion),
+        run(&mut fast, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
 
     let mut sliced = instance(src);
     let mut pauses = 0;
     loop {
-        match run_slice(&mut sliced, Directive::RunToCompletion, Some(1)) {
+        match run_slice(&mut sliced, Directive::RunToCompletion, Some(1)).expect("valid drive") {
             Outcome::Paused(PauseReason::SliceEnd) => {
                 pauses += 1;
                 assert!(pauses < 1000, "slice loop did not terminate");
@@ -631,7 +663,7 @@ fn completion_wins_the_exact_fuel_boundary() {
     let mut counter = instance(src);
     let mut pauses = 0u64;
     loop {
-        match run_slice(&mut counter, Directive::RunToCompletion, Some(1)) {
+        match run_slice(&mut counter, Directive::RunToCompletion, Some(1)).expect("valid drive") {
             Outcome::Paused(PauseReason::SliceEnd) => pauses += 1,
             Outcome::Completed(None) => break,
             other => panic!("unexpected {other:?}"),
@@ -639,7 +671,8 @@ fn completion_wins_the_exact_fuel_boundary() {
     }
     let exact = pauses + 1;
     let mut inst = instance(src);
-    let outcome = run_slice(&mut inst, Directive::RunToCompletion, Some(exact));
+    let outcome =
+        run_slice(&mut inst, Directive::RunToCompletion, Some(exact)).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Completed(None)),
         "fuel={exact} (exact): {outcome:?}"
@@ -653,14 +686,14 @@ fn zero_fuel_yields_sliceend_before_running_anything() {
     // single safe point (it must not silently run unbounded), and re-driving makes progress.
     let mut inst = instance("let a = 1\nlet b = 2\n");
     assert!(matches!(
-        run_slice(&mut inst, Directive::RunToCompletion, Some(0)),
+        run_slice(&mut inst, Directive::RunToCompletion, Some(0)).expect("valid drive"),
         Outcome::Paused(PauseReason::SliceEnd)
     ));
     assert_eq!(inst.state(), InstanceState::Paused);
     // A real slice from here still completes.
     let mut pauses = 0;
     loop {
-        match run_slice(&mut inst, Directive::RunToCompletion, Some(1)) {
+        match run_slice(&mut inst, Directive::RunToCompletion, Some(1)).expect("valid drive") {
             Outcome::Paused(PauseReason::SliceEnd) => {
                 pauses += 1;
                 assert!(pauses < 1000);
@@ -677,7 +710,7 @@ fn an_unbounded_fuel_never_slice_ends() {
     // `None` fuel (the `run` default) runs to a real stop, never `SliceEnd`.
     let mut inst = instance("let a = 1\nlet b = 2\n");
     assert!(matches!(
-        run_slice(&mut inst, Directive::RunToCompletion, None),
+        run_slice(&mut inst, Directive::RunToCompletion, None).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }
@@ -688,7 +721,7 @@ fn slice_end_is_a_resumable_pause_distinct_from_the_step_budget_fault() {
     // Paused); exhausting the lifetime step budget is a terminal `Faulted(StepBudget)`.
     let mut sliced = instance("loop do\n1\nend\n");
     assert!(matches!(
-        run_slice(&mut sliced, Directive::RunToCompletion, Some(5)),
+        run_slice(&mut sliced, Directive::RunToCompletion, Some(5)).expect("valid drive"),
         Outcome::Paused(PauseReason::SliceEnd)
     ));
     assert_eq!(sliced.state(), InstanceState::Paused);
@@ -699,7 +732,7 @@ fn slice_end_is_a_resumable_pause_distinct_from_the_step_budget_fault() {
     };
     let mut bounded = load("loop do\n1\nend\n", limits);
     assert!(matches!(
-        run(&mut bounded, Directive::RunToCompletion),
+        run(&mut bounded, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::StepBudget))
     ));
     assert_eq!(bounded.state(), InstanceState::Faulted);
@@ -717,7 +750,7 @@ fn the_step_budget_is_enforced_regardless_of_slice_size() {
         };
         let mut inst = load("loop do\n1\nend\n", limits);
         loop {
-            match run_slice(&mut inst, Directive::RunToCompletion, fuel) {
+            match run_slice(&mut inst, Directive::RunToCompletion, fuel).expect("valid drive") {
                 Outcome::Paused(PauseReason::SliceEnd) => continue,
                 other => return other,
             }
@@ -744,13 +777,13 @@ fn slicing_does_not_change_program_output_even_across_a_nested_drive() {
     let src = "each([1, 2, 3, 4, 5]) do (x)\nprint(x)\nend\n";
     let mut fast = instance_with_caps(src);
     assert!(matches!(
-        run(&mut fast, Directive::RunToCompletion),
+        run(&mut fast, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
 
     let mut sliced = instance_with_caps(src);
     loop {
-        match run_slice(&mut sliced, Directive::RunToCompletion, Some(2)) {
+        match run_slice(&mut sliced, Directive::RunToCompletion, Some(2)).expect("valid drive") {
             Outcome::Paused(PauseReason::SliceEnd) => continue,
             Outcome::Completed(None) => break,
             other => panic!("unexpected {other:?}"),
@@ -769,7 +802,7 @@ fn current_position_points_into_the_source_at_a_pause() {
     let src = "let a = 1\nlet b = 2\nlet c = 3\n";
     let mut inst = instance(src);
     assert!(matches!(
-        run(&mut inst, Directive::Step),
+        run(&mut inst, Directive::Step).expect("valid drive"),
         Outcome::Paused(_)
     ));
     let pos = inst
@@ -789,7 +822,7 @@ fn stack_walk_at_module_top_is_one_frameless_frame() {
     // site (it was not entered by a Doodle call).
     let mut inst = instance("let a = 1\nlet b = 2\n");
     assert!(matches!(
-        run(&mut inst, Directive::Step),
+        run(&mut inst, Directive::Step).expect("valid drive"),
         Outcome::Paused(_)
     ));
     let frames = inst.stack_walk();
@@ -818,7 +851,7 @@ fn stack_walk_inside_a_call_shows_the_callee_and_its_call_site() {
         if depth >= 2 {
             break;
         }
-        let outcome = run(&mut inst, Directive::StepInto);
+        let outcome = run(&mut inst, Directive::StepInto).expect("valid drive");
         assert!(
             matches!(outcome, Outcome::Paused(_)),
             "never entered f: {outcome:?}"
@@ -848,7 +881,7 @@ fn current_position_is_never_the_zero_width_origin_across_a_step_through() {
     let src = "to f()\nlet x = 1\nend\nf()\n";
     let mut inst = instance(src);
     loop {
-        match run(&mut inst, Directive::StepInto) {
+        match run(&mut inst, Directive::StepInto).expect("valid drive") {
             Outcome::Paused(_) => {
                 if let Some(pos) = inst.current_position() {
                     assert!(
@@ -873,7 +906,7 @@ fn cancel_stops_an_infinite_loop_and_faults_cancelled() {
     // another thread while the drive runs, via the cloneable token.)
     let mut inst = instance("loop do\n1\nend\n");
     inst.cancel_token().cancel();
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
         "{outcome:?}"
@@ -888,7 +921,7 @@ fn an_unrequested_cancel_token_does_not_affect_a_normal_run() {
     let mut inst = instance("let a = 1\nlet b = 2\n");
     let _token = inst.cancel_token();
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.state(), InstanceState::Completed);
@@ -901,12 +934,12 @@ fn cancelling_a_suspended_instance_faults_when_resumed() {
     // resume and faults `Cancelled`, so the trailing loop never runs.
     let mut inst = instance_with_caps("let x = read_line()\nloop do\n1\nend\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     inst.cancel_token().cancel();
     let line = inst.make_string(b"hi").unwrap();
-    let outcome = resolve(&mut inst, Resolution::Value(line));
+    let outcome = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::Cancelled)),
         "{outcome:?}"
@@ -935,7 +968,7 @@ fn a_foreign_value_is_inert_in_doodle_and_finalizes_at_destroy() {
     let c = count.clone();
     let mut inst = instance_with_caps("read_line() + 1\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Suspended(_)
     ));
     let finalizer: doodle_core::heap::Finalizer = Box::new(move |ptr| {
@@ -943,7 +976,7 @@ fn a_foreign_value_is_inert_in_doodle_and_finalizes_at_destroy() {
         c.fetch_add(1, Relaxed);
     });
     let foreign = inst.make_foreign(7, 42, Some(finalizer));
-    let outcome = resolve(&mut inst, Resolution::Value(foreign));
+    let outcome = resolve(&mut inst, Resolution::Value(foreign)).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Raised(..)),
         "arithmetic on a foreign value raises: {outcome:?}"
@@ -971,7 +1004,7 @@ fn a_suspend_inside_a_native_block_consumer_faults_nestedsuspend() {
     // exact-variant match pins it as `NestedSuspend` (not a `Suspended` the host could
     // resolve, nor a generic `Internal` fault).
     let mut inst = instance_with_caps("each([1]) do (x)\nread_line()\nend\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
         "{outcome:?}"
@@ -989,17 +1022,17 @@ fn nestedsuspend_reaches_the_same_terminal_stepped_and_sliced() {
     let src = "each([1]) do (x)\nread_line()\nend\n";
     let mut fast = instance_with_caps(src);
     assert!(matches!(
-        run(&mut fast, Directive::RunToCompletion),
+        run(&mut fast, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Faulted(EngineFault::NestedSuspend)
     ));
 
     let mut stepped = instance_with_caps(src);
-    let mut outcome = run(&mut stepped, Directive::Step);
+    let mut outcome = run(&mut stepped, Directive::Step).expect("valid drive");
     for _ in 0..10_000 {
         if !matches!(outcome, Outcome::Paused(_)) {
             break;
         }
-        outcome = run(&mut stepped, Directive::Step);
+        outcome = run(&mut stepped, Directive::Step).expect("valid drive");
     }
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
@@ -1007,12 +1040,13 @@ fn nestedsuspend_reaches_the_same_terminal_stepped_and_sliced() {
     );
 
     let mut sliced = instance_with_caps(src);
-    let mut outcome = run_slice(&mut sliced, Directive::RunToCompletion, Some(1));
+    let mut outcome =
+        run_slice(&mut sliced, Directive::RunToCompletion, Some(1)).expect("valid drive");
     for _ in 0..10_000 {
         if !matches!(outcome, Outcome::Paused(PauseReason::SliceEnd)) {
             break;
         }
-        outcome = run_slice(&mut sliced, Directive::RunToCompletion, Some(1));
+        outcome = run_slice(&mut sliced, Directive::RunToCompletion, Some(1)).expect("valid drive");
     }
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
@@ -1028,7 +1062,7 @@ fn a_doubly_nested_native_consumer_still_faults_nestedsuspend() {
     // request past the boundary.
     let mut inst =
         instance_with_caps("each([1]) do (x)\neach([1]) do (y)\nread_line()\nend\nend\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(
         matches!(outcome, Outcome::Faulted(EngineFault::NestedSuspend)),
         "{outcome:?}"
@@ -1046,10 +1080,10 @@ fn a_doodle_block_consumer_suspends_normally_unlike_the_native_one() {
     let mut inst = instance_with_caps(
         "to run_block(do body)\nbody()\nend\nrun_block() do\nread_line()\nend\n",
     );
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Suspended(_)), "{outcome:?}");
     assert_eq!(inst.state(), InstanceState::Suspended);
     let line = inst.make_string(b"hi").unwrap();
-    let done = resolve(&mut inst, Resolution::Value(line));
+    let done = resolve(&mut inst, Resolution::Value(line)).expect("valid drive");
     assert!(matches!(done, Outcome::Completed(None)), "{done:?}");
 }

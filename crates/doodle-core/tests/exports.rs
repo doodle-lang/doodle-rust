@@ -50,7 +50,7 @@ fn instance(main: &str) -> Instance {
 /// outcome.
 fn run_bundled(main: &str) -> (Instance, Outcome) {
     let mut inst = instance(main);
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(req) = &outcome {
         let res = if req.path == ["lib"] {
             ImportResolution::Source {
@@ -60,7 +60,7 @@ fn run_bundled(main: &str) -> (Instance, Outcome) {
         } else {
             ImportResolution::NotFound
         };
-        outcome = resolve_import(&mut inst, res);
+        outcome = resolve_import(&mut inst, res).expect("valid drive");
     }
     (inst, outcome)
 }
@@ -117,7 +117,7 @@ fn a_wildcard_import_omits_private_members_and_names_them_on_use() {
 fn without_an_exports_statement_every_member_is_public() {
     // A module with no `exports` keeps today's behavior: all definitions are public.
     let mut inst = instance("import open\nopen.a()\nopen.b()\n");
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(req) = &outcome {
         let res = if req.path == ["open"] {
             ImportResolution::Source {
@@ -127,7 +127,7 @@ fn without_an_exports_statement_every_member_is_public() {
         } else {
             ImportResolution::NotFound
         };
-        outcome = resolve_import(&mut inst, res);
+        outcome = resolve_import(&mut inst, res).expect("valid drive");
     }
     assert!(matches!(outcome, Outcome::Completed(_)), "{outcome:?}");
     assert_eq!(inst.output(), b"a\nb\n");
@@ -138,7 +138,7 @@ fn a_file_level_module_block_wraps_the_file() {
     // `module App … end` wrapping the whole file is unwrapped: its body is the file's top
     // level, so it runs exactly as if the block weren't there (the name is documentation).
     let mut inst = instance("module App\n    print(\"wrapped\")\nend\n");
-    let outcome = run(&mut inst, Directive::RunToCompletion);
+    let outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     assert!(matches!(outcome, Outcome::Completed(_)), "{outcome:?}");
     assert_eq!(inst.output(), b"wrapped\n");
 }

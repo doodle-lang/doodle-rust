@@ -236,7 +236,7 @@ fn frame_observation_reads_a_function_frames_locals() {
     // StepInto until paused at a point inside `f` where `b` is bound, then inspect frame 0.
     let mut guard = 0;
     loop {
-        let out = run(&mut inst, Directive::StepInto);
+        let out = run(&mut inst, Directive::StepInto).expect("valid drive");
         assert!(
             matches!(out, Outcome::Paused(_)),
             "stepping pauses: {out:?}"
@@ -280,7 +280,7 @@ fn step_over_treats_a_call_as_one_step() {
     let mut lines = Vec::new();
     let mut guard = 0;
     loop {
-        match run(&mut inst, Directive::StepOver) {
+        match run(&mut inst, Directive::StepOver).expect("valid drive") {
             Outcome::Paused(_) => {
                 if let Some(pos) = inst.current_position() {
                     lines.push(line_of(pos.span.start as usize));
@@ -317,7 +317,7 @@ fn module_globals_list_top_level_bindings_with_kinds_and_report_tdz() {
     let mut inst = load_source("let a = 1\nconst b = 2\nparameter c = 3\nlet d = 4\nd\n");
     inst.set_breakpoint("main", 4);
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::Breakpoint(_))
     ));
 
@@ -359,7 +359,7 @@ fn a_module_parameter_global_reads_the_active_with_override() {
     let mut inst = load_source("parameter pen = 1\nwith pen = 9 do\n  pen\nend\n");
     inst.set_breakpoint("main", 3);
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::Breakpoint(_))
     ));
     let names = inst.module_global_names(0);
@@ -382,7 +382,7 @@ fn a_module_parameter_global_reads_the_active_with_override() {
 fn drive_observing(inst: &mut Instance, directive: crate::drive::Directive) -> &'static str {
     use crate::drive::{Outcome, run};
     loop {
-        match run(inst, directive) {
+        match run(inst, directive).expect("valid drive") {
             Outcome::Completed(_) => return "completed",
             Outcome::Raised(..) => return "raised",
             Outcome::Faulted(_) => return "faulted",
@@ -480,7 +480,7 @@ fn a_host_pause_stops_at_the_next_safe_point_regardless_of_directive() {
         let mut inst = load_source("let a = 1\nlet b = 2\nlet c = 3\n");
         // Press the pause button before driving; the drive stops at its first safe point.
         inst.pause_token().pause();
-        let out = run(&mut inst, directive);
+        let out = run(&mut inst, directive).expect("valid drive");
         assert!(
             matches!(out, Outcome::Paused(PauseReason::HostPause)),
             "{directive:?} honors a host pause: {out:?}"
@@ -491,7 +491,7 @@ fn a_host_pause_stops_at_the_next_safe_point_regardless_of_directive() {
             "a pause is resumable, not a fault"
         );
         // The request was consumed (one-shot): re-driving completes, no second pause.
-        let out = run(&mut inst, directive);
+        let out = run(&mut inst, directive).expect("valid drive");
         assert!(
             matches!(out, Outcome::Completed(None)),
             "the re-drive runs to completion: {out:?}"
@@ -509,13 +509,13 @@ fn a_pause_requested_mid_drive_fires_on_the_next_drive() {
     // run then finishes.
     let mut inst = load_source("let a = 1\nlet b = 2\nlet c = 3\n");
     assert!(matches!(
-        run(&mut inst, Directive::Step),
+        run(&mut inst, Directive::Step).expect("valid drive"),
         Outcome::Paused(PauseReason::Step)
     ));
     inst.pause_token().pause();
     assert!(
         matches!(
-            run(&mut inst, Directive::Step),
+            run(&mut inst, Directive::Step).expect("valid drive"),
             Outcome::Paused(PauseReason::HostPause)
         ),
         "the host pause preempts the Step pause reason"
@@ -523,7 +523,7 @@ fn a_pause_requested_mid_drive_fires_on_the_next_drive() {
     // Drive to completion; the one-shot request is spent, so no further host pause.
     assert!(
         matches!(
-            run(&mut inst, Directive::RunToCompletion),
+            run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
             Outcome::Completed(None)
         ),
         "the one-shot pause is spent; the drive completes"
@@ -547,7 +547,7 @@ fn continue_stops_at_a_breakpoint_before_the_line_runs_run_to_completion_ignores
         inst.breakpoints()[0].resolved,
         "resolved against the loaded entry module"
     );
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(
         matches!(out, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
         "{out:?}"
@@ -558,7 +558,7 @@ fn continue_stops_at_a_breakpoint_before_the_line_runs_run_to_completion_ignores
         "stopped before line 2 ran, after line 1"
     );
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.output(), b"1\n2\n3\n");
@@ -567,7 +567,7 @@ fn continue_stops_at_a_breakpoint_before_the_line_runs_run_to_completion_ignores
     let mut inst2 = load_source_with_print(src);
     inst2.set_breakpoint("main", 2);
     assert!(matches!(
-        run(&mut inst2, Directive::RunToCompletion),
+        run(&mut inst2, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst2.output(), b"1\n2\n3\n");
@@ -583,7 +583,7 @@ fn a_breakpoint_snaps_forward_past_a_code_less_line() {
         inst.breakpoints()[0].resolved,
         "snapped to the next statement"
     );
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(
         matches!(out, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
         "{out:?}"
@@ -601,7 +601,7 @@ fn a_breakpoint_in_a_loop_body_refires_each_iteration() {
     let id = inst.set_breakpoint("main", 3);
     let mut hits = 0;
     loop {
-        match run(&mut inst, Directive::Continue) {
+        match run(&mut inst, Directive::Continue).expect("valid drive") {
             Outcome::Paused(PauseReason::Breakpoint(b)) => {
                 assert_eq!(b, id);
                 hits += 1;
@@ -625,7 +625,7 @@ fn a_cleared_breakpoint_does_not_fire() {
         "the listing drops a cleared breakpoint"
     );
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }
@@ -648,7 +648,7 @@ fn an_unknown_canonical_or_a_past_eof_line_is_pending_not_an_error() {
         "past-EOF line is pending"
     );
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Completed(None)
     ));
 }
@@ -662,7 +662,7 @@ fn a_pending_breakpoint_resolves_when_its_module_loads_then_fires() {
     let id = inst.set_breakpoint("lib", 2);
     assert!(!inst.breakpoints()[0].resolved, "pending before lib loads");
 
-    let mut outcome = run(&mut inst, Directive::Continue);
+    let mut outcome = run(&mut inst, Directive::Continue).expect("valid drive");
     if let Outcome::SuspendedImport(_) = &outcome {
         outcome = resolve_import(
             &mut inst,
@@ -670,7 +670,8 @@ fn a_pending_breakpoint_resolves_when_its_module_loads_then_fires() {
                 text: "print(1)\nprint(2)\n".to_string(),
                 canonical_id: "lib".to_string(),
             },
-        );
+        )
+        .expect("valid drive");
     }
     assert!(
         matches!(outcome, Outcome::Paused(PauseReason::Breakpoint(b)) if b == id),
@@ -684,7 +685,7 @@ fn a_pending_breakpoint_resolves_when_its_module_loads_then_fires() {
     );
 
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(inst.output(), b"1\n2\n99\n");
@@ -702,7 +703,7 @@ fn raise_trapping_pauses_before_unwind_and_run_to_completion_ignores_it() {
     let mut inst = load_source(src);
     inst.set_raise_trapping(true);
     assert!(inst.raise_trapping());
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(
         matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
         "{out:?}"
@@ -719,7 +720,7 @@ fn raise_trapping_pauses_before_unwind_and_run_to_completion_ignores_it() {
     let (kind, message) = inst.describe_raised(value);
     assert_eq!((kind.as_str(), message.as_str()), ("raised", "boom"));
     // Resuming continues the unwind: the binding is restored and the raise reaches the boundary.
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(matches!(out, Outcome::Raised(..)), "{out:?}");
     assert!(inst.machine.dyn_stack.is_empty(), "unwound after resume");
 
@@ -727,7 +728,7 @@ fn raise_trapping_pauses_before_unwind_and_run_to_completion_ignores_it() {
     let mut inst2 = load_source(src);
     inst2.set_raise_trapping(true);
     assert!(matches!(
-        run(&mut inst2, Directive::RunToCompletion),
+        run(&mut inst2, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -738,7 +739,7 @@ fn a_raise_trap_fires_even_when_the_raise_is_caught() {
     // The trap fires at the raise, before the handler search — independent of the `try` catch.
     let mut inst = load_source_with_print("try\nraise \"x\"\nrescue e\nprint(1)\nend\n");
     inst.set_raise_trapping(true);
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(
         matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
         "{out:?}"
@@ -749,7 +750,7 @@ fn a_raise_trap_fires_even_when_the_raise_is_caught() {
         "the rescue body has not run yet (pre-unwind)"
     );
     // Resuming continues the unwind: the `try` catches it and the rescue runs to completion.
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(matches!(out, Outcome::Completed(None)), "{out:?}");
     assert_eq!(inst.output(), b"1\n");
 }
@@ -760,7 +761,7 @@ fn an_engine_raise_traps_like_a_program_raise() {
     // Unified across sources (S-18): an engine-generated raise (division by zero) traps too.
     let mut inst = load_source("let x = 1 / 0\n");
     inst.set_raise_trapping(true);
-    let out = run(&mut inst, Directive::Continue);
+    let out = run(&mut inst, Directive::Continue).expect("valid drive");
     assert!(
         matches!(out, Outcome::Paused(PauseReason::RaiseTrap)),
         "{out:?}"
@@ -769,7 +770,7 @@ fn an_engine_raise_traps_like_a_program_raise() {
     let value = inst.resolve(handle).unwrap();
     assert_eq!(inst.describe_raised(value).0.as_str(), "division-by-zero");
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -780,7 +781,7 @@ fn without_raise_trapping_a_raise_is_not_trapped() {
     let mut inst = load_source("raise \"boom\"\n");
     assert!(!inst.raise_trapping(), "off by default");
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Raised(..)
     ));
     assert!(
@@ -802,7 +803,7 @@ fn fine_int_trace(src: &str) -> Vec<i64> {
     let mut trace = Vec::new();
     let mut guard = 0;
     loop {
-        match run(&mut inst, Directive::Step) {
+        match run(&mut inst, Directive::Step).expect("valid drive") {
             Outcome::Paused(PauseReason::Step) => {
                 if inst.completed_position().is_some()
                     && let Some(value) = inst.result()
@@ -861,7 +862,7 @@ fn interpolation_pieces_are_fine_stops() {
     let mut fine_stops = 0;
     let mut guard = 0;
     loop {
-        match run(&mut inst, Directive::Step) {
+        match run(&mut inst, Directive::Step).expect("valid drive") {
             Outcome::Paused(PauseReason::Step) => {
                 if inst.completed_position().is_some() {
                     fine_stops += 1;
@@ -887,7 +888,7 @@ fn coarse_mode_has_no_fine_stops_and_the_mode_is_switchable() {
     );
     let mut fine_stops = 0;
     loop {
-        match run(&mut inst, Directive::Step) {
+        match run(&mut inst, Directive::Step).expect("valid drive") {
             Outcome::Paused(PauseReason::Step) => {
                 if inst.completed_position().is_some() {
                     fine_stops += 1;
@@ -921,7 +922,7 @@ fn accounting_is_mode_independent_so_a_budget_faults_at_the_same_instant() {
                 let mut inst = load_source_with_print_and_limits(src, limits);
                 inst.set_observation_mode(mode);
                 let faulted = matches!(
-                    run(&mut inst, Directive::RunToCompletion),
+                    run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
                     Outcome::Faulted(_)
                 );
                 (faulted, inst.output().to_vec())
@@ -950,7 +951,7 @@ fn a_result_growing_op_over_the_per_op_cap_faults_before_computing() {
         "let s = \"ab\" * 2000000\n", // a ~4 MiB string
     ] {
         let mut inst = load_source_with_print_and_limits(src, limits);
-        match run(&mut inst, Directive::RunToCompletion) {
+        match run(&mut inst, Directive::RunToCompletion).expect("valid drive") {
             Outcome::Faulted(EngineFault::LimitExceeded(LimitKind::OpResult)) => {}
             other => panic!("{src:?}: expected OpResult fault, got {other:?}"),
         }
@@ -967,7 +968,7 @@ fn a_result_within_the_per_op_cap_still_computes() {
     };
     let mut inst = load_source_with_print_and_limits("print(2 ** 100)\n", limits);
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(_)
     ));
     assert!(
@@ -997,7 +998,7 @@ fn step_over_a_tail_recursive_loop_stays_at_constant_depth() {
     let mut guard = 0;
     while inst.frame_depth() < 2 {
         assert!(matches!(
-            run(&mut inst, Directive::StepInto),
+            run(&mut inst, Directive::StepInto).expect("valid drive"),
             Outcome::Paused(_)
         ));
         guard += 1;
@@ -1007,7 +1008,7 @@ fn step_over_a_tail_recursive_loop_stays_at_constant_depth() {
     // Now StepOver through the loop: the tail call is one step and never grows the stack.
     guard = 0;
     loop {
-        match run(&mut inst, Directive::StepOver) {
+        match run(&mut inst, Directive::StepOver).expect("valid drive") {
             Outcome::Paused(PauseReason::Step) => {
                 if inst.frame_depth() == 2 {
                     assert_eq!(
@@ -1070,7 +1071,7 @@ fn eval_to_string_renders_a_scalar_natively() {
     use crate::drive::{Directive, Outcome, run};
     let mut inst = load_source("let n = 42\n");
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     let h = global_handle(&mut inst, "n");
@@ -1091,7 +1092,7 @@ fn eval_to_string_drives_an_explicit_stringable() {
          let p = P(n: 1)\n",
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     let h = global_handle(&mut inst, "p");
@@ -1109,7 +1110,7 @@ fn eval_to_string_leaves_the_pause_intact() {
     let mut inst = load_source_with_print("let x = 7\nprint(x)\nprint(x)\n");
     inst.set_breakpoint("main", 2);
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::Breakpoint(_))
     ));
     let position_before = inst.current_position();
@@ -1126,7 +1127,7 @@ fn eval_to_string_leaves_the_pause_intact() {
     );
     assert_eq!(inst.frame_depth(), depth_before, "depth unchanged");
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Completed(None)
     ));
     assert_eq!(
@@ -1147,7 +1148,7 @@ fn eval_to_string_reports_a_raising_to_string() {
          let b = Bad(n: 1)\n",
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     let h = global_handle(&mut inst, "b");
@@ -1176,7 +1177,7 @@ fn a_runaway_to_string_faults_on_its_own_budget() {
          let s = Spin(n: 1)\n",
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     let h = global_handle(&mut inst, "s");
@@ -1203,7 +1204,7 @@ fn a_to_string_that_returns_a_non_string_raises_a_type_mismatch() {
          let w = Wrong(n: 1)\n",
     );
     assert!(matches!(
-        run(&mut inst, Directive::RunToCompletion),
+        run(&mut inst, Directive::RunToCompletion).expect("valid drive"),
         Outcome::Completed(None)
     ));
     let h = global_handle(&mut inst, "w");
@@ -1226,7 +1227,7 @@ fn eval_to_string_works_at_a_raise_trap_pause() {
     let mut inst = load_source("let x = 7\nraise \"outer\"\n");
     inst.set_raise_trapping(true);
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::RaiseTrap)
     ));
     let h = global_handle(&mut inst, "x");
@@ -1236,7 +1237,7 @@ fn eval_to_string_works_at_a_raise_trap_pause() {
     }
     // The outer raise survived the aux eval: resuming propagates it to the boundary.
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -1258,7 +1259,7 @@ fn eval_to_string_at_a_raise_trap_survives_a_gc_in_the_render() {
     inst.collect_at_every_safe_point();
     inst.set_raise_trapping(true);
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::RaiseTrap)
     ));
 
@@ -1277,7 +1278,7 @@ fn eval_to_string_at_a_raise_trap_survives_a_gc_in_the_render() {
 
     // Resuming propagates the same raise cleanly.
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Raised(..)
     ));
 }
@@ -1298,7 +1299,7 @@ fn an_aux_to_string_faulting_mid_with_restores_the_outer_parameter() {
     let mut inst = load_source(src);
     inst.set_breakpoint("main", 13); // `let stop = 1` — paused after q is bound, pen == 1
     assert!(matches!(
-        run(&mut inst, Directive::Continue),
+        run(&mut inst, Directive::Continue).expect("valid drive"),
         Outcome::Paused(PauseReason::Breakpoint(_))
     ));
 
@@ -2376,7 +2377,8 @@ fn enable_gc_stress_is_latch_once_and_pre_first_drive_only() {
     // Drive through the public entry the host layers use (it transitions the E§3.3 state, unlike
     // the raw-step `drive_terminal` helper); the instance is then no longer pristine.
     let mut driven = load_source("1 + 1\n");
-    let _ = crate::drive::run(&mut driven, crate::drive::Directive::RunToCompletion);
+    let _ = crate::drive::run(&mut driven, crate::drive::Directive::RunToCompletion)
+        .expect("valid drive");
     assert_ne!(
         driven.state(),
         InstanceState::Ready,
@@ -2396,7 +2398,8 @@ fn enable_gc_stress_is_latch_once_and_pre_first_drive_only() {
 #[test]
 fn a_terminal_raise_retains_its_exception_for_post_mortem_inspection() {
     let mut inst = load_source("raise \"boom\"\n");
-    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion);
+    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion)
+        .expect("valid drive");
     assert!(
         matches!(outcome, crate::drive::Outcome::Raised(..)),
         "expected a terminal raise, got {outcome:?}"
@@ -2410,7 +2413,8 @@ fn a_terminal_raise_retains_its_exception_for_post_mortem_inspection() {
     assert_eq!(inst.string_bytes(handle).unwrap(), b"boom");
     // Not a Raised state → no retained value.
     let mut clean = load_source("1 + 1\n");
-    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion);
+    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion)
+        .expect("valid drive");
     assert!(clean.raised_value_handle().is_none());
 }
 
@@ -2565,7 +2569,7 @@ fn drive_multi(main: &str, mods: &[(&str, &str)], gc_stress: bool) -> (Vec<u8>, 
     if gc_stress {
         inst.collect_at_every_safe_point();
     }
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     let terminal = loop {
         match outcome {
             Outcome::SuspendedImport(ref req) => {
@@ -2582,7 +2586,7 @@ fn drive_multi(main: &str, mods: &[(&str, &str)], gc_stress: bool) -> (Vec<u8>, 
                     },
                     None => ImportResolution::NotFound,
                 };
-                outcome = resolve_import(&mut inst, res);
+                outcome = resolve_import(&mut inst, res).expect("valid drive");
             }
             Outcome::Completed(v) => break Terminal::Value(value_repr(v)),
             Outcome::Raised(v, _) => break Terminal::Raised(inst.describe_raised(v).0),
@@ -2675,7 +2679,7 @@ fn an_import_bound_module_cell_survives_gc() {
     use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
     let mut inst = load_source_with_print("import lib\nprint(lib.answer)\n");
     inst.collect_at_every_safe_point();
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(_) = &outcome {
         outcome = resolve_import(
             &mut inst,
@@ -2683,7 +2687,8 @@ fn an_import_bound_module_cell_survives_gc() {
                 text: "const answer = 99\n".to_string(),
                 canonical_id: "lib".to_string(),
             },
-        );
+        )
+        .expect("valid drive");
     }
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"99\n");
@@ -2698,7 +2703,7 @@ fn a_failed_load_retains_its_exception_for_re_raise() {
     // `Error`.
     use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
     let mut inst = load_source_with_print("import boom\n");
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(_) = &outcome {
         outcome = resolve_import(
             &mut inst,
@@ -2706,7 +2711,8 @@ fn a_failed_load_retains_its_exception_for_re_raise() {
                 text: "let x = 1 / 0\n".to_string(),
                 canonical_id: "boom".to_string(),
             },
-        );
+        )
+        .expect("valid drive");
     }
     assert!(matches!(outcome, Outcome::Raised(..)), "{outcome:?}");
     assert_eq!(inst.failed_module_error_kinds(), vec!["division-by-zero"]);
@@ -2723,7 +2729,7 @@ fn a_sub_module_load_keeps_the_importers_globals_rooted_under_gc() {
     use crate::drive::{Directive, ImportResolution, Outcome, resolve_import, run};
     let mut inst = load_source_with_print("let g = [10, 20, 30]\nimport a\nprint(g[1])\n");
     inst.collect_at_every_safe_point();
-    let mut outcome = run(&mut inst, Directive::RunToCompletion);
+    let mut outcome = run(&mut inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(_) = &outcome {
         outcome = resolve_import(
             &mut inst,
@@ -2733,7 +2739,8 @@ fn a_sub_module_load_keeps_the_importers_globals_rooted_under_gc() {
                 text: "let junk = [1, 2, 3, 4, 5]\n".to_string(),
                 canonical_id: "a".to_string(),
             },
-        );
+        )
+        .expect("valid drive");
     }
     assert!(matches!(outcome, Outcome::Completed(None)), "{outcome:?}");
     assert_eq!(inst.output(), b"20\n");
@@ -2776,13 +2783,13 @@ fn step_out_stops_the_instant_a_fn_returns_before_a_sibling_runs() {
         let mut inst = load_source_with_print(src);
         // Step into `f` (its body runs at frame depth 2 — module frame is depth 1).
         loop {
-            let outcome = run(&mut inst, Directive::StepInto);
+            let outcome = run(&mut inst, Directive::StepInto).expect("valid drive");
             assert!(matches!(outcome, Outcome::Paused(_)), "src={src:?}");
             if inst.frame_depth() == 2 {
                 break;
             }
         }
-        let outcome = run(&mut inst, Directive::StepOut);
+        let outcome = run(&mut inst, Directive::StepOut).expect("valid drive");
         assert!(
             matches!(outcome, Outcome::Paused(_)),
             "src={src:?} {outcome:?}"
@@ -3063,7 +3070,8 @@ fn a_terminal_raise_retains_its_trace_across_collections() {
          end\n\
          countdown(5)\n",
     );
-    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion);
+    let outcome = crate::drive::run(&mut inst, crate::drive::Directive::RunToCompletion)
+        .expect("valid drive");
     assert!(
         matches!(outcome, crate::drive::Outcome::Raised(..)),
         "expected a terminal raise, got {outcome:?}"
@@ -3099,6 +3107,7 @@ fn a_terminal_raise_retains_its_trace_across_collections() {
 
     // A non-raised drive retains no trace.
     let mut clean = load_source("1 + 1\n");
-    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion);
+    let _ = crate::drive::run(&mut clean, crate::drive::Directive::RunToCompletion)
+        .expect("valid drive");
     assert!(clean.raised_trace_frame_count().is_none());
 }

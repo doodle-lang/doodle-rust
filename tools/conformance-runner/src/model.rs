@@ -171,6 +171,12 @@ pub(crate) enum StopAssertion {
     Import { path: String, pos: Position },
     /// `faulted <kind>` — a non-resumable engine fault of this kind.
     Faulted { kind: String },
+    /// `reject <reason>` — the call was **rejected** as invalid (E§7.5) and did nothing: the
+    /// instance is byte-for-byte unchanged and still drivable, so a later step resumes from the
+    /// same state. `reason` is `wrong-state` (the instance was not in a state the call permits) or
+    /// `bad-handle` (a stale/released/foreign resolution value handle). A rejection is *not* a
+    /// drive: it advances nothing and contributes no output/position to the transcript.
+    Rejected { reason: String },
 }
 
 /// One element of an asserted stack shape (`#! stack:`), a call frame: its call-site `line`, and

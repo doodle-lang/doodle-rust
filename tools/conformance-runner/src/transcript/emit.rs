@@ -6,12 +6,14 @@
 
 use super::{Event, Pos, StackElem, Stop, Terminal, Transcript};
 use crate::capability::{capability_name, registry};
-use crate::drive::{apply_setup, drive_action, fault_kind, paused_position, reason_name};
+use crate::drive::{
+    StepOutcome, apply_setup, drive_action, fault_kind, paused_position, reason_name,
+};
 use crate::matcher::{CapabilityQueues, build_resolution, error_messages};
 use crate::model::{Mode, Test};
 use doodle_core::drive::{
-    Directive, ImportResolution, Limits, Outcome, resolve as resolve_capability, resolve_import,
-    run,
+    Directive, DriveReject, ImportResolution, Limits, Outcome, resolve as resolve_capability,
+    resolve_import, run,
 };
 use doodle_core::machine::Instance;
 use doodle_core::parse::parse_program;
@@ -32,7 +34,14 @@ pub(crate) fn record_run(
     let mut events = Vec::new();
     let mut queues = CapabilityQueues::new(&test.inputs);
     let mut last_out = 0usize;
-    let mut outcome = run(&mut instance, Directive::RunToCompletion);
+    // Every drive/resolve in a `mode: run` transcript is a valid interaction; a rejection (E§7.5)
+    // is a mis-authored fixture, surfaced as a failure.
+    let reject_bug = |reject: DriveReject| {
+        vec![format!(
+            "a drive was rejected as invalid ({reject:?}) — a mis-authored fixture"
+        )]
+    };
+    let mut outcome = run(&mut instance, Directive::RunToCompletion).map_err(reject_bug)?;
     let terminal = loop {
         // Coalesce the output emitted since the last event into one `out:` run.
         let cur = instance.output().len();
@@ -44,7 +53,8 @@ pub(crate) fn record_run(
         match &outcome {
             Outcome::SuspendedImport(req) => {
                 let path: Vec<String> = req.path.iter().map(|s| s.to_string()).collect();
-                outcome = resolve_import(&mut instance, import_resolution(&path, modules_dir)?);
+                outcome = resolve_import(&mut instance, import_resolution(&path, modules_dir)?)
+                    .map_err(reject_bug)?;
             }
             Outcome::Suspended(req) => {
                 let cap_id = req.capability.0;
@@ -64,7 +74,7 @@ pub(crate) fn record_run(
                     let _ = instance.release(handle);
                 }
                 let resolution = build_resolution(&mut instance, &response).map_err(|e| vec![e])?;
-                outcome = resolve_capability(&mut instance, resolution);
+                outcome = resolve_capability(&mut instance, resolution).map_err(reject_bug)?;
             }
             Outcome::Completed(_) => break Terminal::Completed,
             Outcome::Raised(value, trace) => {
@@ -106,6 +116,13 @@ pub(crate) fn record_drive(
     for step in &script.steps {
         let outcome = drive_action(&mut instance, &step.action, &step.expect, modules_dir)
             .map_err(|e| vec![e])?;
+        // A rejected call (E§7.5) advanced nothing and produces **no transcript record** — it does
+        // not enter the recorded sequence. The fixture's `expect: reject` is the assertion the
+        // matcher checks; the oracle stays the executed-effects trace, which a rejection cannot
+        // touch (and the instance is unchanged, so the next step resumes from the same state).
+        let StepOutcome::Ran(outcome) = outcome else {
+            continue;
+        };
         events.push(Event::Step(super::render_action(&step.action)));
         events.push(Event::Stop(outcome_to_stop(
             &instance, &outcome, &index, &nfc,

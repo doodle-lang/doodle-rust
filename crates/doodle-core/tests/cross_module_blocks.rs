@@ -42,7 +42,7 @@ fn instance(main: &str) -> Instance {
 /// Drives `inst` as a bundling host, resolving each import against `modules` (dotted path to
 /// source, the path doubling as the canonical id) or `NotFound`.
 fn bundle_run(inst: &mut Instance, modules: &[(&str, &str)]) -> Outcome {
-    let mut outcome = run(inst, Directive::RunToCompletion);
+    let mut outcome = run(inst, Directive::RunToCompletion).expect("valid drive");
     while let Outcome::SuspendedImport(req) = &outcome {
         let path = req.path.join(".");
         outcome = match modules.iter().find(|(p, _)| *p == path) {
@@ -52,8 +52,9 @@ fn bundle_run(inst: &mut Instance, modules: &[(&str, &str)]) -> Outcome {
                     text: (*src).to_string(),
                     canonical_id: path,
                 },
-            ),
-            None => resolve_import(inst, ImportResolution::NotFound),
+            )
+            .expect("valid drive"),
+            None => resolve_import(inst, ImportResolution::NotFound).expect("valid drive"),
         };
     }
     outcome

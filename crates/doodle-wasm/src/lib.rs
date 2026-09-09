@@ -17,7 +17,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use doodle_core::drive::Directive;
+use doodle_core::drive::{Directive, DriveReject};
 use doodle_core::machine::Handle;
 use facade::{DriveOutcome, Session};
 
@@ -64,19 +64,28 @@ impl DoodleInstance {
     /// debugger passes the others. Throws on an unknown directive tag. Returns the
     /// [`DriveResult`].
     pub fn drive(&mut self, directive: &str, fuel: Option<u64>) -> Result<DriveResult, JsError> {
-        Ok(DriveResult {
-            outcome: self.session.drive(directive_of(directive)?, fuel),
-        })
+        let outcome = self
+            .session
+            .drive(directive_of(directive)?, fuel)
+            .map_err(reject_error)?;
+        Ok(DriveResult { outcome })
     }
 
     /// Resolves a pending capability with the value named by handle `value` (or raises it
     /// at the call site when `raise` is true), then resumes for at most `fuel` safe points
     /// (E§7.5). The resume runs under the directive in force at the suspend (so a step across
     /// a capability keeps stepping), not a fresh one.
-    pub fn resolve(&mut self, value: u64, raise: bool, fuel: Option<u64>) -> DriveResult {
-        DriveResult {
-            outcome: self.session.resolve(Handle::from_bits(value), raise, fuel),
-        }
+    pub fn resolve(
+        &mut self,
+        value: u64,
+        raise: bool,
+        fuel: Option<u64>,
+    ) -> Result<DriveResult, JsError> {
+        let outcome = self
+            .session
+            .resolve(Handle::from_bits(value), raise, fuel)
+            .map_err(reject_error)?;
+        Ok(DriveResult { outcome })
     }
 
     /// Requests cancellation (E§10.1) — the stop button, taking effect at the next safe
@@ -330,6 +339,19 @@ impl DriveResult {
             _ => None,
         }
     }
+}
+
+/// Maps an invalid-call [`DriveReject`] (E§7.5) to a thrown `JsError` — the reason is surfaced
+/// (not collapsed): the call did nothing and the instance is unchanged, so the host can correct it.
+fn reject_error(reject: DriveReject) -> JsError {
+    JsError::new(match reject {
+        DriveReject::WrongState => {
+            "invalid call: the instance is not in a state that permits this drive/resolve (E§7.5)"
+        }
+        DriveReject::BadHandle => {
+            "invalid resolution: a stale, released, or foreign value handle (E§7.5)"
+        }
+    })
 }
 
 /// Parses a drive-directive tag (E§7.3) — the drive-script `do:` vocabulary — to a

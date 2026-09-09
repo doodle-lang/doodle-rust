@@ -10,7 +10,9 @@ fn demo_runs_print_to_completion() {
     // The demo config (print-only, no prelude) matches the native conformance runner.
     let mut session = Session::demo("print(1 + 2)\n").unwrap();
     assert_eq!(
-        session.drive(Directive::RunToCompletion, None),
+        session
+            .drive(Directive::RunToCompletion, None)
+            .expect("valid drive"),
         DriveOutcome::Completed
     );
     assert_eq!(session.output(), b"3\n");
@@ -28,7 +30,9 @@ fn a_parse_error_fails_to_load_with_diagnostics() {
 #[test]
 fn division_by_zero_surfaces_a_tagged_raise() {
     let mut session = Session::demo("1 / 0\n").unwrap();
-    let outcome = session.drive(Directive::RunToCompletion, None);
+    let outcome = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     let DriveOutcome::Raised {
         kind,
         message,
@@ -47,7 +51,9 @@ fn a_terminal_raise_exposes_its_exception_value_for_inspection() {
     // R6: alongside the described kind/message, the retained exception value is inspectable by
     // handle (E§3.3/§8.4). Here the raised value is a string; in general an `Error` record.
     let mut session = Session::demo("raise \"boom\"\n").unwrap();
-    let outcome = session.drive(Directive::RunToCompletion, None);
+    let outcome = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     assert!(
         matches!(outcome, DriveOutcome::Raised { .. }),
         "{outcome:?}"
@@ -59,7 +65,9 @@ fn a_terminal_raise_exposes_its_exception_value_for_inspection() {
     session.release(handle).unwrap();
     // A clean completion has no retained exception.
     let mut clean = Session::demo("1 + 1\n").unwrap();
-    let _ = clean.drive(Directive::RunToCompletion, None);
+    let _ = clean
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     assert!(clean.raised_value().is_none());
 }
 
@@ -79,7 +87,9 @@ fn a_terminal_raise_exposes_its_trace_for_inspection() {
          countdown(5)\n",
     )
     .unwrap();
-    let outcome = session.drive(Directive::RunToCompletion, None);
+    let outcome = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     assert!(
         matches!(outcome, DriveOutcome::Raised { .. }),
         "{outcome:?}"
@@ -98,7 +108,9 @@ fn a_terminal_raise_exposes_its_trace_for_inspection() {
     );
     // A clean completion has no retained trace.
     let mut clean = Session::demo("1 + 1\n").unwrap();
-    let _ = clean.drive(Directive::RunToCompletion, None);
+    let _ = clean
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     assert!(clean.raised_trace().is_none());
 }
 
@@ -113,7 +125,9 @@ fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
         "the turtle library was prepended"
     );
 
-    let outcome = session.drive(Directive::RunToCompletion, None);
+    let outcome = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
     let DriveOutcome::Suspended { capability, args } = outcome else {
         panic!("expected Suspended, got {outcome:?}");
     };
@@ -130,7 +144,45 @@ fn a_turtle_forward_suspends_in_draw_line_and_resolves_to_completion() {
         session.release(h).unwrap();
     }
     let nil = session.make_nil();
-    assert_eq!(session.resolve(nil, false, None), DriveOutcome::Completed);
+    assert_eq!(
+        session.resolve(nil, false, None).expect("valid drive"),
+        DriveOutcome::Completed
+    );
+}
+
+#[test]
+fn an_invalid_call_is_rejected_and_leaves_the_session_unchanged() {
+    use doodle_core::drive::DriveReject;
+    // E§7.5: an invalid call surfaces the full `DriveReject` reason (not collapsed) and does
+    // nothing — the session is unchanged and a corrected call still succeeds.
+    let mut session = Session::turtle("forward(10)\n").unwrap();
+    let outcome = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive");
+    let DriveOutcome::Suspended { args, .. } = outcome else {
+        panic!("expected Suspended, got {outcome:?}");
+    };
+    for &h in &args {
+        session.release(h).unwrap();
+    }
+    // Resolve with a released (stale) handle: rejected, the suspension intact.
+    let stale = session.make_nil();
+    session.release(stale).unwrap();
+    assert!(matches!(
+        session.resolve(stale, false, None),
+        Err(DriveReject::BadHandle)
+    ));
+    // Unchanged, so a fresh valid resolve completes the module.
+    let nil = session.make_nil();
+    assert_eq!(
+        session.resolve(nil, false, None).expect("valid drive"),
+        DriveOutcome::Completed
+    );
+    // Re-driving the terminal session is rejected (wrong state), not faulted.
+    assert!(matches!(
+        session.drive(Directive::RunToCompletion, None),
+        Err(DriveReject::WrongState)
+    ));
 }
 
 #[test]
@@ -141,7 +193,9 @@ fn current_user_position_tracks_the_user_line_not_the_library() {
     // live line highlight of the user's program (M3.7).
     let mut session = Session::turtle("forward(10)\n").unwrap();
     let prelude = session.prelude_bytes();
-    let DriveOutcome::Suspended { args, .. } = session.drive(Directive::RunToCompletion, None)
+    let DriveOutcome::Suspended { args, .. } = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive")
     else {
         panic!("expected Suspended");
     };
@@ -199,8 +253,9 @@ fn the_int_boundary_carries_a_bignum_capability_argument() {
     // decode (the failure mode the M3.9 review found in the pump).
     let huge = "1000000000000000000000000000000"; // 10^30, past i64
     let mut session = Session::turtle(&format!("pencolor({huge}, 0, 0)\nforward(1)\n")).unwrap();
-    let DriveOutcome::Suspended { capability, args } =
-        session.drive(Directive::RunToCompletion, None)
+    let DriveOutcome::Suspended { capability, args } = session
+        .drive(Directive::RunToCompletion, None)
+        .expect("valid drive")
     else {
         panic!("expected a draw_line suspend");
     };
@@ -237,17 +292,22 @@ fn a_stepped_and_a_fast_demo_reach_the_same_output() {
     // Determinism through the facade (E§7.7): fuel-slicing does not change the result.
     let mut fast = Session::demo("print(6 * 7)\n").unwrap();
     assert_eq!(
-        fast.drive(Directive::RunToCompletion, None),
+        fast.drive(Directive::RunToCompletion, None)
+            .expect("valid drive"),
         DriveOutcome::Completed
     );
 
     let mut sliced = Session::demo("print(6 * 7)\n").unwrap();
-    let mut outcome = sliced.drive(Directive::RunToCompletion, Some(1));
+    let mut outcome = sliced
+        .drive(Directive::RunToCompletion, Some(1))
+        .expect("valid drive");
     for _ in 0..10_000 {
         if outcome != DriveOutcome::Paused("slice-end") {
             break;
         }
-        outcome = sliced.drive(Directive::RunToCompletion, Some(1));
+        outcome = sliced
+            .drive(Directive::RunToCompletion, Some(1))
+            .expect("valid drive");
     }
     assert_eq!(outcome, DriveOutcome::Completed);
     assert_eq!(fast.output(), sliced.output());
@@ -290,7 +350,9 @@ fn a_breakpoint_pauses_continue_and_exposes_locals_and_inspection() {
     );
 
     assert_eq!(
-        session.drive(Directive::Continue, None),
+        session
+            .drive(Directive::Continue, None)
+            .expect("valid drive"),
         DriveOutcome::Paused("breakpoint")
     );
 
@@ -347,7 +409,9 @@ fn a_breakpoint_pauses_continue_and_exposes_locals_and_inspection() {
 
     // The generation is invalidated by the next drive, so a stale frame read is a clean error.
     assert_eq!(
-        session.drive(Directive::Continue, None),
+        session
+            .drive(Directive::Continue, None)
+            .expect("valid drive"),
         DriveOutcome::Completed
     );
     assert!(matches!(
@@ -360,7 +424,7 @@ fn a_breakpoint_pauses_continue_and_exposes_locals_and_inspection() {
 fn step_stops_at_the_next_safe_point() {
     let mut session = Session::demo("print(1)\nprint(2)\n").unwrap();
     assert_eq!(
-        session.drive(Directive::Step, None),
+        session.drive(Directive::Step, None).expect("valid drive"),
         DriveOutcome::Paused("step")
     );
 }
@@ -372,7 +436,7 @@ fn current_result_reads_the_value_at_a_fine_stop() {
     let mut session = Session::demo("let x = 2 + 3\nprint(x)\n").unwrap();
     session.set_observation_mode(true);
     for _ in 0..50 {
-        match session.drive(Directive::Step, None) {
+        match session.drive(Directive::Step, None).expect("valid drive") {
             DriveOutcome::Paused(_) => {
                 if session.completed_position().is_some()
                     && let Some(handle) = session.current_result()
@@ -397,7 +461,9 @@ fn module_globals_read_through_the_session_with_generation_gating() {
     let mut session = Session::demo("let count = 7\nconst name = \"hi\"\nprint(count)\n").unwrap();
     session.set_breakpoint("playground", 3);
     assert_eq!(
-        session.drive(Directive::Continue, None),
+        session
+            .drive(Directive::Continue, None)
+            .expect("valid drive"),
         DriveOutcome::Paused("breakpoint")
     );
 
@@ -424,7 +490,9 @@ fn module_globals_read_through_the_session_with_generation_gating() {
 
     // A drive invalidates the generation, so a later global read errors cleanly.
     assert_eq!(
-        session.drive(Directive::Continue, None),
+        session
+            .drive(Directive::Continue, None)
+            .expect("valid drive"),
         DriveOutcome::Completed
     );
     assert!(matches!(
@@ -439,7 +507,9 @@ fn raise_trap_pauses_before_unwinding_then_resumes_to_the_raise() {
     session.set_raise_trapping(true);
 
     assert_eq!(
-        session.drive(Directive::Continue, None),
+        session
+            .drive(Directive::Continue, None)
+            .expect("valid drive"),
         DriveOutcome::Paused("raise-trap")
     );
     let raised = session.trapped_raise().expect("the trapped raise value");
@@ -451,7 +521,9 @@ fn raise_trap_pauses_before_unwinding_then_resumes_to_the_raise() {
     );
 
     // Resuming continues the unwind to the uncaught raise (E§8.7).
-    let after = session.drive(Directive::Continue, None);
+    let after = session
+        .drive(Directive::Continue, None)
+        .expect("valid drive");
     let DriveOutcome::Raised { message, .. } = after else {
         panic!("expected Raised, got {after:?}");
     };

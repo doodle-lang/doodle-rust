@@ -674,6 +674,54 @@ fn a_capability_suspends_exposes_its_args_and_resolves() {
 }
 
 #[test]
+fn an_invalid_call_is_rejected_as_contract_and_changes_nothing() {
+    // E§7.5: an invalid call (a stale resolution handle, a re-drive of a terminal instance, a
+    // resolve at the wrong time) is rejected as `ErrContract`, changing nothing; the host retries.
+    // Under Miri this also exercises the use-after-release handle path on resolve.
+    let inst = load_with(
+        "draw_line(1, 2, 3, 4, 5, 6, 7, 8)\n",
+        &[DoodleBuiltin::DrawLine],
+    );
+    let out = drive(inst);
+    assert_eq!(out.kind, DoodleOutcomeKind::Suspended);
+
+    // Resolve with a RELEASED (stale) handle: the handle is validated before the suspension is
+    // consumed, so the call is rejected and the suspension is left intact.
+    let stale = make_nil(inst);
+    assert_eq!(unsafe { doodle_release(inst, stale) }, DoodleStatus::Ok);
+    let mut rejected = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, stale, &mut rejected) },
+        DoodleStatus::ErrContract
+    );
+    // The instance is unchanged, so a fresh valid resolve still completes the program.
+    let nil = make_nil(inst);
+    let mut done = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, nil, &mut done) },
+        DoodleStatus::Ok
+    );
+    assert_eq!(done.kind, DoodleOutcomeKind::Completed);
+    unsafe { doodle_release(inst, nil) };
+
+    // The instance is now terminal: re-driving it is rejected (not faulted).
+    let mut redrive = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_drive(inst, DoodleDirective::RunToCompletion as u32, &mut redrive) },
+        DoodleStatus::ErrContract
+    );
+    // Resolving a non-suspended instance is likewise rejected.
+    let v = make_nil(inst);
+    let mut r2 = DoodleOutcome::blank();
+    assert_eq!(
+        unsafe { doodle_resolve(inst, v, &mut r2) },
+        DoodleStatus::ErrContract
+    );
+    unsafe { doodle_release(inst, v) };
+    unsafe { doodle_free(inst) };
+}
+
+#[test]
 fn a_resolved_fn_capability_value_flows_into_the_program() {
     // `print` (registered first) + `read_line` (a `fn` capability): the resolved value is
     // printed. Registration order is replay identity (§11): print=0, read_line=1.

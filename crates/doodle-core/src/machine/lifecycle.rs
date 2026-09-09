@@ -142,11 +142,12 @@ impl Instance {
     /// Void for a `to` capability), clears the pending request. `resolve` then resumes
     /// the drive so the caller's continuation consumes the result.
     pub(crate) fn resume_with_value(&mut self, handle: Handle) -> Result<(), HandleError> {
-        // Take the pending request first, so a stale resolution handle (a host-contract
-        // violation) still clears the suspension — the drive then faults it terminally
-        // rather than leaving a resumable half-state (`resolve`, E§3.3).
-        let pending = self.take_capability();
+        // Validate the resolution handle **before** consuming the suspension, so a bad handle
+        // leaves the instance byte-for-byte unchanged (still `Suspended`): the caller rejects
+        // the call and the host resolves again with a valid handle. Validating first makes the
+        // half-state the old consume-first order risked *unconstructible* (E§7.5).
         let value = self.machine.handles.resolve(handle)?;
+        let pending = self.take_capability();
         // A `to` capability yields Void regardless of the resolution value (E§7.5).
         self.machine.reg = if self.machine.intrinsics.kind_of(pending.capability) == BodyKind::Proc
         {
@@ -163,10 +164,10 @@ impl Instance {
     /// re-driving runs cleanup and lets a `try` around the call catch it, or drains to the
     /// terminal `Raised`. Errors on a stale handle.
     pub(crate) fn resume_with_raise(&mut self, handle: Handle) -> Result<(), HandleError> {
-        // Take the pending request first (see `resume_with_value`): a stale handle must
-        // still clear the suspension so the drive can fault it terminally.
-        let pending = self.take_capability();
+        // Validate the resolution handle before consuming the suspension (see
+        // `resume_with_value`): a bad handle leaves the instance unchanged and resumable.
         let value = self.machine.handles.resolve(handle)?;
+        let pending = self.take_capability();
         let trace = super::observe::capture_trace(
             self.current_resolved(),
             &self.machine,

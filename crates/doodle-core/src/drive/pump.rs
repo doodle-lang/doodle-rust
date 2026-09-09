@@ -4,7 +4,7 @@
 //! ([`should_pause`], E§8.5). Split from the host entry points and outcome types in the
 //! parent `drive` module to keep that file within the hygiene length limit.
 
-use super::{Directive, EngineFault, Outcome, PauseReason, SafePoint, SafePointKind};
+use super::{Directive, Outcome, PauseReason, SafePoint, SafePointKind};
 use crate::machine::{Halt, Instance, InstanceState};
 
 /// The core drive loop: steps `instance` to a stopping [`Outcome`] under `directive`,
@@ -125,14 +125,6 @@ pub(super) fn drive(instance: &mut Instance, directive: Directive, fuel: Option<
             }
         }
     }
-}
-
-/// Terminally faults `instance` on a host-contract violation (e.g. a stale resolution
-/// handle): sets the state to `Faulted` so a returned `Faulted` outcome always implies
-/// `state() == Faulted` (E§3.3 outcome↔state correspondence).
-pub(super) fn fault(instance: &mut Instance) -> Outcome {
-    instance.set_state(InstanceState::Faulted);
-    Outcome::Faulted(EngineFault::Internal)
 }
 
 /// Whether `sp` stops the given `directive`, anchored at the depth the drive's step began

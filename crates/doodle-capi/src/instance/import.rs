@@ -139,13 +139,14 @@ fn resolve_import_and_fill(
     if out_outcome.is_null() {
         return DoodleStatus::ErrNullPointer;
     }
-    // `pending_import` is `Some` exactly while `SuspendedImport` (set by `fill_outcome`); a
-    // defined `ErrContract` beats the engine's non-suspended-resolve fault.
-    if di.pending_import.is_none() {
-        return DoodleStatus::ErrContract;
-    }
     let outcome = resolve_import(&mut di.inner, resolution);
-    // Resolving an import advances the drive (it continues past the parked import).
+    // An invalid import resolution — the instance is not suspended on an import, or the raise
+    // handle is stale/foreign — is rejected, changing nothing (E§7.5): `ErrContract`, no outcome
+    // written, the import suspension intact. A resolve that runs always advances.
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => return DoodleStatus::ErrContract,
+    };
     let filled = fill_outcome(di, outcome, true);
     // SAFETY: `out_outcome` is non-null (checked) and writable/aligned for a `DoodleOutcome`.
     unsafe { *out_outcome = filled };
