@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# The embedder guide (build/link recipe + the handle-ownership, string-validity, and
+# invalid-call-reject contracts): part of the C-ABI distribution artifact (D-M7-10).
+readme = "README.md"
 publish = false
 
 # A staticlib is the embedding-friendly form: the C host links the archive
